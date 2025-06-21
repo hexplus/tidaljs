@@ -63,7 +63,7 @@ sound("bd sn").superimpose(x => x.fast(2).up(12)).overlay("hh*4")
             await tidal.init();
             
             // Start live coding!
-            sound("bd sn bd sn").play();
+            sound("bd sn bd sn")
         }
         
         // Click to start (required for browser audio policy)
@@ -92,13 +92,13 @@ open index.html
 
 ```javascript
 // Simple drum pattern
-sound("bd sn bd sn").play()
+sound("bd sn bd sn")
 
 // With effects
-sound("bd sn bd sn").lpf(600).reverb(0.3).play()
+sound("bd sn bd sn").lpf(600).reverb(0.3)
 
 // Mini-notation with subdivisions
-sound("bd*2 sn bd sn*3").play()
+sound("bd*2 sn bd sn*3")
 ```
 
 ### Time Transformations
@@ -314,7 +314,7 @@ await tidal.init();
 sound("bd sn bd sn")
   .every(4, x => x.fast(2))
   .sometimes(x => x.lpf(600))
-  .play();
+  
 
 // Welcome to live coding! 🎵
 ```
