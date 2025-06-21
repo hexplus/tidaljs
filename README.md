@@ -8,6 +8,10 @@ A JavaScript implementation of [Tidal Cycles](https://tidalcycles.org/) for web 
 [![Phase 1](https://img.shields.io/badge/Phase%201-100%25%20Complete-brightgreen.svg)](#phase-1-complete)
 [![Live Demo](https://img.shields.io/badge/Live-Demo-blue.svg)](#demo)
 
+## 🚀 Demo
+
+- **[Live TidalJS Editor](https://hexplus.github.io/tidaljs/)** - Live Demo
+
 ## ✨ Features
 
 ### 🏆 **Phase 1 Complete - Professional Live Coding System**
