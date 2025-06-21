@@ -10,7 +10,7 @@ A JavaScript implementation of [Tidal Cycles](https://tidalcycles.org/) for web 
 
 ## 🚀 Demo
 
-- **[Live TidalJS Editor](https://hexplus.github.io/tidaljs/)** - Live Demo
+- **[Live TidalJS Editor](https://hexplus.github.io/tidaljs/)** - Live Demo (No mobile browsers compatibility)
 
 ## ✨ Features
 
