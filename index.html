@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TidalJS Live Coding Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+            height: 80vh;
+        }
+        
+        .editor-section {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+        }
+        
+        button {
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(238, 90, 36, 0.3);
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(238, 90, 36, 0.4);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .stop-btn {
+            background: linear-gradient(45deg, #74b9ff, #0984e3);
+            box-shadow: 0 4px 15px rgba(9, 132, 227, 0.3);
+        }
+        
+        .stop-btn:hover {
+            box-shadow: 0 6px 20px rgba(9, 132, 227, 0.4);
+        }
+        
+        .tempo-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: auto;
+        }
+        
+        .tempo-control input {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 15px;
+            width: 80px;
+            text-align: center;
+        }
+        
+        .code-editor {
+            width: 100%;
+            height: calc(100% - 60px);
+            background: rgba(0,0,0,0.6);
+            color: #00ff88;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            resize: none;
+            outline: none;
+        }
+        
+        .code-editor:focus {
+            border-color: #00ff88;
+            box-shadow: 0 0 10px rgba(0, 255, 136, 0.3);
+        }
+        
+        .sidebar {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            overflow-y: auto;
+            max-height: 80vh;
+        }
+        
+        .sidebar h3 {
+            margin-bottom: 15px;
+            color: #00ff88;
+            font-size: 1.3rem;
+        }
+        
+        .section-title {
+            color: #ff6b6b;
+            font-size: 1.1rem;
+            margin: 20px 0 10px 0;
+            border-bottom: 1px solid rgba(255,107,107,0.3);
+            padding-bottom: 5px;
+        }
+        
+        .example {
+            background: rgba(0,0,0,0.4);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .example:hover {
+            background: rgba(0,255,136,0.1);
+            border-color: #00ff88;
+            transform: translateY(-2px);
+        }
+        
+        .example h4 {
+            color: #74b9ff;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+        }
+        
+        .example code {
+            display: block;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            color: #ddd;
+            white-space: pre-wrap;
+            line-height: 1.3;
+        }
+        
+        .status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        
+        .playing {
+            background: rgba(0, 255, 136, 0.2);
+            border-color: #00ff88;
+        }
+        
+        .docs {
+            margin-top: 20px;
+            font-size: 11px;
+            opacity: 0.8;
+            line-height: 1.4;
+        }
+        
+        .docs h4 {
+            color: #ff6b6b;
+            margin: 12px 0 6px 0;
+            font-size: 12px;
+        }
+        
+        .docs ul {
+            margin-left: 15px;
+        }
+        
+        .docs li {
+            margin-bottom: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 TidalJS Live Coding</h1>
+        </div>
+        
+        <div class="main-content">
+            <div class="editor-section">
+                <div class="controls">
+                    <button id="playBtn">▶ Play</button>
+                    <button id="stopBtn" class="stop-btn">⏹ Stop</button>
+                    <div class="tempo-control">
+                        <label>Tempo:</label>
+                        <input type="number" id="tempoInput" value="0.8" step="0.1" min="0.1" max="3.0">
+                        <span>CPS</span>
+                    </div>
+                </div>
+                
+                <textarea id="codeEditor" class="code-editor" placeholder="Type your Tidal patterns here...">// 🎉 Phase 1 Complete! Try these advanced patterns:
+
+sound("bd sn cp hh")
+  .every(4, x => x.fast(2))
+  .superimpose(x => x.up(12).vowel("i"))
+  .overlay("arpy arpy*4")
+  .note("c e g a")
+  .lpf(800)
+  .reverb(0.3)</textarea>
+            </div>
+            
+            <div class="sidebar">
+                <h3>🏆 Phase 1 Complete!</h3>
+                
+                <div class="section-title">1.1 Pattern Fundamentals</div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>sound() + n() - Sample Numbers</h4>
+                    <code>sound("bd sn").n("0 1 2")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>note() - Musical Notes</h4>
+                    <code>sound("arpy").note("c e g c")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>up() - Transpose Semitones</h4>
+                    <code>sound("arpy").note("c e g").up("0 12 7")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>freq() - Direct Frequency</h4>
+                    <code>sound("sine").freq("440 554 659")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>midinote() - MIDI Notes</h4>
+                    <code>sound("arpy").midinote("60 64 67")</code>
+                </div>
+                
+                <div class="section-title">1.2 Time Transforms</div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>every() - Every N Cycles</h4>
+                    <code>sound("bd sn bd sn")
+  .every(4, x => x.fast(2))</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>sometimes() - 50% Random</h4>
+                    <code>sound("bd sn bd sn")
+  .sometimes(x => x.gain(0.3))</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>often() - 75% Chance</h4>
+                    <code>sound("hh hh hh hh")
+  .often(x => x.lpf(800))</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>rarely() - 25% Chance</h4>
+                    <code>sound("bd sn bd sn")
+  .rarely(x => x.rev())</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>density() - Speed Without Pitch</h4>
+                    <code>sound("bd sn cp").density(1.5)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>whenmod() - Conditional</h4>
+                    <code>sound("bd sn bd sn")
+  .whenmod(8, 0, x => x.fast(2))</code>
+                </div>
+                
+                <div class="section-title">1.3 Audio Effects</div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>lpf() - Low Pass Filter</h4>
+                    <code>sound("hh*8").lpf(800)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>hpf() - High Pass Filter</h4>
+                    <code>sound("bd sn bd sn").hpf(200)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>bpf() - Band Pass Filter</h4>
+                    <code>sound("arpy*4").bpf(1000)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>delay() - Echo Effect</h4>
+                    <code>sound("cp ~ cp ~").delay(0.25)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>reverb() - Reverb Effect</h4>
+                    <code>sound("bd sn").reverb(0.4)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>distortion() - Distort</h4>
+                    <code>sound("bd sn bd sn").distortion(5)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>crush() - Bit Crushing</h4>
+                    <code>sound("arpy*4").crush(4)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>vowel() - Vowel Filters</h4>
+                    <code>sound("saw").note("c e g").vowel("a")</code>
+                </div>
+                
+                <div class="section-title">1.4 Composition</div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>cat() - Sequential Patterns</h4>
+                    <code>cat([
+  sound("bd sn"),
+  sound("hh cp")
+])</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>append() - Sequential Append</h4>
+                    <code>sound("bd").append("sn").append("cp")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>superimpose() - Layer Transform</h4>
+                    <code>sound("bd sn bd sn")
+  .superimpose(x => x.fast(2).up(12))</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>overlay() - Layer Simultaneous</h4>
+                    <code>sound("bd ~ bd ~")
+  .overlay("~ sn ~ sn")</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>layer() - Multiple Layers</h4>
+                    <code>layer([
+  sound("bd ~ bd ~"),
+  sound("~ sn ~ sn"),
+  sound("hh hh hh hh").gain(0.3)
+])</code>
+                </div>
+                
+                <div class="section-title">🔥 Advanced Combos</div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>Epic Live Coding Pattern</h4>
+                    <code>sound("bd sn cp hh")
+  .every(4, x => x.fast(2))
+  .superimpose(x => x.up(12).vowel("i"))
+  .overlay("arpy arpy*4")
+  .note("c e g a")
+  .lpf(800)
+  .reverb(0.3)</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>Complex Multi-Layer</h4>
+                    <code>stack([
+  sound("bd ~ bd ~")
+    .every(8, x => x.fast(2))
+    .sometimes(x => x.distortion(3)),
+  sound("~ sn ~ sn")
+    .superimpose(x => x.delay(0.125))
+    .often(x => x.gain(1.2)),
+  sound("hh*4")
+    .rarely(x => x.rev())
+    .lpf(1200)
+    .gain(0.4)
+])</code>
+                </div>
+                
+                <div class="example" onclick="loadExample(this)">
+                    <h4>Melodic + Rhythmic Combo</h4>
+                    <code>layer([
+  sound("arpy").note("c e g c")
+    .superimpose(x => x.up(12).vowel("i"))
+    .every(4, x => x.fast(1.5))
+    .reverb(0.4),
+  sound("bd sn bd sn")
+    .overlay("hh hh hh hh")
+    .sometimes(x => x.crush(6))
+])</code>
+                </div>
+                
+                <div class="docs">
+                    <h4>✅ Phase 1 Functions (34/34):</h4>
+                    <ul>
+                        <li><strong>Patterns:</strong> sound(), n(), note(), up(), freq(), midinote()</li>
+                        <li><strong>Time:</strong> fast(), slow(), rev(), density(), every(), sometimes(), often(), rarely(), almostNever(), almostAlways(), whenmod()</li>
+                        <li><strong>Effects:</strong> gain(), pan(), lpf(), hpf(), bpf(), delay(), reverb(), distortion(), crush(), vowel()</li>
+                        <li><strong>Compose:</strong> stack(), struct(), cat(), append(), superimpose(), overlay(), layer()</li>
+                    </ul>
+                    
+                    <h4>💡 Pro Tips:</h4>
+                    <ul>
+                        <li>Use <code>every()</code> for structured variations</li>
+                        <li>Combine <code>superimpose()</code> + <code>overlay()</code> for complex textures</li>
+                        <li><code>append()</code> creates sequences, <code>overlay()</code> creates layers</li>
+                        <li><code>vowel()</code> works great with melodic patterns</li>
+                        <li>Chain multiple <code>sometimes()</code> for unpredictable results</li>
+                    </ul>
+                    
+                    <h4>🎹 Keyboard Shortcuts:</h4>
+                    <ul>
+                        <li><code>Ctrl+Enter</code> - Play pattern</li>
+                        <li><code>Escape</code> - Stop all</li>
+                        <li>Click examples to load them</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="status" class="status">Ready</div>
+    
+    <!-- Import TidalJS Library -->
+    <script src="./tidal.js"></script>
+    
+    <script>
+        // Initialize TidalJS
+        let tidalInstance = null;
+        
+        // UI Elements
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const codeEditor = document.getElementById('codeEditor');
+        const tempoInput = document.getElementById('tempoInput');
+        const status = document.getElementById('status');
+        
+        // Initialize audio
+        async function initTidal() {
+            if (!tidalInstance) {
+                tidalInstance = new TidalJS();
+                const success = await tidalInstance.init();
+                if (success) {
+                    status.textContent = 'Audio initialized';
+                    status.classList.remove('playing');
+                } else {
+                    status.textContent = 'Audio failed to initialize';
+                }
+            }
+        }
+        
+        // Play patterns
+        async function playPatterns() {
+            await initTidal();
+            
+            const code = codeEditor.value;
+            if (code.trim()) {
+                const result = tidalInstance.eval(code);
+                if (result.success) {
+                    status.textContent = `Playing ${result.activePatterns} pattern(s)`;
+                    status.classList.add('playing');
+                } else {
+                    status.textContent = `Error: ${result.error}`;
+                    status.classList.remove('playing');
+                }
+            }
+        }
+        
+        // Stop all patterns
+        function stopPatterns() {
+            if (tidalInstance) {
+                tidalInstance.stopAll();
+                status.textContent = 'Stopped';
+                status.classList.remove('playing');
+            }
+        }
+        
+        // Update tempo
+        function updateTempo() {
+            if (tidalInstance) {
+                const newTempo = parseFloat(tempoInput.value);
+                tidalInstance.setCPS(newTempo);
+                status.textContent = `Tempo: ${newTempo} CPS`;
+            }
+        }
+        
+        // Load example into editor
+        function loadExample(element) {
+            const code = element.querySelector('code').textContent;
+            codeEditor.value = code;
+            codeEditor.focus();
+        }
+        
+        // Event listeners
+        playBtn.addEventListener('click', playPatterns);
+        stopBtn.addEventListener('click', stopPatterns);
+        tempoInput.addEventListener('change', updateTempo);
+        
+        // Keyboard shortcuts
+        codeEditor.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                e.preventDefault();
+                playPatterns();
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                stopPatterns();
+            }
+        });
+        
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            status.textContent = 'Ready - Click examples or type patterns';
+        });
+    </script>
+</body>
+</html>
