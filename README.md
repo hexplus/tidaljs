@@ -282,6 +282,7 @@ open index.html
 
 ## 📚 Resources
 
+- **[Live TidalJS Editor](https://hexplus.github.io/tidaljs/)** - Live TidalJS Editor
 - **[TidalCycles Documentation](https://tidalcycles.org/docs/)** - Original Haskell version
 - **[Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)** - Browser audio technology
 - **[Live Coding Community](https://toplap.org/)** - TOPLAP organization
