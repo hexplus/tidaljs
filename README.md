@@ -63,7 +63,7 @@ sound("bd sn").superimpose(x => x.fast(2).up(12)).overlay("hh*4")
             await tidal.init();
             
             // Start live coding!
-            sound("bd sn bd sn")
+            sound("bd sn bd sn").play();
         }
         
         // Click to start (required for browser audio policy)
@@ -313,7 +313,7 @@ await tidal.init();
 // Create your first pattern
 sound("bd sn bd sn")
   .every(4, x => x.fast(2))
-  .sometimes(x => x.lpf(600))
+  .sometimes(x => x.lpf(600)).play();
   
 
 // Welcome to live coding! 🎵
