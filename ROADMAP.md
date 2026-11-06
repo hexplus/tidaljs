@@ -262,6 +262,7 @@ Note: `export` is a JavaScript keyword, so the function is called `exportPattern
 | Phase 7: Samples and more of Tidal | 15 | Complete |
 | Phase 8: The rest of Tidal's library | 120+ | Complete (see the notes) |
 | Phase 9: Streams, transitions, stepwise | 40+ | Complete |
+| Phase 10: Library, export and import | - | Complete |
 
 ---
 
@@ -383,9 +384,18 @@ sound("piano").note("c e g")                           //        nearest recordi
 ```
 `github:user/repo/file.json` loads a manifest other than strudel.json.
 
+## Phase 10: Library, export and import (complete)
+
+The Library tab keeps sketches in the browser: IndexedDB, or localStorage where IndexedDB is not available (sketches saved in localStorage move to IndexedDB once it works; if neither is allowed they last until the page closes, and the tab says so).
+
+- Save the editor's code with a title (Ctrl+S); "Save changes" updates the open sketch, "Save as new" makes a copy. Each sketch keeps its tempo.
+- Open, rename (click the title), export or delete each sketch.
+- Export the editor's code as a `.js` file, or every sketch as one `.json` library.
+- Import a `.js`/`.txt` file (opens it in the editor) or a library `.json` (adds its sketches without overwriting saved ones), with the Import button or by dropping the file on the tab.
+
 ## What could come next
 
 - A visual pattern editor: draw steps on a grid and get the mini-notation
 - Recording a session (code and audio) to replay it
 - A MIDI input mapped to buses (`bus()`), like Tidal's control buses
-- Export and import, save to localstorage or WebDB
+- Sharing a sketch as a link (the code in the URL)

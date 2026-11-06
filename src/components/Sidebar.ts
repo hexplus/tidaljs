@@ -2,8 +2,9 @@ import { aside, button, code, dd, derived, div, dl, dt, each, effect, h3, input,
 import { EXAMPLES, type Example } from "../data/examples.ts";
 import { REFERENCE } from "../data/reference.ts";
 import type { Session } from "../session.ts";
+import { LibraryPanel, type Library } from "./Library.ts";
 
-type Tab = "examples" | "reference";
+type Tab = "examples" | "library" | "reference";
 
 /** Text with `backticks` turned into <code> elements. */
 function rich(text: string): (string | HTMLElement)[] {
@@ -97,7 +98,7 @@ function Reference() {
 }
 
 /** Examples and Reference, as tabs. */
-export function Sidebar(session: Session) {
+export function Sidebar(session: Session, library: Library) {
   const [tab, setTab] = signal<Tab>("examples");
 
   const tabButton = (id: string, name: Tab, panel: string, text: string) =>
@@ -117,11 +118,16 @@ export function Sidebar(session: Session) {
   return aside("sidebar panel", [
     div({ class: "tabs", role: "tablist" }, [
       tabButton("tabExamples", "examples", "panelExamples", "Examples"),
+      tabButton("tabLibrary", "library", "panelLibrary", "Library"),
       tabButton("tabReference", "reference", "panelReference", "Reference"),
     ]),
     div(
       { class: "tab-panel", id: "panelExamples", role: "tabpanel", "aria-labelledby": "tabExamples", hidden: () => tab() !== "examples" },
       ExampleList(session),
+    ),
+    div(
+      { class: "tab-panel", id: "panelLibrary", role: "tabpanel", "aria-labelledby": "tabLibrary", hidden: () => tab() !== "library" },
+      [LibraryPanel(library)],
     ),
     div(
       { class: "tab-panel ref", id: "panelReference", role: "tabpanel", "aria-labelledby": "tabReference", hidden: () => tab() !== "reference" },

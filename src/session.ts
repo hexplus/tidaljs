@@ -96,9 +96,15 @@ export function createSession() {
   /** The example in the editor: clicked in the list, or recognised from the code. */
   const [currentExample, setCurrentExample] = signal<Example | null>(exampleFor(initialCode, null));
 
+  /** Counts edits, so views can react to the text changing (the text itself lives in the editor). */
+  const [edits, setEdits] = signal(0);
+  /** Counts examples loaded from the list, so the library knows the editor holds a new, unsaved sketch. */
+  const [examplesLoaded, setExamplesLoaded] = signal(0);
+
   const editor: Editor = createEditor({
     initialCode,
     onChange(text) {
+      setEdits((n) => n + 1);
       scheduleLiveUpdate();
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => storage.set(KEYS.code, text), SAVE_DELAY);
@@ -257,8 +263,26 @@ export function createSession() {
   function loadExample(example: Example) {
     editor.setValue(example.code);
     setCurrentExample(example);
+    setEdits((n) => n + 1);
+    setExamplesLoaded((n) => n + 1);
     if (tidal?.isPlaying) void play();
     else report("", 'Loaded "' + example.title + '". Press Play or Ctrl+Enter.');
+  }
+
+  /** Puts code in the editor (a saved sketch or an imported file); plays it if music is playing. */
+  function openCode(code: string, title: string, cps?: number) {
+    editor.setValue(code);
+    setCurrentExample(exampleFor(code, null));
+    setEdits((n) => n + 1);
+    if (cps !== undefined && !/setCPS|setcps|setTempo/.test(code)) changeTempo(cps);
+    if (tidal?.isPlaying) void play();
+    else report("", 'Opened "' + title + '". Press Play or Ctrl+Enter.');
+  }
+
+  /** Shows a message in the status line. */
+  function notify(kind: "" | "warn" | "error", text: string) {
+    const playing = tidal?.isPlaying ? "playing" : "";
+    report(kind === "" ? playing : kind === "warn" ? (playing ? "playing warn" : "warn") : "error", text);
   }
 
   return {
@@ -281,6 +305,10 @@ export function createSession() {
     toggleRecording,
     changeTempo,
     loadExample,
+    openCode,
+    notify,
+    edits,
+    examplesLoaded,
     /** The engine once audio has started, for the cycle view. */
     engine: () => tidal,
   };

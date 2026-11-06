@@ -318,6 +318,7 @@ export const REFERENCE: ReferenceSection[] = [
             ['Ctrl+Enter', 'Evaluate and play (Cmd+Enter on Mac)'],
             ['Esc, Ctrl+.', 'Stop'],
             ['Tab', 'Indent'],
+            ['Ctrl+S', 'Save the code to the Library tab (Cmd+S on Mac)'],
             ['Ctrl+Space', 'Show suggestions; they also appear as you type'],
             ['Up, Down, Enter', 'Pick and insert a suggestion (Esc closes)'],
             ['Mouse over code', 'Explains the function, sound, note, chord or symbol under the pointer'],

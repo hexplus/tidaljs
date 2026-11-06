@@ -33,7 +33,7 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 - **Harmony**: notes, Tidal's 70+ scales (with the Arabic maqamat's quarter tones) and every chord of its table, arpeggios, inversions, strummed chords, `toScale`
 - **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, bipolar `sine2` and friends, envelopes `envL`/`envEq`, `brand`, with `range`, `rangex`, `segment`, `smooth`
 - **Output**: synthesised sounds, Web MIDI, OSC over WebSocket, audio recording, JSON and MIDI file export
-- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the palette buttons show the same help), an insert palette for every function (Tab moves between parameters), live update while playing, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
+- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the palette buttons show the same help), an insert palette for every function (Tab moves between parameters), live update while playing, a library of saved sketches (IndexedDB, or localStorage where it is not available) with export and import of `.js` and `.json` files, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
 - **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes), Christmas carols (Jingle Bells, Silent Night, Deck the Halls, We Wish You a Merry Christmas, Good King Wenceslas, Carol of the Bells), genre grooves (house, boom bap, bossa nova, jungle) and recorded samples from Dirt-Samples
 
 ```javascript
@@ -487,7 +487,7 @@ git clone https://github.com/hexplus/tidaljs.git
 cd tidaljs
 npm install
 npm run dev        # editor with hot reload
-npm test           # engine tests (tidal.js) and help checks (every example runs)
+npm test           # engine tests (tidal.js), help checks (every example runs) and library tests
 npm run build      # type-check and build into dist/
 npm run lint       # SibuJS lint rules
 ```
@@ -508,6 +508,7 @@ Every push and pull request runs the engine tests, the help checks, the type-che
 | `src/data/` | Examples, insert-palette snippets, function signatures, the extended help (`docs.ts`) and the Reference content. |
 | `test/engine.test.mjs` | Engine tests, run in Node with a fake audio context. |
 | `test/docs.test.mjs` | Checks the help in `src/data/docs.ts`: everything has a doc, and every example runs. |
+| `test/library.test.mjs` | Tests the sketch library: export and import files, merging, the localStorage store. |
 
 ### Areas for contribution
 
