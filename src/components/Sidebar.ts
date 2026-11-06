@@ -1,4 +1,4 @@
-import { aside, button, code, dd, derived, div, dl, dt, each, h3, input, p, signal, strong, when } from "sibujs";
+import { aside, button, code, dd, derived, div, dl, dt, each, effect, h3, input, nextTick, p, signal, span, strong, when } from "sibujs";
 import { EXAMPLES, type Example } from "../data/examples.ts";
 import { REFERENCE } from "../data/reference.ts";
 import type { Session } from "../session.ts";
@@ -13,6 +13,14 @@ function rich(text: string): (string | HTMLElement)[] {
 /** The examples, filtered, with a heading before each group. */
 function ExampleList(session: Session) {
   const [query, setQuery] = signal("");
+  const cards = new Map<Example, HTMLElement>();
+
+  // Bring the current example into view when it changes.
+  effect(() => {
+    const example = session.currentExample();
+    if (!example) return;
+    void nextTick().then(() => cards.get(example)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  });
 
   type Row = { key: string; group?: string; example?: Example };
   const rows = derived<Row[]>(() => {
@@ -47,10 +55,25 @@ function ExampleList(session: Session) {
           const { group, example } = row();
           if (!example) return div("group-title", [group ?? ""]);
           const clamped = example.code.split("\n").length > 6;
-          return button({ class: "example", type: "button", on: { click: () => session.loadExample(example) } }, [
-            strong(example.title),
-            code({ class: clamped ? "clamped" : "" }, example.code),
-          ]);
+          const selected = () => session.currentExample() === example;
+          const active = () => selected() && session.playing();
+          const card = button(
+            {
+              class: () => "example" + (selected() ? " selected" : "") + (active() ? " playing" : ""),
+              type: "button",
+              "aria-current": () => (selected() ? "true" : null),
+              on: { click: () => session.loadExample(example) },
+            },
+            [
+              div("example-head", [
+                strong(example.title),
+                span({ class: "example-badge", hidden: () => !active() }, [span({ class: "badge-dot", "aria-hidden": "true" }), "Playing"]),
+              ]),
+              code({ class: clamped ? "clamped" : "" }, example.code),
+            ],
+          );
+          cards.set(example, card);
+          return card;
         },
         { key: (row) => row.key },
       ),

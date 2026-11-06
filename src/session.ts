@@ -3,7 +3,7 @@
  * update and recording. Components read the signals and call the actions.
  */
 import { effect, signal } from "sibujs";
-import { DEFAULT_CODE, type Example } from "./data/examples.ts";
+import { DEFAULT_CODE, EXAMPLES, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
@@ -41,9 +41,32 @@ export interface Status {
 
 export type Session = ReturnType<typeof createSession>;
 
+export const TEMPO_MIN = 0.05;
+export const TEMPO_MAX = 10;
+
+/** Tempo in cycles per second from typed text ("0.8" or "0,8"), within limits; 0.8 when unreadable. */
 export function parseTempo(value: string): number {
-  const v = parseFloat(value);
-  return Number.isFinite(v) && v > 0 ? Math.min(10, Math.max(0.05, v)) : 0.8;
+  const v = parseFloat(String(value).replace(",", "."));
+  return Number.isFinite(v) && v > 0 ? clampTempo(v) : 0.8;
+}
+
+export function clampTempo(cps: number): number {
+  return Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, Math.round(cps * 1000) / 1000));
+}
+
+/**
+ * The example the code comes from: one whose whole code is in it (the longest
+ * such), or else `current` if its first line, the title comment of songs and
+ * grooves, is still there after editing.
+ */
+function exampleFor(text: string, current: Example | null): Example | null {
+  let best: Example | null = null;
+  for (const example of EXAMPLES) {
+    if (text.includes(example.code) && (!best || example.code.length > best.code.length)) best = example;
+  }
+  if (best) return best;
+  const firstLine = current?.code.split("\n")[0].trim();
+  return current && firstLine && firstLine.startsWith("//") && text.includes(firstLine) ? current : null;
 }
 
 export function createSession() {
@@ -66,8 +89,15 @@ export function createSession() {
   const report = (kind: StatusKind, text: string, warnings: string[] = []) => setStatus({ kind, text, warnings });
 
   const savedCode = storage.get(KEYS.code);
+  const initialCode = savedCode && savedCode.trim() ? savedCode : DEFAULT_CODE;
+
+  /** True while the engine plays (kept in sync after every action and by syncPlaying()). */
+  const [playing, setPlaying] = signal(false);
+  /** The example in the editor: clicked in the list, or recognised from the code. */
+  const [currentExample, setCurrentExample] = signal<Example | null>(exampleFor(initialCode, null));
+
   const editor: Editor = createEditor({
-    initialCode: savedCode && savedCode.trim() ? savedCode : DEFAULT_CODE,
+    initialCode,
     onChange(text) {
       scheduleLiveUpdate();
       clearTimeout(saveTimer);
@@ -114,6 +144,7 @@ export function createSession() {
     const text = editor.getValue();
     const result = engine.eval(text, { keepOnWarnings: live });
     lastRunCode = text;
+    syncPlaying();
     setTempo(+engine.cps.toFixed(3));
     editor.showProblems(result, text);
     const where = result.location ? " (line " + result.location.line + ")" : "";
@@ -140,15 +171,24 @@ export function createSession() {
     }
   }
 
+  /** Reads the engine's play state; cheap enough to call every frame. */
+  function syncPlaying() {
+    setPlaying(!!tidal && tidal.isPlaying);
+  }
+
   async function play() {
     clearTimeout(liveTimer);
     const engine = await ensureTidal();
-    if (engine) runCode(engine, false);
+    if (!engine) return;
+    runCode(engine, false);
+    setCurrentExample(exampleFor(editor.getValue(), currentExample()));
+    syncPlaying();
   }
 
   function stop() {
     clearTimeout(liveTimer);
     tidal?.stopAll();
+    syncPlaying();
     report("", "Stopped.");
   }
 
@@ -193,6 +233,7 @@ export function createSession() {
 
   function loadExample(example: Example) {
     editor.setValue(example.code);
+    setCurrentExample(example);
     if (tidal?.isPlaying) void play();
     else report("", 'Loaded "' + example.title + '". Press Play or Ctrl+Enter.');
   }
@@ -201,6 +242,9 @@ export function createSession() {
     editor,
     status,
     tempo,
+    playing,
+    syncPlaying,
+    currentExample,
     recording,
     liveEnabled,
     setLiveEnabled,

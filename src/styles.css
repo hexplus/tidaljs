@@ -11,6 +11,8 @@
     --accent-ink: #062b1f;
     --error: #ff7a85;
     --warn: #e8b764;
+    --playing: #7aa2f7;
+    --playing-ink: #0b1630;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --radius: 10px;
@@ -93,6 +95,31 @@ kbd {
 .btn.primary:hover { background: #6ee0b8; }
 .btn[aria-pressed="true"] { background: #3a1d22; border-color: var(--error); color: var(--error); }
 
+/* Play: a fixed width so "Play" and "Playing" do not shift the bar. While
+   playing it turns blue, with a pulsing dot and a soft glow. */
+#playBtn { min-width: 9.5rem; justify-content: center; transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, color 0.2s; }
+.play-pulse {
+    display: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+}
+.btn.primary.is-playing {
+    background: var(--playing);
+    border-color: var(--playing);
+    color: var(--playing-ink);
+    box-shadow: 0 0 0 3px rgba(122, 162, 247, 0.18), 0 0 18px rgba(122, 162, 247, 0.35);
+}
+.btn.primary.is-playing:hover { background: #98b7fa; border-color: #98b7fa; }
+.btn.primary.is-playing .play-pulse { display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.6); }
+}
+
+/* Tempo stepper */
 .tempo {
     display: flex;
     align-items: center;
@@ -101,16 +128,58 @@ kbd {
     color: var(--muted);
     padding-left: 8px;
 }
-.tempo input {
-    width: 72px;
-    padding: 7px 8px;
+.stepper {
+    display: inline-flex;
+    align-items: stretch;
+    height: 34px;
     border-radius: 8px;
     border: 1px solid var(--border);
     background: var(--bg);
-    font-family: var(--mono);
-    text-align: right;
+    overflow: hidden;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
-.tempo output { font-family: var(--mono); min-width: 7ch; }
+.stepper:hover { border-color: #3a4150; }
+.stepper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 209, 165, 0.15); }
+.tempo-step {
+    width: 30px;
+    border: none;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    transition: background 0.12s, color 0.12s;
+}
+.tempo-step:first-child { border-right: 1px solid var(--border); }
+.tempo-step:last-child { border-left: 1px solid var(--border); }
+.tempo-step:hover { background: #222834; color: var(--text); }
+.tempo-step:active { background: #24302b; color: var(--accent); }
+.tempo-step:focus-visible { outline: none; background: #24302b; color: var(--accent); }
+.tempo-field {
+    width: 58px;
+    border: none;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    text-align: center;
+}
+.tempo-field:focus-visible { outline: none; }
+.tempo-unit { font-family: var(--mono); font-size: 0.78rem; }
+.tempo-bpm {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    min-width: 8ch;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    text-align: center;
+}
 
 /* Layout */
 .layout {
@@ -324,7 +393,42 @@ kbd {
     transition: border-color 0.15s, background 0.15s;
 }
 .example:hover { border-color: var(--accent); background: #1c2229; }
-.example strong { display: block; font-size: 0.85rem; margin-bottom: 6px; }
+.example-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.example strong { display: block; flex: 1; min-width: 0; font-size: 0.85rem; }
+.example.selected {
+    border-color: var(--accent);
+    background: #18241f;
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+.example.selected strong { color: var(--accent); }
+.example.playing {
+    border-color: var(--playing);
+    background: #182033;
+    box-shadow: inset 3px 0 0 var(--playing), 0 0 0 1px rgba(122, 162, 247, 0.25);
+}
+.example.playing strong { color: var(--playing); }
+.example-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(122, 162, 247, 0.16);
+    color: var(--playing);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.example-badge[hidden] { display: none; }
+.badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.2s ease-in-out infinite;
+}
 .example code {
     display: block;
     font-family: var(--mono);
@@ -426,14 +530,40 @@ kbd {
     font-size: 0.85rem;
     color: var(--muted);
 }
-.palette-head select {
-    padding: 6px 28px 6px 10px;
+.select-wrap { position: relative; display: inline-flex; flex: none; }
+.select-wrap::after {
+    content: "";
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    margin-top: -5px;
+    border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted);
+    transform: rotate(45deg);
+    pointer-events: none;
+    transition: border-color 0.15s;
+}
+.select-wrap:hover::after, .select-wrap:focus-within::after { border-color: var(--accent); }
+.select {
+    appearance: none;
+    -webkit-appearance: none;
+    min-width: 170px;
+    height: 32px;
+    padding: 0 34px 0 12px;
     border-radius: 8px;
     border: 1px solid var(--border);
-    background: var(--bg);
+    background: linear-gradient(180deg, #1c2029, #161a21);
+    color: var(--text);
     font-size: 0.85rem;
+    font-weight: 600;
     cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
+.select:hover { border-color: #3a4150; }
+.select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 209, 165, 0.15); }
+.select option { background: var(--panel); color: var(--text); font-weight: 400; }
 .palette-hint {
     flex: 1;
     min-width: 0;
@@ -474,4 +604,9 @@ kbd {
     .transport { margin-left: 0; width: 100%; }
     .brand .brand-tagline { display: none; }
     kbd { display: none; }
+    #playBtn { min-width: 7rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .play-pulse, .badge-dot { animation: none !important; }
 }

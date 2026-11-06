@@ -48,14 +48,19 @@ export function Palette(session: Session) {
   return div("palette panel", [
     div("palette-head", [
       label({ for: "snippetCategory" }, "Insert"),
-      select(
-        {
-          id: "snippetCategory",
-          "aria-label": "Snippet category",
-          on: { change: (e) => setCategory((e.target as HTMLSelectElement).value) },
-        },
-        Object.keys(SNIPPETS).map((name) => option({ value: name, selected: () => category() === name }, name)),
-      ),
+      div("select-wrap", [
+        select(
+          {
+            id: "snippetCategory",
+            class: "select",
+            "aria-label": "Snippet category",
+            on: { change: (e) => setCategory((e.target as HTMLSelectElement).value) },
+          },
+          Object.keys(SNIPPETS).map((name) =>
+            option({ value: name, selected: () => category() === name }, name + " (" + SNIPPETS[name].length + ")"),
+          ),
+        ),
+      ]),
       span({ id: "snippetHint", class: "palette-hint", "aria-live": "polite" }, [
         () => {
           const current = hint();

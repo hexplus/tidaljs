@@ -1,5 +1,5 @@
 import { a, button, div, effect, h1, header, input, kbd, label, output, p, path, span, svg } from "sibujs";
-import { parseTempo, type Session } from "../session.ts";
+import { clampTempo, parseTempo, type Session } from "../session.ts";
 
 const REPOSITORY = "https://github.com/hexplus/tidaljs";
 
@@ -22,32 +22,107 @@ function GitHubLink() {
   );
 }
 
-/** Brand, transport buttons, live update toggle and tempo. */
-export function TopBar(session: Session) {
-  const { tempo, recording, liveEnabled, setLiveEnabled } = session;
+const STEP = 0.05; // cps per press (Shift: 0.01)
+const FINE_STEP = 0.01;
 
-  const tempoInput = input({
+const formatTempo = (cps: number) => cps.toFixed(2);
+
+/**
+ * Tempo in cycles per second: a field with − and + buttons. Buttons repeat
+ * while held; the arrow keys and the mouse wheel step the field; Shift steps
+ * finer. The beats per minute are shown next to it.
+ */
+function TempoStepper(session: Session) {
+  const { tempo } = session;
+  const nudge = (direction: number, fine: boolean) =>
+    session.changeTempo(clampTempo(tempo() + direction * (fine ? FINE_STEP : STEP)));
+
+  const field = input({
     id: "tempoInput",
-    type: "number",
-    value: "0.8",
-    step: "0.05",
-    min: "0.05",
-    max: "10",
+    class: "tempo-field",
+    type: "text",
     inputmode: "decimal",
+    autocomplete: "off",
+    value: formatTempo(tempo()),
+    "aria-label": "Tempo in cycles per second",
     on: {
       input: (e) => session.changeTempo(parseTempo((e.target as HTMLInputElement).value)),
       change: (e) => {
-        const el = e.target as HTMLInputElement;
-        el.value = String(parseTempo(el.value));
+        (e.target as HTMLInputElement).value = formatTempo(tempo());
+      },
+      keydown: (e) => {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          nudge(e.key === "ArrowUp" ? 1 : -1, e.shiftKey);
+          field.value = formatTempo(tempo());
+        } else if (e.key === "Enter") {
+          field.value = formatTempo(tempo());
+          field.blur();
+        }
+      },
+      wheel: (e) => {
+        if (document.activeElement !== field) return;
+        e.preventDefault();
+        nudge(e.deltaY < 0 ? 1 : -1, e.shiftKey);
+        field.value = formatTempo(tempo());
       },
     },
   });
 
-  // Show the engine's tempo (code can call setCPS) unless the field is being edited.
+  // Show the engine's tempo (code can call setCPS) unless the field is being typed in.
   effect(() => {
-    const value = String(tempo());
-    if (document.activeElement !== tempoInput) tempoInput.value = value;
+    const value = formatTempo(tempo());
+    if (document.activeElement !== field) field.value = value;
   });
+
+  /** A − or + button that repeats while held. */
+  const stepButton = (direction: number, text: string, label: string) => {
+    let delay: ReturnType<typeof setTimeout> | undefined;
+    let repeat: ReturnType<typeof setInterval> | undefined;
+    const release = () => {
+      clearTimeout(delay);
+      clearInterval(repeat);
+    };
+    return button(
+      {
+        class: "tempo-step",
+        type: "button",
+        title: label + " (Shift: finer)",
+        "aria-label": label,
+        on: {
+          pointerdown: (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            const fine = e.shiftKey;
+            nudge(direction, fine);
+            delay = setTimeout(() => {
+              repeat = setInterval(() => nudge(direction, fine), 70);
+            }, 400);
+          },
+          pointerup: release,
+          pointerleave: release,
+          pointercancel: release,
+          // Keyboard activation (Enter or Space) arrives as a click with no pointer.
+          click: (e) => {
+            if (e.detail === 0) nudge(direction, e.shiftKey);
+          },
+        },
+      },
+      text,
+    );
+  };
+
+  return div({ class: "tempo", role: "group", "aria-label": "Tempo" }, [
+    span("tempo-label", ["Tempo"]),
+    div("stepper", [stepButton(-1, "−", "Slower"), field, stepButton(1, "+", "Faster")]),
+    span("tempo-unit", ["cps"]),
+    output({ id: "bpmOutput", class: "tempo-bpm", for: "tempoInput" }, () => Math.round(tempo() * 240) + " bpm"),
+  ]);
+}
+
+/** Brand, transport buttons, live update toggle and tempo. */
+export function TopBar(session: Session) {
+  const { recording, liveEnabled, setLiveEnabled, playing } = session;
 
   return header("topbar", [
     div("brand", [
@@ -61,8 +136,19 @@ export function TopBar(session: Session) {
     ]),
     div("transport", [
       button(
-        { id: "playBtn", class: "btn primary", type: "button", title: "Evaluate and play (Ctrl+Enter)", on: { click: () => void session.play() } },
-        ["Play ", kbd("Ctrl+Enter")],
+        {
+          id: "playBtn",
+          class: () => "btn primary" + (playing() ? " is-playing" : ""),
+          type: "button",
+          title: () => (playing() ? "Playing. Press to apply your changes (Ctrl+Enter)" : "Evaluate and play (Ctrl+Enter)"),
+          "aria-label": () => (playing() ? "Playing. Apply changes" : "Play"),
+          on: { click: () => void session.play() },
+        },
+        [
+          span({ class: "play-pulse", "aria-hidden": "true" }),
+          span("play-label", [() => (playing() ? "Playing" : "Play")]),
+          kbd("Ctrl+Enter"),
+        ],
       ),
       button(
         { id: "stopBtn", class: "btn", type: "button", title: "Stop all patterns (Esc)", on: { click: session.stop } },
@@ -88,12 +174,7 @@ export function TopBar(session: Session) {
         }),
         " Live update",
       ]),
-      label({ class: "tempo", for: "tempoInput" }, [
-        "Tempo",
-        tempoInput,
-        "cps",
-        output({ id: "bpmOutput", for: "tempoInput" }, () => Math.round(tempo() * 240) + " bpm"),
-      ]),
+      TempoStepper(session),
     ]),
   ]);
 }

@@ -40,6 +40,8 @@ export function CycleView(session: Session) {
     ctx2d.fillStyle = "#1f242d";
     for (let i = 0; i <= 4; i++) ctx2d.fillRect(Math.min(w - 1, Math.round((w * i) / 4)), 0, 1, h);
 
+    // The engine can stop on its own (stopAll() in code, a pattern error).
+    session.syncPlaying();
     const engine = session.engine();
     if (!engine || !engine.isPlaying) {
       cachedCycle = null;
