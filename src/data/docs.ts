@@ -564,7 +564,8 @@ export const SCALE_DOCS: Record<string, string> = {
 };
 
 /** Help for a snippet of the insert palette, by its label and code. */
-export function docForLabel(label: string): Doc | undefined {
+export function docForLabel(label: string, category?: string): Doc | undefined {
+    if (category === 'Sounds' && SOUND_DOCS[label]) return SOUND_DOCS[label];
     const alias = LABEL_ALIASES[label];
     if (alias) return alias;
     const name = label.replace(/^\./, '').replace(/\(.*\)$/, '').split(' ')[0];

@@ -41,9 +41,11 @@ for (const name of Object.keys(METHOD_SIGNATURES)) ok(DOCS[name], 'no doc for .'
 for (const name of ['silence', 'sine', 'cosine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'const', 'let']) ok(DOCS[name], 'no doc for ' + name);
 for (const name of TidalJS.soundNames) ok(SOUND_DOCS[name], 'no doc for sound ' + name);
 for (const name of TidalJS.scaleNames) ok(SCALE_DOCS[name], 'no doc for scale ' + name);
-for (const [, list] of Object.entries(SNIPPETS)) {
-    for (const snippet of list) ok(docForLabel(snippet.l), 'no doc for palette button ' + snippet.l);
+for (const [category, list] of Object.entries(SNIPPETS)) {
+    for (const snippet of list) ok(docForLabel(snippet.l, category), 'no doc for palette button ' + snippet.l);
 }
+// Sound buttons explain the synth, not the signal of the same name.
+for (const name of ['sine', 'saw', 'square', 'tri']) ok(docForLabel(name, 'Sounds') === SOUND_DOCS[name], 'sound button ' + name);
 
 // "See also" names exist.
 const all = { ...DOCS, ...GLOBAL_DOCS, ...SOUND_DOCS };

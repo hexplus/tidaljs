@@ -17,7 +17,7 @@ export function Palette(session: Session) {
         () => SNIPPETS[category()].map((snippet, i) => ({ snippet, key: category() + ":" + i })),
         (row) => {
           const { snippet } = row();
-          const doc = docForLabel(snippet.l);
+          const doc = docForLabel(snippet.l, category());
           return button(
             {
               class: "chip",

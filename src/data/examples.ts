@@ -131,6 +131,99 @@ sound("square")
   .lpf(1800).legato(1).gain(0.35)
   .room(0.8).size(1)` },
 
+    { group: 'Christmas', title: 'Jingle Bells (Pierpont, 1857)', code: `// Jingle Bells - James Lord Pierpont (1857), the chorus. One cycle = one bar.
+setCPS(0.6)
+
+const chorus = "<[e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [e4@2 d4@2 d4@2 e4@2] [d4 g4] [e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [g4 g4 f4 d4] c4>"
+
+stack([
+  sound("arpy").note(chorus).up(12).room(0.3),
+  sound("tri").note(chorus).legato(0.8).gain(0.4),
+  // Oom-pah: the bass note, then the chord.
+  sound("saw").note("<[c3 g2]!4 [f2 c3] [c3 g2] [d3 a2] [g2 d3] [c3 g2]!4 [f2 c3] [c3 g2] [g2 d3] [c3 c3]>")
+    .lpf(600).legato(0.7).gain(0.6),
+  // Sleigh bells
+  sound("hh*8").gain("0.5 0.25").hpf(6000).pan(perlin.range(-0.5, 0.5)),
+  sound("bd ~ bd ~").gain(0.7)
+])` },
+
+    { group: 'Christmas', title: 'Silent Night (Gruber, 1818)', code: `// Silent Night - Franz Xaver Gruber (1818). One cycle = one bar of 6/8.
+setCPS(0.42)
+
+sound("tri")
+  .note("<[g4@3 a4 g4@2] e4 [g4@3 a4 g4@2] e4 [d5@4 d5@2] b4 [c5@4 c5@2] g4 [a4@4 a4@2] [c5@3 b4 a4@2] [g4@3 a4 g4@2] e4 [a4@4 a4@2] [c5@3 b4 a4@2] [g4@3 a4 g4@2] e4 [d5@4 d5@2] [f5@3 d5 b4@2] c5 e5 [c5@3 g4 e4@2] [g4@3 f4 d4@2] c4 ~>")
+  .legato(1).attack(0.04).gain(0.6).room(0.5).size(0.8)
+
+// The guitar: each chord broken into six eighth notes, rising over two octaves.
+const chords = { C: "c3'maj'6", F: "f2'maj'6", G: "g2'dom7'6" }
+const harmony = "C C C C G G C C F F C C F F C C G G C C C G C C"
+
+sound("arpy")
+  .note("<" + harmony.split(" ").map(c => chords[c]).join(" ") + ">")
+  .arp("up").gain(0.45).room(0.4)` },
+
+    { group: 'Christmas', title: 'Deck the Halls (traditional)', code: `// Deck the Halls - traditional Welsh carol (16th century). One cycle = one bar.
+setCPS(0.55)
+
+const line = "[g4@3 f4 e4@2 d4@2] [c4@2 d4@2 e4@2 c4@2] [d4 e4 f4 d4 e4@3 d4] [c4@2 b3@2 c4@4]"
+const middle = "[d4@3 e4 f4@2 d4@2] [e4@3 f4 g4@2 d4@2] [e4 f#4 g4@2 a4 b4 c5@2] [b4@2 a4@2 g4@4]"
+const last = "[g4@3 f4 e4@2 d4@2] [c4@2 d4@2 e4@2 c4@2] [a4 a4 a4 a4 g4@3 f4] [e4@2 d4@2 c4@4]"
+
+stack([
+  sound("square").note("<" + [line, line, middle, last].join(" ") + ">")
+    .lpf(2400).legato(0.9).gain(0.35).room(0.3),
+  sound("saw").note("<c3 c3 g2 [g2 c3] c3 c3 g2 [g2 c3] g2 c3 [a2 d3] [d3 g2] c3 c3 [f2 g2] [g2 c3]>")
+    .lpf(500).legato(1).gain(0.55),
+  sound("tri").note("<c4'maj!2 g3'dom7 c4'maj!3 g3'dom7 c4'maj g3'maj c4'maj d4'maj g3'maj c4'maj!2 f3'maj c4'maj>")
+    .struct("~ x ~ x").legato(0.5).gain(0.2)
+])` },
+
+    { group: 'Christmas', title: 'We Wish You a Merry Christmas (traditional)', code: `// We Wish You a Merry Christmas - traditional English carol. One cycle = one bar of 3/4.
+setCPS(0.45)
+
+stack([
+  sound("arpy")
+    .note("<[g4@2 g4 a4 g4 f#4] [e4@2 e4@2 e4@2] [a4@2 a4 b4 a4 g4] [f#4@2 d4@2 d4@2] [b4@2 b4 c5 b4 a4] [g4@2 e4@2 d4 d4] [e4@2 a4@2 f#4@2] [g4@4 d4@2] [g4@2 g4@2 g4@2] [f#4@4 f#4@2] [g4@2 f#4@2 e4@2] [d4@4 a4@2] [b4@2 a4 a4 g4 g4] [d5@2 d4@2 d4 d4] [e4@2 a4@2 f#4@2] [g4@4 d4@2]>")
+    .up(12).room(0.3),
+  // Waltz: bass on beat one, chord on two and three.
+  sound("saw").note("<g2 c3 a2 d3 b2 [c3 d3] [c3 d3] g2 g2 d3 e3 d3 g2 d3 [c3 d3] g2>")
+    .struct("x ~ ~").lpf(500).legato(1).gain(0.6),
+  sound("tri").note("<g3'maj c4'maj a3'min d4'dom7 b3'min [c4'maj d4'maj] [c4'maj d4'maj] g3'maj g3'maj d4'maj e4'min d4'maj g3'maj d4'maj [c4'maj d4'maj] g3'maj>")
+    .struct("~ x x").legato(0.6).gain(0.2),
+  sound("~ hh hh").gain(0.3).hpf(7000)
+])` },
+
+    { group: 'Christmas', title: 'Good King Wenceslas (traditional)', code: `// Good King Wenceslas - melody from Piae Cantiones (1582). One cycle = one bar.
+setCPS(0.5)
+
+const verse = "[g4 g4 g4 a4] [g4 g4 d4@2] [e4 d4 e4 f#4] [g4@2 g4@2]"
+const tune = "<" + [verse, verse,
+  "[d5 c5 b4 a4] [b4 a4 g4@2] [e4 d4 e4 f#4] [g4@2 g4@2]",
+  "[d4 d4 e4 f#4] [g4 g4 a4@2] [d5 c5 b4 a4] [g4@2 c5@2] g4"].join(" ") + ">"
+
+sound("tri").note(tune).legato(0.9).gain(0.55).room(0.4)
+sound("tri").note(tune).up(-12).lpf(1200).legato(0.9).gain(0.3)
+sound("saw")
+  .note("<g2 [g2 d3] [c3 d3] g2 g2 [g2 d3] [c3 d3] g2 [b2 d3] [e3 d3] [c3 d3] g2 [b2 d3] [e3 d3] [g2 d3] [e3 c3] g2>")
+  .lpf(450).legato(1).gain(0.55)
+// Church bells
+sound("<cy ~ ~ ~>").speed(0.5).gain(0.3).room(0.6)` },
+
+    { group: 'Christmas', title: 'Carol of the Bells (Leontovych, 1916)', code: `// Shchedryk - Mykola Leontovych (1916), known in English as Carol of the Bells.
+// Its four-note bell figure in G minor never stops; voices join it every four bars
+// over a falling bass. One cycle = one bar of 3/4.
+setCPS(0.6)
+
+const bell = "[bb4@2 a4 bb4 g4@2]"
+
+stack([
+  sound("arpy").note(bell).gain(0.7),
+  sound("tri").note("<~!4 [d5@2 c5 d5 bb4@2]!12>").legato(0.9).gain(0.4).pan(-0.4),
+  sound("tri").note("<~!8 [g5@2 f5 g5 d5@2]!8>").legato(0.9).gain(0.3).pan(0.4),
+  sound("sine").note("<~!12 [d6 c6 bb5 a5 g5 f#5]!4>").gain(0.25).delay(0.25).room(0.5),
+  sound("saw").note("<g2 g2 f2 f2 eb2 eb2 d2 d2>").lpf(400).legato(1).gain(0.5)
+])` },
+
     { group: 'Grooves', title: 'House', code: `// House: four-on-the-floor kick, offbeat open hats and a filtered bassline. 128 bpm.
 setCPS(0.533)
 
