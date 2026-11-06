@@ -20,11 +20,13 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 
 ## Features
 
-- **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`; `speed`, `begin`/`end`, `chop`, `striate`, `slice`, `splice`, `loopAt`, `randslice`, `loop` and `legato` work on the recordings
+- **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`, including pitched banks (one recording every few notes, such as a piano) that `note()` plays in tune; `speed`, `begin`/`end`, `chop`, `striate`, `slice`, `splice`, `loopAt`, `randslice`, `loop` and `legato` work on the recordings
 - **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, ranges (`"0 .. 7"`), chords, and patterned modifiers (`"bd*<2 3>"`, `"bd(<3 5>,8)"`)
 - **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `ply`, `iter`, `linger`, `rot`, `off`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`..., with patterned arguments such as `fast("<1 2>")`
 - **Composition**: `stack`, `cat`, `timeCat`, `wrandcat`, `superimpose`, `jux`, `euclid`, `euclidFull`, `nTake`, `sew`, `stitch`, `wedge`, `mask`, `select`, `squeeze`, `spread`, `pickF`, `fix`...
-- **Tidal's operators**: every control is also a function (`n("0 2")`, `speed(2)`), combined with `.set()` (`#`), `.add()` (`|+`), `.sub()`, `.mul()`, `.div()`, `.mod()`; `d1` to `d16`, `once`, `qtrigger`
+- **Tidal's operators**: every control is also a function (`n("0 2")`, `speed(2)`), combined with `.set()` (`#`), `.add()` (`|+`), `.sub()`, `.mul()`, `.div()`, `.mod()`; `once`, `qtrigger`
+- **Streams and transitions**: `d1` to `d16` and `p("name", ...)` streams, with mute and solo buttons in the editor (and `mute`/`solo` in code); transitions between versions of a stream: `xfadeIn`, `jumpIn`, `jumpMod`, `clutchIn`, `anticipateIn`, `interpolateIn`, `wait`, `mortal`
+- **Stepwise and structure**: patterns count their steps, as in Tidal: `stepcat`, `steptake`, `stepdrop`, `expand`, `contract`, `extend`, `pace`, `stepalt`, `stepzip`; `ur` song structures, `inhabit`, `weave`, `swap`, `chew`, `snowball`
 - **Echoes and repeats**: `echo`, `echoWith`, `stut`, `stutter`, `plyWith`, `ghost`, `rolled`
 - **Randomness and conditions**: `sometimes` and its relatives, `someCyclesBy`, `degradeBy`, `fadeIn`/`fadeOut`, `randcat`, `markovPat`, `within`, `while`, `when`, `ifp`, `foldEvery`, `inside`/`outside`, `until`, `playFor`
 - **Audio effects**: filters with resonance, the DJ filter, delay (level, time and feedback, as in Tidal) and reverb per orbit, distortion and `shape`, bit crushing, `coarse`, vowel formants, tremolo, phaser, ring modulation, cut groups, `accelerate`, envelopes
@@ -126,6 +128,19 @@ samples({ kick: ["kick1.wav", "kick2.wav"] }, "https://example.com/samples/")
 ```
 
 A manifest is a JSON object of bank names and file lists, with an optional `_base` URL (the format Strudel uses). `samples()` returns a promise; in the editor the code runs again once the samples have loaded. Files are loaded and decoded the first time they are needed.
+
+### Streams and transitions
+
+As in Tidal, patterns play in streams: `d1(...)` to `d16(...)`, or `p("name", ...)`. The editor shows every stream above the cycle view, with buttons to mute (M) and solo (S) it. A transition changes a stream from its previous pattern to a new one:
+
+```javascript
+d1(sound("bd*4"))                           // play this first...
+xfadeIn(1, 8, sound("bd*2 [~ bd] sn ~"))    // ...then this crossfades d1 over 8 cycles
+jumpMod(1, 4, sound("bd sn"))               // or switch at the next cycle divisible by 4
+mute(2); solo("drums"); unmuteAll()
+```
+
+While you type, live updates keep the streams whose events did not change, so editing one line does not restart a transition in another.
 
 ### Tidal's operators
 

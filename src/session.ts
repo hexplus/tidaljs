@@ -7,7 +7,7 @@ import { DEFAULT_CODE, EXAMPLES, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
-import { TidalJS, type Tidal } from "./engine.ts";
+import { TidalJS, type StreamInfo, type Tidal } from "./engine.ts";
 
 const KEYS = { code: "tidaljs:code", live: "tidaljs:live", category: "tidaljs:snippetCategory" };
 const LIVE_DELAY = 700; // ms of quiet before a live update
@@ -142,7 +142,8 @@ export function createSession() {
   /** Runs the editor code. Live updates keep the old music on warnings. */
   function runCode(engine: Tidal, live: boolean) {
     const text = editor.getValue();
-    const result = engine.eval(text, { keepOnWarnings: live });
+    // Live updates keep streams whose events have not changed (and their transitions) as they are.
+    const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live });
     lastRunCode = text;
     syncPlaying();
     setTempo(+engine.cps.toFixed(3));
@@ -171,9 +172,31 @@ export function createSession() {
     }
   }
 
-  /** Reads the engine's play state; cheap enough to call every frame. */
+  /** The playing streams (d1, #1...) with their mute and solo state. */
+  const [streams, setStreams] = signal<StreamInfo[]>([]);
+  let streamsKey = "";
+
+  /** Reads the engine's play state and streams; cheap enough to call every frame. */
   function syncPlaying() {
     setPlaying(!!tidal && tidal.isPlaying);
+    const list = tidal && tidal.isPlaying ? tidal.streamInfo() : [];
+    const key = JSON.stringify(list);
+    if (key !== streamsKey) {
+      streamsKey = key;
+      setStreams(list);
+    }
+  }
+
+  function toggleMute(name: string) {
+    if (!tidal) return;
+    tidal.mute(name, !tidal.muted.has(name));
+    syncPlaying();
+  }
+
+  function toggleSolo(name: string) {
+    if (!tidal) return;
+    tidal.solo(name, !tidal.soloed.has(name));
+    syncPlaying();
   }
 
   async function play() {
@@ -244,6 +267,9 @@ export function createSession() {
     tempo,
     playing,
     syncPlaying,
+    streams,
+    toggleMute,
+    toggleSolo,
     currentExample,
     recording,
     liveEnabled,

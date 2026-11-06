@@ -1,4 +1,4 @@
-import { canvas, div, onMount, signal, span } from "sibujs";
+import { button, canvas, div, each, onMount, signal, span } from "sibujs";
 import type { PatternEvent } from "../engine.ts";
 import type { Session } from "../session.ts";
 
@@ -90,8 +90,36 @@ export function CycleView(session: Session) {
     ctx2d.fillRect(Math.round(progress * w), 0, 2, h);
   }
 
+  // One chip per playing stream, with mute (M) and solo (S) toggles.
+  const streamChips = div({ class: "streams", role: "group", "aria-label": "Streams" }, [
+    each(
+      () => session.streams(),
+      (row) => {
+        const name = row().name;
+        const toggle = (label: string, title: string, pressed: () => boolean, action: () => void) =>
+          button(
+            {
+              class: "stream-toggle",
+              type: "button",
+              title: title + " " + name,
+              "aria-label": title + " " + name,
+              "aria-pressed": () => (pressed() ? "true" : "false"),
+              on: { click: action },
+            },
+            label,
+          );
+        return div({ class: () => "stream" + (row().audible ? "" : " silent") }, [
+          span("stream-name", [name]),
+          toggle("M", "Mute", () => row().muted, () => session.toggleMute(name)),
+          toggle("S", "Solo", () => row().soloed, () => session.toggleSolo(name)),
+        ]);
+      },
+      { key: (s) => s.name },
+    ),
+  ]);
+
   const root = div("cycle panel", [
-    div("cycle-head", [span({ id: "cycleLabel" }, () => cycleLabel()), span("one cycle")]),
+    div("cycle-head", [span({ id: "cycleLabel" }, () => cycleLabel()), streamChips, span("one cycle")]),
     view,
   ]);
 

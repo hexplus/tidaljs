@@ -80,6 +80,12 @@ export const GLOBALS: CompletionItem[] = ([
   ["sine2", "value"], ["cosine2", "value"], ["saw2", "value"], ["isaw2", "value"], ["tri2", "value"], ["square2", "value"],
   ["envL", "value"], ["envLR", "value"], ["envEq", "value"], ["envEqR", "value"], ["once", "fn"],
   ...Array.from({ length: 16 }, (_, i) => ["d" + (i + 1), "fn"]),
+  ["p", "fn"], ["xfade", "fn"], ["xfadeIn", "fn"], ["jump", "fn"], ["jumpIn", "fn"], ["jumpMod", "fn"],
+  ["clutch", "fn"], ["clutchIn", "fn"], ["anticipate", "fn"], ["anticipateIn", "fn"], ["interpolate", "fn"], ["interpolateIn", "fn"],
+  ["wait", "fn"], ["mortal", "fn"], ["mute", "fn"], ["unmute", "fn"], ["solo", "fn"], ["unsolo", "fn"],
+  ["unmuteAll", "call"], ["unsoloAll", "call"],
+  ["stepcat", "fn"], ["s_cat", "fn"], ["stepalt", "fn"], ["stepzip", "fn"],
+  ["ur", "fn"], ["inhabit", "fn"], ["swap", "fn"], ["weave", "fn"], ["snowball", "fn"],
   // Controls on their own: n("0 2"), speed(2)
   ...CONTROL_NAMES.filter((name) => name !== "s" && name !== "sound").map((name) => [name, "fn"]),
   ["const", "kw"], ["let", "kw"],

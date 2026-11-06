@@ -28,6 +28,7 @@ export const REFERENCE: ReferenceSection[] = [
             ['samples("github:user/repo")', 'The banks in a repository\'s strudel.json'],
             ['samples(url)', 'A strudel.json manifest at any URL'],
             ['samples({ name: [files] }, base)', 'Your own files'],
+            ['samples({ piano: { C4: "c4.mp3", ... } })', 'A pitched bank: note() picks the nearest recording'],
             ['.speed(x)', 'Rate and pitch; negative plays backwards'],
             ['.begin(x) .end(x)', 'Play part of the sample'],
             ['.chop(n) .striate(n)', 'Slice samples into parts'],
@@ -48,6 +49,40 @@ export const REFERENCE: ReferenceSection[] = [
             ['.qtrigger() .trigger()', 'Restart the pattern when the code runs'],
         ],
         after: 'Differences from Tidal: note names use scientific octaves (`a4` is 440 Hz, `c4` middle C; Tidal calls them `a5` and `c5`), `pan` goes from -1 to 1, and functions that take a function, such as `every`, take a JavaScript arrow function: `x => x.fast(2)`.',
+    },
+    {
+        title: 'Streams and transitions',
+        notes: [
+            'Patterns play in streams: `d1(...)` to `d16(...)`, `p("name", ...)`, and `#1`, `#2`... for patterns without one. They appear above the cycle view with mute (M) and solo (S) buttons. A transition changes a stream from its previous pattern: play something in the stream first, then evaluate the transition. While you type (live update), streams whose events did not change keep playing as they were.',
+        ],
+        items: [
+            ['d1(p) p("name", p)', 'Play in a stream'],
+            ['xfadeIn(1, 8, p) xfade(1, p)', 'Crossfade (4 cycles by default)'],
+            ['jumpIn(1, 2, p) jumpMod(1, 4, p)', 'Switch after n cycles; at a cycle divisible by n'],
+            ['clutchIn(1, 4, p) clutch(1, p)', 'Swap events at random'],
+            ['anticipateIn(1, 4, p) anticipate(1, p)', 'Echo faster and faster, then switch'],
+            ['interpolateIn(1, 8, p) interpolate(1, p)', 'Glide numeric controls'],
+            ['wait(1, 2, p) mortal(1, 4, 2, p)', 'Silence first; play then fade'],
+            ['mute(1) solo(1) unmuteAll() unsoloAll()', 'Mute and solo streams'],
+        ],
+    },
+    {
+        title: 'Stepwise',
+        notes: [
+            'Patterns count their steps: `"bd sn hh"` has 3, `"bd@3 sn"` 4, `"<a b>"` 1. These functions work in steps instead of cycles.',
+        ],
+        items: [
+            ['stepcat(a, b, ..)', 'Join patterns, each given time by its steps'],
+            ['.steptake(n) .stepdrop(n)', 'Keep or drop steps'],
+            ['.expand(x) .contract(x) .extend(x)', 'Change the steps (extend also repeats)'],
+            ['.pace(n)', 'Play n steps per cycle'],
+            ['stepalt([[..], [..]]) stepzip([..])', 'Alternate or interleave steps'],
+            ['.steps()', 'How many steps a pattern has'],
+            ['ur(n, "a b:fx", { a, b }, { fx })', 'A song structure of named patterns'],
+            ['inhabit({ a, b }, "a [b a]")', 'Named patterns squeezed into steps'],
+            ['swap({ a: "bd" }, "a b") weave(n, ctrl, [..])', 'Value table; a control spread over patterns'],
+            ['.snowball(n, combine, f) .chew(n, i)', 'Accumulate f; bite with speed'],
+        ],
     },
     {
         title: 'Mini-notation',

@@ -555,6 +555,100 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(JSON.stringify(sound('cp').delay(0.5).delaytime(0.25).delayfeedback(0.4).query(0, 1)[0].value), '{"s":"cp","delay":0.5,"delaytime":0.25,"delayfeedback":0.4}');
     eq(JSON.stringify(sound('cp').sz(0.9).lpq(5).dfb(0.3).query(0, 1)[0].value), '{"s":"cp","size":0.9,"resonance":5,"delayfeedback":0.3}');
     eq(sound('cp').unit('x').query(0, 1)[0].value.unit, undefined);
+
+    // Steps, as Tidal counts them
+    eq([sound('bd sn').steps(), sound('bd [sn sn]').steps(), sound('bd@3 sn').steps(), sound('<a b>').steps(), sound('{a b c}%4').steps()].join(), '2,2,4,1,4');
+    eq(sound('bd sn').fast(2).n(1).steps(), 2);
+    eq(stack(sound('a b'), sound('c d e')).steps(), 6);
+    eq(fastcat(sound('a b'), sound('c')).steps(), 3);
+
+    // Stepwise
+    eq(qv(stepcat(sound('bd sn'), sound('hh hh hh'))), 'bd@0 sn@0.2 hh@0.4 hh@0.6 hh@0.8');
+    eq(stepcat(sound('bd sn'), sound('hh hh hh')).steps(), 5);
+    eq(qv(sound('a b c d').steptake(2)), 'a@0 b@0.5');
+    eq(qv(sound('a b c d').steptake(-1)), 'd@0');
+    eq(qv(sound('a b c d').stepdrop(1)), 'a@0 b@0.333 c@0.667');
+    eq(qv(stepcat(sound('a b').expand(2), sound('c d'))), 'a@0 b@0.333 c@0.667 d@0.833');
+    eq(sound('a b').extend(2).steps() + ' ' + qv(sound('a b').extend(2)), '4 a@0 b@0.25 a@0.5 b@0.75');
+    eq(qv(sound('a b c').pace(4)), 'a@0 b@0.25 c@0.5 a@0.75');
+    eq(qv(stepalt([[sound('a b')], [sound('c'), sound('d d d')]])), 'a@0 b@0.125 c@0.25 a@0.375 b@0.5 d@0.625 d@0.75 d@0.875');
+    eq(qv(stepzip([sound('a b'), sound('c d')]), 0, 2), 'a@0 c@0.5 b@1 d@1.5');
+
+    // ur, inhabit, swap, weave, chew, snowball
+    eq(qv(ur(4, 'a b', { a: sound('bd*2'), b: sound('hh*4') }), 1, 3), 'bd@1 bd@1.5 hh@2 hh@2.25 hh@2.5 hh@2.75');
+    eq(qv(ur(2, 'a:fast', { a: sound('bd sn') }, { fast: (x) => x.fast(2) }), 1, 2), 'bd@1 sn@1.25 bd@1.5 sn@1.75');
+    eq(qv(inhabit({ x: sound('bd sn'), y: sound('hh*3') }, 'x y')), 'bd@0 sn@0.25 hh@0.5 hh@0.667 hh@0.833');
+    eq(qv(sound(swap({ a: 'bd', b: 'sn' }, 'a b ~ c'))), 'bd@0 sn@0.25');
+    eq(qv(weave(4, pan(saw), [sound('a'), sound('b')])), 'a,pan=0@0 b,pan=0.5@0');
+    eq(qv(sound('a b c d').chew(4, '0 [2 3]')), 'a,speed=0.5@0 c,speed=1@0.5 d,speed=1@0.75');
+    eq(qv(n('0 1').snowball(3, (a, b) => a.add(b), (x) => x.fast(2)), 2, 3), 'n=0@2 n=1@2.5');
+    eq(qv(note("c'maj").arpg('down')), 'note=67@0 note=64@0.333 note=60@0.667');
+}
+
+// Streams, transitions, mute and solo (through eval, as the editor runs code)
+{
+    const show = (v) => Object.entries(v).map(([k, x]) => (k === 's' ? x : `${k}=${+x.toFixed(3)}`)).join(',');
+    const qs = (p, b, e) => p.query(b, e).sort((x, y) => x.begin - y.begin || show(x.value).localeCompare(show(y.value)))
+        .map((ev) => `${show(ev.value)}@${+ev.begin.toFixed(3)}`).join(' ');
+    const active = (b, e) => qs({ query: (x, y) => t.queryActive(x, y) }, b, e);
+    t.stopAll();
+    t.muted.clear();
+    t.soloed.clear();
+    t.eval('d1(sound("bd*2"))\nsound("hh")');
+    eq(t.streamInfo().map((s) => s.name).join(), 'd1,#1');
+    // Pretend the clock is running at cycle 2 for the transitions.
+    t.isPlaying = true;
+    t._nextCycle = 2;
+    t.eval('xfadeIn(1, 2, sound("sn*2"))');
+    eq(qs(t.channels.get('d1'), 2, 3), 'bd,gain=1@2 sn,gain=0@2 bd,gain=0.961@2.5 sn,gain=0.619@2.5');
+    eq(qs(t.channels.get('d1'), 4, 5), 'sn,gain=1@4 sn,gain=1@4.5');
+    t.eval('jumpIn(1, 1, sound("cp"))');
+    eq(qs(t.channels.get('d1'), 2, 4), 'sn@2 sn@2.5 cp@3');
+    t.eval('jumpMod(1, 4, sound("bd"))');
+    eq(qs(t.channels.get('d1'), 2, 5), 'cp@2 cp@3 bd@4');
+    t.eval('d2(sound("hh").gain(0))');
+    t.eval('interpolateIn(2, 4, sound("hh").gain(1))');
+    eq(qs(t.channels.get('d2'), 4, 5), 'hh,gain=0.5@4');
+    t.eval('d1(sound("bd"))');
+    t.eval('wait(1, 2, sound("cp"))');
+    eq(qs(t.channels.get('d1'), 2, 5), 'cp@4');
+    // Live updates keep streams whose events have not changed, with their transitions.
+    t.eval('xfadeIn(1, 8, sound("sn*2"))\nd2(sound("hh"))');
+    const running = t.channels.get('d1');
+    t.eval('xfadeIn(1, 8, sound("sn*2"))\nd2(sound("hh*2"))', { keepUnchanged: true });
+    eq(t.channels.get('d1') === running && qs(t.channels.get('d2'), 2, 3) === 'hh@2 hh@2.5', true);
+    // Mute and solo, from code and by name
+    t.eval('mute(1)\nd1(sound("bd"))\nd2(sound("hh"))');
+    eq(active(2, 3), 'hh@2');
+    t.eval('unmuteAll()\nsolo("d1")\nd1(sound("bd"))\nd2(sound("hh"))');
+    eq(active(2, 3), 'bd@2');
+    t.solo('d1', false);
+    eq(active(2, 3), 'bd@2 hh@2');
+    t.eval('p("drums", sound("bd"))\np("drums", sound("sn"))');
+    eq(t.streamInfo().map((s) => s.name).join() + ' ' + active(2, 3), 'drums sn@2');
+    t.isPlaying = false;
+    t.stopAll();
+}
+
+// Pitched sample banks: { note: file } picks the nearest recording and tunes it
+{
+    globalThis.fetch = async (url) => (String(url).endsWith('.json')
+        ? { ok: true, status: 200, json: async () => ({ _base: 'https://cdn.test/piano/', piano: { C4: 'c4.mp3', Ds4: 'ds4.mp3', A4: 'a4.mp3' } }) }
+        : { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) });
+    t.audioContext.decodeAudioData = async () => ({ duration: 2, numberOfChannels: 1, length: 4, sampleRate: 2 });
+    await samples('github:someone/pianos/piano.json');
+    eq(t._sampleManifests.has('github:someone/pianos/piano.json|'), true);
+    eq(t.pitchedBanks.get('piano').map((x) => x.midi).join(), '60,63,69');
+    const voices = [];
+    t._session = {};
+    t._sampleVoice = (v, time, buffer, rate) => voices.push(+rate.toFixed(4));
+    for (const note of [60, 64, 70, 60]) TidalJS.prototype.playEvent.call(t, { s: 'piano', note }, 1, 0.5);
+    await t.whenSamplesLoaded();
+    for (const note of [60, 64, 70]) TidalJS.prototype.playEvent.call(t, { s: 'piano', note }, 1, 0.5);
+    // c4 as recorded; e4 from ds4 a semitone up; a#4 from a4 a semitone up
+    eq(voices.join(), [1, Math.pow(2, 1 / 12), Math.pow(2, 1 / 12)].map((x) => +x.toFixed(4)).join());
+    delete t._sampleVoice;
+    t._session = null;
 }
 
 console.log(`all ${passed} checks passed`);

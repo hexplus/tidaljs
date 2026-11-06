@@ -28,6 +28,14 @@ export interface EvalResult {
 }
 
 /** An engine instance: one audio context, a clock and the playing patterns. */
+/** A playing stream (d1, a p("name") stream, or #1, #2 for unnamed patterns) and its mute and solo state. */
+export interface StreamInfo {
+  name: string;
+  muted: boolean;
+  soloed: boolean;
+  audible: boolean;
+}
+
 export interface Tidal {
   cps: number;
   readonly isPlaying: boolean;
@@ -35,7 +43,12 @@ export interface Tidal {
   lastError?: string;
   onError: ((error: Error) => void) | null;
   init(): Promise<boolean>;
-  eval(code: string, options?: { keepOnWarnings?: boolean }): EvalResult;
+  eval(code: string, options?: { keepOnWarnings?: boolean; keepUnchanged?: boolean }): EvalResult;
+  streamInfo(): StreamInfo[];
+  mute(name: string, on?: boolean): void;
+  solo(name: string, on?: boolean): void;
+  readonly muted: Set<string>;
+  readonly soloed: Set<string>;
   setCPS(cps: number): number;
   stopAll(): void;
   getCyclePosition(): number;

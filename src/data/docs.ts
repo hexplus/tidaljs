@@ -715,12 +715,72 @@ Object.assign(DOCS, {
 });
 for (let i = 1; i <= 16; i++) {
     DOCS['d' + i] = D(
-        'Returns the pattern, so it plays: Tidal\'s d' + i + ' $ ... In TidalJS every pattern at the top level plays, so d1 to d16 are only there to make code from Tidal feel at home.',
+        'Plays a pattern in stream d' + i + ', as Tidal\'s d' + i + ' $ ... Streams appear above the cycle view with mute (M) and solo (S) buttons, and the transitions (xfadeIn, jumpIn...) change a stream from its previous pattern to a new one.',
         'd' + i + '(sound("bd*2 sn"))',
-        undefined,
-        ['hush', 'stack'],
+        'Patterns without a stream play too; they are listed as #1, #2...',
+        ['p', 'xfadeIn', 'mute', 'solo'],
     );
 }
+
+// ---------------- Streams, transitions, stepwise and the rest ----------------
+const TRANSITION_TIP = 'A transition runs from the stream\'s previous pattern, so first play something in that stream (d1, or a transition with the same number), then change it.';
+Object.assign(DOCS, {
+    p: D('Plays a pattern in a named stream, as Tidal\'s p "name" $ ... A number is the same as d1, d2...', 'p("drums", sound("bd*2 [~ bd] sn ~"))\np("bass", sound("saw*4").note("c2"))', undefined, ['d1', 'mute']),
+    xfadeIn: D(
+        'Crossfades a stream from its previous pattern to a new one over a number of cycles, with equal power so the volume stays even.',
+        'xfadeIn(1, 8, sound("hh*8").gain(0.7))',
+        TRANSITION_TIP,
+        ['xfade', 'clutchIn', 'jumpIn', 'interpolateIn'],
+    ),
+    xfade: D('Crossfades a stream to a new pattern over 4 cycles: xfadeIn(id, 4, pattern).', 'xfade(1, sound("arpy*4").note("c e g b"))', TRANSITION_TIP, ['xfadeIn']),
+    jump: D('Switches a stream to a new pattern right away (the same as playing it).', 'jump(1, sound("bd*4"))', undefined, ['jumpIn', 'jumpMod']),
+    jumpIn: D('Keeps the stream\'s previous pattern for a number of cycles, then switches to the new one exactly.', 'jumpIn(1, 2, sound("cp*4"))', TRANSITION_TIP, ['jumpMod', 'xfadeIn']),
+    jumpMod: D('Switches the stream at the next cycle divisible by n, e.g. 4 to change at the start of a four-cycle phrase.', 'jumpMod(1, 4, sound("bd sn"))', TRANSITION_TIP, ['jumpIn']),
+    clutchIn: D('Changes a stream gradually: over a number of cycles, events of the old pattern drop out at random while events of the new one come in.', 'clutchIn(1, 4, sound("hh*16"))', TRANSITION_TIP, ['clutch', 'xfadeIn']),
+    clutch: D('clutchIn over 2 cycles.', 'clutch(1, sound("bd*2 sn"))', TRANSITION_TIP, ['clutchIn']),
+    anticipateIn: D('Builds up to the change: the old pattern echoes faster and faster for a number of cycles, then the new pattern starts.', 'anticipateIn(1, 4, sound("bd sn"))', TRANSITION_TIP, ['anticipate', 'jumpIn']),
+    anticipate: D('anticipateIn over 8 cycles.', 'anticipate(1, sound("bd*2 sn"))', TRANSITION_TIP, ['anticipateIn']),
+    interpolateIn: D('Glides the numeric controls (gain, lpf, speed...) from the old pattern\'s values to the new one\'s over a number of cycles; the rhythm is the new pattern\'s.', 'interpolateIn(1, 8, sound("saw*8").note("c2").lpf(3000))', TRANSITION_TIP, ['interpolate', 'xfadeIn']),
+    interpolate: D('interpolateIn over 4 cycles.', 'interpolate(1, sound("saw*8").note("c2").lpf(400))', TRANSITION_TIP, ['interpolateIn']),
+    wait: D('Silences the stream for a number of cycles, from the next cycle, then plays the new pattern.', 'wait(1, 2, sound("bd*4"))', undefined, ['jumpIn']),
+    mortal: D('Plays the new pattern for a number of cycles (its life), then fades it out by dropping events over the release cycles.', 'mortal(1, 4, 2, sound("cp*8"))', undefined, ['fadeOut']),
+    mute: D('Mutes a stream: 1 is d1, or give a name. The M button above the cycle view does the same.', 'mute(2)\nd1(sound("bd*4"))\nd2(sound("hh*8"))', 'Muting does not stop the stream\'s clock: unmuting brings it back in time.', ['unmute', 'solo']),
+    unmute: D('Unmutes a stream.', 'unmute(2)\nd1(sound("bd*4"))\nd2(sound("hh*8"))', undefined, ['mute', 'unmuteAll']),
+    solo: D('Solos a stream: while any stream is soloed, only soloed streams are heard. The S button above the cycle view does the same.', 'solo(1)\nd1(sound("bd*4"))\nd2(sound("hh*8"))', undefined, ['unsolo', 'mute']),
+    unsolo: D('Stops soloing a stream.', 'unsolo(1)\nd1(sound("bd*4"))', undefined, ['solo', 'unsoloAll']),
+    unmuteAll: D('Unmutes every stream.', 'unmuteAll()', undefined, ['unmute']),
+    unsoloAll: D('Stops soloing every stream.', 'unsoloAll()', undefined, ['unsolo']),
+
+    stepcat: D(
+        'Joins patterns into one cycle, giving each time in proportion to its steps: "bd sn" (2 steps) and "hh hh hh" (3 steps) make 5 even steps. fastcat would give each pattern half the cycle instead.',
+        'stepcat(sound("bd sn"), sound("hh hh hh"))',
+        'Patterns count their steps from the mini-notation: "bd sn hh" has 3, "bd@3 sn" 4, "<a b>" 1. .steps() tells you.',
+        ['fastcat', 'timeCat', 'expand'],
+    ),
+    s_cat: D('The same as stepcat().', undefined, undefined, ['stepcat']),
+    stepalt: D('Alternates between lists of patterns, one step-group at a time: [[a], [b, c]] plays a b, then a c.', 'stepalt([[sound("bd sn")], [sound("hh*3"), sound("cp cp")]])', undefined, ['stepcat']),
+    stepzip: D('Interleaves the steps of several patterns: the first step of each, then the second of each.', 'stepzip([sound("bd sn"), sound("hh cp")])', undefined, ['stepcat']),
+    steptake: D('Keeps the first n steps of the pattern (the last n if negative), stretched to fill the cycle.', 'sound("bd sn hh cp").steptake("<4 3 2>")', undefined, ['stepdrop', 'linger']),
+    stepdrop: D('Drops n steps from the end of the pattern (from the start if negative), as Tidal\'s stepdrop.', 'sound("bd sn hh cp").stepdrop("<0 1 2>")', undefined, ['steptake']),
+    expand: D('Multiplies the steps without changing the sound, so stepcat gives the pattern more room.', 'stepcat(sound("bd sn").expand(2), sound("hh hh"))', undefined, ['contract', 'stepcat']),
+    contract: D('Divides the steps without changing the sound, so stepcat gives the pattern less room.', 'stepcat(sound("bd sn hh cp").contract(2), sound("arpy"))', undefined, ['expand']),
+    extend: D('Repeats the pattern n times within the cycle and multiplies its steps to match.', 'stepcat(sound("bd sn").extend(2), sound("cp"))', undefined, ['expand', 'fast']),
+    pace: D('Changes the speed so the pattern plays a given number of steps per cycle, whatever its own count.', 'sound("bd sn hh").pace(4)', undefined, ['steps', 'fast']),
+    steps: D('Returns the number of steps of the pattern (for the stepwise functions), or undefined.', undefined, undefined, ['stepcat']),
+
+    ur: D(
+        'Tidal\'s ur: a song structure. A pattern of names, spread over a number of cycles, chooses which named pattern plays when; "name:fx" applies an effect from the last argument. The patterns keep their own rhythm.',
+        'ur(8, "intro verse [verse, hats] verse:fast", {\n  intro: sound("bd ~ ~ ~"),\n  verse: sound("bd*2 sn"),\n  hats: sound("hh*8").gain(0.5)\n}, { fast: x => x.fast(2) })',
+        undefined,
+        ['inhabit', 'cat', 'squeeze'],
+    ),
+    inhabit: D('Fits named patterns into the steps of a pattern of names: each step plays a whole cycle of its pattern, squeezed.', 'inhabit({ a: sound("bd sn"), b: sound("hh*3") }, "a [b a] b")', undefined, ['squeeze', 'ur']),
+    swap: D('Replaces the values of a pattern from a table; values not in it become rests.', 'sound(swap({ a: "bd", b: "sn", c: "hh" }, "a [b c] a c"))', undefined, ['fit']),
+    weave: D('Spreads a control pattern across several patterns, each offset in time, so over the given cycles each pattern gets the whole of it.', 'weave(8, pan(saw2), [sound("bd sn"), sound("hh*4"), sound("arpy*3")])', undefined, ['spin', 'set']),
+    snowball: D('Like soak, accumulating: each cycle combines the previous result with the function applied once more.', 'n("0 2").snowball(4, (a, b) => a.add(b), x => x.fast(2)).sound("arpy")', 'Add the sound after: add() joins strings, so snowballing a sound gives "arpyarpy". Also a global: snowball(depth, combine, fn, pattern).', ['soak']),
+    chew: D('Like bite(), but each part also plays faster or slower to match how much it was squeezed or stretched.', 'sound("breaks125").chop(8).chew(4, "0 [1 3] <2 0>")', undefined, ['bite', 'splice']),
+    arpg: D('The same as arp().', undefined, undefined, ['arp']),
+});
 
 /** Globals whose help differs from the method of the same name. */
 export const GLOBAL_DOCS: Record<string, Doc> = {

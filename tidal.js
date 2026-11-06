@@ -459,8 +459,11 @@
             return this.query(0, 1);
         }
 
+        /** A pattern from a new query, keeping this pattern's steps (as Tidal's keepSteps). */
         _derive(query) {
-            return new PatternBuilder(this.tidal, query);
+            const p = new PatternBuilder(this.tidal, query);
+            p._steps = this._steps;
+            return p;
         }
 
         withValue(fn) {
@@ -850,9 +853,18 @@
          * pattern, e.g. .bite(4, "0 2 1 3"). Also available as fitment().
          */
         bite(n, indices) {
-            const parts = Math.floor(requireNumber('bite', n));
-            if (parts < 1) throw new RangeError('bite() expects n >= 1');
-            const index = toRaw(this.tidal, indices, 'bite');
+            return this._bite(n, indices, false, 'bite');
+        }
+
+        /** Like bite(), changing the speed of each sound to match how much its part was squeezed or stretched. */
+        chew(n, indices) {
+            return this._bite(n, indices, true, 'chew');
+        }
+
+        _bite(n, indices, chew, fname) {
+            const parts = Math.floor(requireNumber(fname, n));
+            if (parts < 1) throw new RangeError(`${fname}() expects n >= 1`);
+            const index = toRaw(this.tidal, indices, fname);
             return this._derive((b, e) => eachCycle(b, e, (c, s, t) => {
                 const out = [];
                 for (const iev of index.query(c, c + 1)) {
@@ -865,7 +877,12 @@
                     const toSrc = (x) => srcBegin + (x - iev.begin) * scale;
                     const fromSrc = (x) => iev.begin + (x - srcBegin) / scale;
                     for (const ev of this.query(toSrc(lo), toSrc(hi))) {
-                        out.push({ begin: fromSrc(ev.begin), end: fromSrc(ev.end), value: ev.value });
+                        let value = ev.value;
+                        if (chew) {
+                            const o = asObject(value);
+                            value = { ...o, speed: (isNum(o.speed) ? o.speed : 1) * scale };
+                        }
+                        out.push({ begin: fromSrc(ev.begin), end: fromSrc(ev.end), value });
                     }
                 }
                 return out;
@@ -1048,6 +1065,11 @@
         }
 
         arpeggiate(mode = 'up') {
+            return this.arp(mode);
+        }
+
+        /** Same as arpeggiate(), as Tidal's arpg. */
+        arpg(mode = 'up') {
             return this.arp(mode);
         }
 
@@ -1776,6 +1798,25 @@
             });
         },
 
+        /**
+         * Like soak, accumulating: each cycle combines the previous result with
+         * fn applied once more, e.g. snowball(4, (a, b) => a.add(b), x => x.fast(2)).
+         */
+        snowball(depth, combine, fn) {
+            requireFunction('snowball', combine);
+            const n = Math.max(1, Math.floor(requireNumber('snowball', depth)));
+            const layers = [this];
+            let acc = this;
+            let cur = this;
+            for (let i = 1; i < n; i++) {
+                cur = applyTransform('snowball', fn, cur);
+                acc = combine(acc, cur);
+                if (!(acc instanceof PatternBuilder)) throw new TypeError('snowball(): the combining function must return a pattern, e.g. (a, b) => a.add(b)');
+                layers.push(acc);
+            }
+            return slowcat(this.tidal, layers);
+        },
+
         /** Applies fn repeatedly, once more each cycle, for `depth` cycles (Tidal's soak). */
         soak(depth, fn) {
             const n = Math.max(1, Math.floor(requireNumber('soak', depth)));
@@ -1989,7 +2030,111 @@
             if (this.tidal) this.tidal.playOnce(this);
             return undefined;
         },
+
+        // --- Stepwise (Sound.Tidal.Stepwise) ---------------------------------
+        //
+        // Patterns know their steps: "bd sn hh" has 3, "bd@3 sn" 4, "<a b>" 1.
+        // These functions work in steps instead of cycles.
+
+        /** Keeps the first n steps (the last n if negative), stretched to fill the cycle. */
+        steptake(n) {
+            return patterned(this, 'steptake', n, (p, x) => {
+                const t = p._steps;
+                if (!(t > 0)) return p;
+                const b = x >= 0 ? 0 : 1 - Math.abs(x) / t;
+                const e = x >= 0 ? x / t : 1;
+                return withSteps(zoomPattern(p, clamp(b, 0, 1), clamp(e, 0, 1)), Math.min(Math.abs(x), t));
+            });
+        },
+        /** Drops the first n steps (the last n if negative). */
+        stepdrop(n) {
+            return patterned(this, 'stepdrop', n, (p, x) => {
+                const t = p._steps;
+                if (!(t > 0)) return p;
+                return p.steptake(x >= 0 ? t - x : -(t + x));
+            });
+        },
+        /** Multiplies the steps without changing the sound, so stepcat gives the pattern more room. */
+        expand(factor) {
+            return patterned(this, 'expand', factor, (p, x) => withSteps(p._derive((b, e) => p.query(b, e)), p._steps * x));
+        },
+        /** Divides the steps without changing the sound. */
+        contract(factor) {
+            return patterned(this, 'contract', factor, (p, x) => withSteps(p._derive((b, e) => p.query(b, e)), x ? p._steps / x : undefined));
+        },
+        /** Repeats the pattern n times within the cycle and multiplies its steps to match. */
+        extend(factor) {
+            return patterned(this, 'extend', factor, (p, x) => {
+                const sped = fastPattern(p, x);
+                return withSteps(sped === p ? p._derive((b, e) => p.query(b, e)) : sped, p._steps * x);
+            });
+        },
+        /** Changes the speed so the pattern plays `target` steps per cycle. */
+        pace(target) {
+            return patterned(this, 'pace', target, (p, x) => {
+                const t = p._steps;
+                if (!(t > 0) || !(x > 0)) return p;
+                const sped = fastPattern(p, x / t);
+                return withSteps(sped === p ? p._derive((b, e) => p.query(b, e)) : sped, x);
+            });
+        },
+        /** The number of steps of the pattern, or undefined if it has none. */
+        steps() {
+            return this._steps;
+        },
     });
+
+    /**
+     * Tidal's ur: a pattern of pattern names, spread over `cycles` cycles.
+     * Each name plays its pattern (at its normal speed, in time with the
+     * clock) for as long as the name lasts; "name:fx" applies an effect from
+     * fx, as if the name's span were one cycle.
+     */
+    function urPattern(tidal, cycles, structure, patterns, fx) {
+        const t = requireNumber('ur', cycles);
+        if (!(t > 0)) return silence(tidal);
+        if (!patterns || typeof patterns !== 'object') throw new TypeError('ur() expects named patterns, e.g. { a: sound("bd*2"), b: sound("hh*4") }');
+        const named = new Map(Object.entries(patterns).map(([k, p]) => [k, toPattern(tidal, p, 'ur')]));
+        const effects = new Map(Object.entries(fx || {}));
+        for (const [k, f] of effects) requireFunction('ur', f, k);
+        const outer = fastPattern(toRaw(tidal, structure, 'ur'), 1 / t);
+        const cache = new Map();
+        const chosen = (word, begin, end) => {
+            const [name, effect] = String(word).split(':');
+            const p = named.get(name);
+            if (!p) {
+                tidal._warnOnce(`ur(): no pattern named "${name}"`);
+                return null;
+            }
+            const f = effect ? effects.get(effect) : null;
+            if (effect && !f) tidal._warnOnce(`ur(): no effect named "${effect}"`);
+            if (!f) return p;
+            const key = `${word}|${begin}|${end}`;
+            if (!cache.has(key)) {
+                if (cache.size > 256) cache.clear();
+                const d = end - begin;
+                const local = fastPattern(shiftPattern(p, -begin), d);
+                cache.set(key, shiftPattern(fastPattern(applyTransform('ur', f, local), 1 / d), begin));
+            }
+            return cache.get(key);
+        };
+        return new PatternBuilder(tidal, (b, e) => {
+            const out = [];
+            for (const ev of outer.query(b - t, e)) {
+                const lo = Math.max(b, ev.begin);
+                const hi = Math.min(e, ev.end);
+                if (lo >= hi) continue;
+                const p = chosen(ev.value, ev.begin, ev.end);
+                if (p) for (const inner of p.query(lo, hi)) out.push(inner);
+            }
+            return out;
+        });
+    }
+
+    /** Patterns in one cycle, each given time in proportion to its steps (Tidal's stepcat). */
+    function stepcatPatterns(tidal, patterns) {
+        return timecat(tidal, patterns.map((p) => ({ pattern: p, weight: p._steps > 0 ? p._steps : 1 })));
+    }
 
     /** spread() helper: fn(pattern, value), checked to return a pattern. */
     function spreadItem(fn, pattern, value) {
@@ -2102,6 +2247,119 @@
         }));
     }
 
+    // ------------------------------------------------------------------
+    // Streams and transitions (Sound.Tidal.Transition)
+    // ------------------------------------------------------------------
+
+    /** Name of a stream: 1 is "d1", other names are kept as they are. */
+    function streamName(id) {
+        if (typeof id === 'number' || /^\d+$/.test(String(id))) return 'd' + Math.floor(Number(id));
+        return String(id);
+    }
+
+    /** A pattern playing in a named stream, optionally with a transition from the stream's last pattern. */
+    function streamed(tidal, id, pattern, transition) {
+        const p = toPattern(tidal, pattern, streamName(id));
+        const s = new PatternBuilder(tidal, (b, e) => p.query(b, e));
+        s._steps = p._steps;
+        s._stream = streamName(id);
+        if (transition) s._transition = transition;
+        return s;
+    }
+
+    /** True if two patterns give the same events over two cycles from `from`. */
+    function sameEvents(a, b, from) {
+        const key = (p) => {
+            try {
+                return p.query(from, from + 2).map((ev) => `${ev.begin.toFixed(6)}:${ev.end.toFixed(6)}:${JSON.stringify(ev.value)}`).sort().join('|');
+            } catch (e) {
+                return null;
+            }
+        };
+        const ka = key(a);
+        return ka !== null && ka === key(b);
+    }
+
+    /** Only the events that start before `end`; nothing is queried after it. */
+    function eventsBefore(pattern, end) {
+        return pattern._derive((b, e) => (b >= end ? [] : pattern.query(b, Math.min(e, end))));
+    }
+
+    /** Only the events that start at or after `start`. */
+    function eventsFrom(pattern, start) {
+        return pattern._derive((b, e) => (e <= start ? [] : pattern.query(Math.max(b, start), e)));
+    }
+
+    /** Multiplies each event's gain by gainAt(its onset). */
+    function gainOver(pattern, gainAt) {
+        return pattern._derive((b, e) => pattern.query(b, e).map((ev) => {
+            const o = asObject(ev.value);
+            return { ...ev, value: { ...o, gain: (isNum(o.gain) ? o.gain : 1) * gainAt(ev.begin) } };
+        }));
+    }
+
+    /** Degrades events at random, keeping each with probability keepAt(its onset). */
+    function thinOver(pattern, keepAt) {
+        const seed = nextSeed();
+        return pattern._filter((ev) => timeRand(ev.begin, seed) < keepAt(ev.begin));
+    }
+
+    // Transitions: functions of (now, next, previous) giving the pattern to play.
+    const TRANSITIONS = {
+        /** Equal-power crossfade over t cycles. */
+        xfadeIn: (t) => (now, next, prev) => {
+            const x = (c) => clamp((c - now) / t, 0, 1);
+            return stackPatterns(next.tidal, [
+                gainOver(next, (c) => Math.sqrt(Math.sin((Math.PI / 2) * x(c)))),
+                gainOver(eventsBefore(prev, now + t), (c) => Math.sqrt(Math.cos((Math.PI / 2) * x(c)))),
+            ]);
+        },
+        /** Switch exactly t cycles from now. */
+        jumpIn: (t) => (now, next, prev) => stackPatterns(next.tidal, [eventsBefore(prev, now + t), eventsFrom(next, now + t)]),
+        /** Switch at the next cycle divisible by n. */
+        jumpMod: (n) => (now, next, prev) => {
+            const at = Math.ceil(now / n - 1e-9) * n;
+            return stackPatterns(next.tidal, [eventsBefore(prev, at), eventsFrom(next, at)]);
+        },
+        /** Over t cycles, the old pattern loses events at random while the new one gains them. */
+        clutchIn: (t) => (now, next, prev) => {
+            const x = (c) => clamp((c - now) / t, 0, 1);
+            return stackPatterns(next.tidal, [thinOver(eventsBefore(prev, now + t), (c) => 1 - x(c)), thinOver(next, x)]);
+        },
+        /** The old pattern echoes, faster and faster, for t cycles; then the new one plays. */
+        anticipateIn: (t) => (now, next, prev) => {
+            const cache = new Map();
+            const stuttered = prev._derive((b, e) => eachCycle(b, e, (c, s, u) => {
+                if (!cache.has(c)) {
+                    if (cache.size > 64) cache.clear();
+                    const step = clamp(1 - (c + 0.5 - now) / t, 0.01, 1);
+                    cache.set(c, prev.stut(8, 0.2, step / 8));
+                }
+                return cache.get(c).query(s, u);
+            }));
+            return stackPatterns(next.tidal, [eventsFrom(eventsBefore(stuttered, now + t), now), eventsFrom(next, now + t)]);
+        },
+        /** Silence for t cycles after the next cycle starts, then the new pattern. */
+        waitIn: (t) => (now, next) => eventsFrom(next, Math.ceil(now - 1e-9) + t),
+        /** The new pattern plays for `life` cycles, then fades out over `release` cycles. */
+        mortal: (life, release) => (now, next) => stackPatterns(next.tidal, [
+            eventsBefore(next, now + life),
+            thinOver(eventsFrom(eventsBefore(next, now + life + release), now + life), (c) => 1 - clamp((c - now - life) / release, 0, 1)),
+        ]),
+        /** Numeric controls glide from the old pattern's values to the new one's over t cycles. */
+        interpolateIn: (t) => (now, next, prev) => next._derive((b, e) => next.query(b, e).map((ev) => {
+            const k = clamp((ev.begin - now) / t, 0, 1);
+            const old = k < 1 ? eventAt(prev, ev.begin) : null;
+            if (!old) return ev;
+            const a = asObject(old.value);
+            const v = { ...asObject(ev.value) };
+            for (const [key, y] of Object.entries(v)) {
+                if (isNum(y) && isNum(a[key])) v[key] = a[key] * (1 - k) + y * k;
+            }
+            return { ...ev, value: v };
+        })),
+    };
+
     /** n steps: 0 1 ... n-1 in one cycle. */
     function runPattern(tidal, n) {
         const steps = Math.floor(n);
@@ -2152,11 +2410,27 @@
 
     /** One event per cycle carrying `value`. */
     function pure(tidal, value) {
-        return new PatternBuilder(tidal, (b, e) => {
+        const p = new PatternBuilder(tidal, (b, e) => {
             const out = [];
             for (let c = Math.ceil(b); c < e; c++) out.push({ begin: c, end: c + 1, value });
             return out;
         });
+        p._steps = 1;
+        return p;
+    }
+
+    /** Sets the steps of a pattern (Tidal's setSteps) and returns it. */
+    function withSteps(pattern, steps) {
+        pattern._steps = Number.isFinite(steps) && steps > 0 ? steps : undefined;
+        return pattern;
+    }
+
+    const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+
+    /** Least common multiple of step counts, when all are whole numbers. */
+    function lcmSteps(list) {
+        if (!list.length || !list.every((x) => Number.isInteger(x) && x > 0)) return undefined;
+        return list.reduce((a, b) => (a * b) / gcd(a, b));
     }
 
     /** A continuous pattern: fn(time) gives the value at any time. */
@@ -2355,13 +2629,13 @@
 
     function stackPatterns(tidal, patterns) {
         if (patterns.length === 1) return patterns[0];
-        return new PatternBuilder(tidal, (b, e) => {
+        return withSteps(new PatternBuilder(tidal, (b, e) => {
             const out = [];
             for (const p of patterns) {
                 for (const ev of p.query(b, e)) out.push(ev);
             }
             return out;
-        });
+        }), lcmSteps(patterns.map((p) => p._steps)));
     }
 
     /** One pattern per cycle; each pattern keeps its own cycle count. */
@@ -2379,21 +2653,29 @@
 
     /** All patterns squeezed into one cycle. */
     function fastcat(tidal, patterns) {
-        return fastPattern(slowcat(tidal, patterns), patterns.length);
+        if (patterns.length === 1) return patterns[0];
+        const steps = patterns.every((p) => p._steps > 0) ? patterns.reduce((sum, p) => sum + p._steps, 0) : undefined;
+        // fastPattern returns a new pattern here (n >= 2), so setting its steps is safe.
+        return withSteps(fastPattern(slowcat(tidal, patterns), patterns.length), steps);
     }
 
     /** Like fastcat, but each step has a relative length: [{ pattern, weight }]. */
     function timecat(tidal, steps) {
         if (steps.length === 0) return silence(tidal);
-        if (steps.every((s) => s.weight === 1)) return fastcat(tidal, steps.map((s) => s.pattern));
         const total = steps.reduce((sum, s) => sum + s.weight, 0);
+        if (steps.length === 1) return steps[0].pattern;
+        if (steps.every((s) => s.weight === 1)) {
+            const cat = fastPattern(slowcat(tidal, steps.map((s) => s.pattern)), steps.length);
+            return withSteps(new PatternBuilder(tidal, (b, e) => cat.query(b, e)), total);
+        }
         let pos = 0;
         const parts = steps.map((s) => {
             const a = pos / total;
             pos += s.weight;
             return compressPattern(s.pattern, a, pos / total);
         });
-        return stackPatterns(tidal, parts);
+        // The steps of a timecat are the total of its weights.
+        return withSteps(stackPatterns(tidal, parts), total);
     }
 
     /** Picks one of the patterns at random every cycle. */
@@ -2537,7 +2819,8 @@
             if (t.v === '<') {
                 const layers = parseLayers('>');
                 expect('>');
-                return combine(layers, (groups) => slowcat(tidal, flatSteps(groups).map((s) => s.pattern)));
+                // As in Tidal, <a b c> is one step (it is {a b c}%1).
+                return withSteps(combine(layers, (groups) => wrap(slowcat(tidal, flatSteps(groups).map((s) => s.pattern)))), 1);
             }
             if (t.v === '{') {
                 const layers = parseLayers('}');
@@ -2549,9 +2832,9 @@
                 }
                 const seqs = layers.items.map((groups) => flatSteps(groups).map((s) => s.pattern));
                 const base = steps || seqs[0].length || 1;
-                return stackPatterns(tidal, seqs.filter((q) => q.length).map(
+                return withSteps(wrap(stackPatterns(tidal, seqs.filter((q) => q.length).map(
                     (q) => fastPattern(fastcat(tidal, q), base / q.length)
-                ));
+                ))), base);
             }
             if (t.type === 'word') return word(t.v);
             return fail(`unexpected "${t.v}"`);
@@ -2657,6 +2940,13 @@
             const patterns = layers.items.map(build);
             if (layers.mode === '|') return randcat(tidal, patterns);
             return stackPatterns(tidal, patterns);
+        }
+
+        /** A new pattern with the same events, so its steps can be set without touching the original. */
+        function wrap(p) {
+            const w = new PatternBuilder(tidal, (b, e) => p.query(b, e));
+            w._steps = p._steps;
+            return w;
         }
 
         const top = parseLayers(undefined);
@@ -3021,8 +3311,11 @@
             this.masterGain = null;
             this.cps = 0.8;              // cycles per second
             this.isPlaying = false;      // true while the clock runs
-            this.channels = new Map();   // id -> pattern
+            this.channels = new Map();   // stream name (or id) -> pattern playing
             this.channelCounter = 0;
+            this.streams = new Map();    // stream name -> { pattern, playing } from the last evaluation
+            this.muted = new Set();      // stream names muted with mute()
+            this.soloed = new Set();     // stream names soloed with solo()
             this.samples = new Map(Object.entries(SAMPLE_DEFS).map(([k, v]) => [k, { ...v }]));
             this.lookahead = 0.1;        // seconds scheduled ahead of the clock
             this.tickInterval = 25;      // scheduler tick in ms
@@ -3054,6 +3347,7 @@
             this._sampleBuffers = new Map();   // url -> { buffer, reversed, promise }
             this._sampleLoads = new Set();     // promises still loading
             this._nTakeCounters = new Map();   // nTake name -> next index
+            this.pitchedBanks = new Map();     // bank -> [{ midi, url }] for banks with one file per note
         }
 
         // --- Setup -----------------------------------------------------
@@ -3394,9 +3688,86 @@
             g.envEq = signal(this, (t) => Math.sqrt(Math.sin((Math.PI / 2) * ramp(1 - t))));
             g.envEqR = signal(this, (t) => Math.sqrt(Math.cos((Math.PI / 2) * ramp(1 - t))));
 
-            // Playing
+            // Stepwise
+            const patternList = (fname, list) => {
+                if (!Array.isArray(list) || list.length === 0) throw new TypeError(`${fname}() expects a list of patterns`);
+                return list.map((p) => pat(p, fname));
+            };
+            g.stepcat = (...items) => stepcatPatterns(this, patternList('stepcat', flatArgs(items)));
+            g.s_cat = g.stepcat;
+            g.stepalt = (groups) => {
+                if (!Array.isArray(groups) || !groups.every((x) => Array.isArray(x) && x.length)) {
+                    throw new TypeError('stepalt() expects a list of lists, e.g. [[sound("bd sn")], [sound("hh*3"), sound("cp")]]');
+                }
+                const lists = groups.map((list) => patternList('stepalt', list));
+                const count = lists.map((l) => l.length).reduce((a, b) => (a * b) / gcd(a, b)) * lists.length;
+                const out = [];
+                for (let i = 0; out.length < count; i++) {
+                    for (const list of lists) if (out.length < count) out.push(list[i % list.length]);
+                }
+                return stepcatPatterns(this, out);
+            };
+            g.stepzip = (list) => {
+                const patterns = patternList('stepzip', list).filter((p) => p._steps > 0);
+                if (!patterns.length) return silence(this);
+                const total = lcmSteps(patterns.map((p) => p._steps)) || Math.max(...patterns.map((p) => p._steps));
+                return withSteps(fastPattern(slowcat(this, patterns.map((p) => p.pace(1))), total), total);
+            };
+
+            // More of Tidal
+            g.ur = (cycles, structure, patterns, fx = {}) => urPattern(this, cycles, structure, patterns, fx);
+            g.inhabit = (patterns, names) => {
+                if (!patterns || typeof patterns !== 'object') throw new TypeError('inhabit() expects named patterns, e.g. { a: sound("bd sn") }');
+                const named = Object.fromEntries(Object.entries(patterns).map(([k, p]) => [k, pat(p, 'inhabit')]));
+                const index = Object.keys(named);
+                return g.squeeze(raw(names, 'inhabit').withValue((v) => (index.includes(String(v)) ? index.indexOf(String(v)) : undefined)), index.map((k) => named[k]));
+            };
+            g.swap = (table, pattern) => {
+                if (!table || typeof table !== 'object') throw new TypeError('swap() expects a table, e.g. { a: "bd", b: "sn" }');
+                const values = raw(pattern, 'swap');
+                return values._derive((b, e) => values.query(b, e).flatMap((ev) => {
+                    const v = table[String(ev.value)];
+                    return v === undefined ? [] : [{ begin: ev.begin, end: ev.end, value: v }];
+                }));
+            };
+            g.weave = (cycles, controls, patterns) => {
+                const t = requireNumber('weave', cycles);
+                const list = patternList('weave', patterns);
+                const ctrl = controls instanceof PatternBuilder ? controls : raw(controls, 'weave');
+                return stackPatterns(this, list.map((p, i) => p.set(shiftPattern(fastPattern(ctrl, 1 / t), (i * t) / list.length))));
+            };
+            g.snowball = (depth, combine, fn, pattern) => pat(pattern, 'snowball').snowball(depth, combine, fn);
+
+            // Playing: named streams (Tidal's d1 $ ..., p "name" $ ...) and transitions between versions
             g.once = (pattern) => this.playOnce(pat(pattern, 'once'));
-            for (let i = 1; i <= 16; i++) g['d' + i] = (pattern) => pat(pattern, 'd' + i);
+            for (let i = 1; i <= 16; i++) g['d' + i] = (pattern) => streamed(this, i, pattern);
+            g.p = (id, pattern) => streamed(this, id, pattern);
+            const num = (fname, x) => {
+                const v = requireNumber(fname, x);
+                if (!(v >= 0)) throw new RangeError(`${fname}() expects a number of cycles of 0 or more`);
+                return v;
+            };
+            g.xfadeIn = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.xfadeIn(Math.max(0.01, num('xfadeIn', cycles))));
+            g.xfade = (id, pattern) => g.xfadeIn(id, 4, pattern);
+            g.jumpIn = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.jumpIn(num('jumpIn', cycles)));
+            g.jump = (id, pattern) => streamed(this, id, pattern);
+            g.jumpMod = (id, n, pattern) => streamed(this, id, pattern, TRANSITIONS.jumpMod(Math.max(1, Math.floor(num('jumpMod', n)))));
+            g.clutchIn = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.clutchIn(Math.max(0.01, num('clutchIn', cycles))));
+            g.clutch = (id, pattern) => g.clutchIn(id, 2, pattern);
+            g.anticipateIn = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.anticipateIn(Math.max(0.01, num('anticipateIn', cycles))));
+            g.anticipate = (id, pattern) => g.anticipateIn(id, 8, pattern);
+            g.interpolateIn = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.interpolateIn(Math.max(0.01, num('interpolateIn', cycles))));
+            g.interpolate = (id, pattern) => g.interpolateIn(id, 4, pattern);
+            g.wait = (id, cycles, pattern) => streamed(this, id, pattern, TRANSITIONS.waitIn(num('wait', cycles)));
+            g.mortal = (id, life, release, pattern) => streamed(this, id, pattern, TRANSITIONS.mortal(num('mortal', life), Math.max(0.01, num('mortal', release))));
+
+            // Mute and solo streams by number (1 is d1) or name.
+            g.mute = (id) => this.mute(id, true);
+            g.unmute = (id) => this.mute(id, false);
+            g.solo = (id) => this.solo(id, true);
+            g.unsolo = (id) => this.solo(id, false);
+            g.unmuteAll = () => this.muted.clear();
+            g.unsoloAll = () => this.soloed.clear();
         }
 
         /**
@@ -3521,8 +3892,42 @@
         /** Stops every pattern and silences the output. */
         stopAll() {
             this.channels.clear();
+            this.streams.clear();
             this.channelCounter = 0;
             this._halt();
+        }
+
+        // --- Streams: mute and solo ------------------------------------
+
+        /** True if a stream is heard: not muted, and soloed when any stream is. */
+        isAudible(name) {
+            const key = String(name);
+            if (this.muted.has(key)) return false;
+            return this.soloed.size === 0 || this.soloed.has(key);
+        }
+
+        /** Mutes (or unmutes) a stream: d1 is mute(1) or mute("d1"). */
+        mute(name, on = true) {
+            const key = streamName(name);
+            if (on) this.muted.add(key);
+            else this.muted.delete(key);
+        }
+
+        /** Solos (or unsolos) a stream: only soloed streams are heard while any is. */
+        solo(name, on = true) {
+            const key = streamName(name);
+            if (on) this.soloed.add(key);
+            else this.soloed.delete(key);
+        }
+
+        /** The playing streams in order, with their state, for the editor. */
+        streamInfo() {
+            return [...this.channels.keys()].filter((name) => typeof name === 'string').map((name) => ({
+                name,
+                muted: this.muted.has(name),
+                soloed: this.soloed.has(name),
+                audible: this.isAudible(name),
+            }));
         }
 
         _startTimer() {
@@ -3572,6 +3977,7 @@
             this._nextCycle = to;
 
             for (const [id, pattern] of this.channels) {
+                if (!this.isAudible(id)) continue;
                 let events;
                 try {
                     events = pattern.query(from, to);
@@ -3597,7 +4003,8 @@
         /** Events of all playing patterns in [begin, end), for visualisation. */
         queryActive(begin, end) {
             const out = [];
-            for (const pattern of this.channels.values()) {
+            for (const [id, pattern] of this.channels) {
+                if (!this.isAudible(id)) continue;
                 try {
                     for (const ev of pattern.query(begin, end)) out.push(ev);
                 } catch (e) { /* reported by the scheduler */ }
@@ -3688,7 +4095,8 @@
                         if (v.midi !== undefined || v.osc !== undefined || !v.s) continue;
                         const bank = this.sampleBanks.get(v.s);
                         if (bank) {
-                            if (this.audioContext) this._sampleBuffer(this._sampleUrl(bank, v), false);
+                            const pitched = this._pitchedFile(v.s, isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60);
+                            if (this.audioContext) this._sampleBuffer(pitched ? pitched.url : this._sampleUrl(bank, v), false);
                         } else if (!this.samples.has(v.s) && !this.isLoadingSamples()) {
                             warnings.add(`Unknown sound "${v.s}"`);
                         }
@@ -3699,8 +4107,29 @@
                     return { success: false, pending: true, activePatterns: this.channels.size, warnings: [...warnings] };
                 }
 
-                this.channels = new Map();
-                for (const p of patterns) this.channels.set(this.channelCounter++, p);
+                // Each pattern plays in a stream: d1 to d16 or p("name") name
+                // theirs, the others are #1, #2... in order. A transition starts
+                // from the stream's previous pattern. In live updates, a stream
+                // whose events have not changed keeps playing as it was, so a
+                // running transition is not restarted by editing another line.
+                const now = this.isPlaying ? this._nextCycle : 0;
+                const streams = new Map();
+                let unnamed = 0;
+                for (const p of patterns) {
+                    const name = p._stream || '#' + (++unnamed);
+                    current = origin.get(p);
+                    if (streams.has(name)) warnings.add(`Stream ${name} is used twice; the last one plays`);
+                    const prev = this.streams.get(name);
+                    if (options.keepUnchanged && prev && sameEvents(prev.pattern, p, now)) {
+                        streams.set(name, prev);
+                    } else if (p._transition && prev && this.isPlaying) {
+                        streams.set(name, { pattern: p, playing: p._transition(now, p, prev.pattern) });
+                    } else {
+                        streams.set(name, { pattern: p, playing: p });
+                    }
+                }
+                this.streams = streams;
+                this.channels = new Map([...streams].map(([name, s]) => [name, s.playing]));
                 this._collecting = null;
                 if (patterns.length > 0) this._start();
                 else this._halt();
@@ -4086,12 +4515,22 @@
                     root = source._base;
                 }
                 let banks = 0;
+                const full = (f) => (/^(https?:|data:|blob:)/.test(f) ? f : root + f);
                 for (const [name, files] of Object.entries(map)) {
                     if (name.startsWith('_')) continue;
                     const list = (Array.isArray(files) ? files : typeof files === 'string' ? [files] : Object.values(files || {}))
                         .filter((f) => typeof f === 'string');
                     if (list.length === 0) continue;
-                    this.sampleBanks.set(name, list.map((f) => (/^(https?:|data:|blob:)/.test(f) ? f : root + f)));
+                    this.sampleBanks.set(name, list.map(full));
+                    // A bank given as { note: file } (e.g. { C4: "c4.wav", Ds4: ... }) is pitched:
+                    // note() picks the nearest recording and plays it at the right pitch.
+                    this.pitchedBanks.delete(name);
+                    if (files && typeof files === 'object' && !Array.isArray(files)) {
+                        const notes = Object.entries(files)
+                            .map(([key, f]) => ({ midi: noteNameToMidi(key), url: typeof f === 'string' ? full(f) : null }))
+                            .filter((x) => x.midi !== undefined && x.url);
+                        if (notes.length) this.pitchedBanks.set(name, notes.sort((a, b) => a.midi - b.midi));
+                    }
                     banks++;
                 }
                 return banks;
@@ -4173,6 +4612,13 @@
             return byFactor.get(factor);
         }
 
+        /** The recording of a pitched bank nearest to a MIDI note, or null for other banks. */
+        _pitchedFile(name, midi) {
+            const notes = this.pitchedBanks.get(name);
+            if (!notes) return null;
+            return notes.reduce((best, x) => (Math.abs(x.midi - midi) < Math.abs(best.midi - midi) ? x : best));
+        }
+
         /** The file of a bank that n selects (wrapping around). */
         _sampleUrl(bank, v) {
             return bank[isNum(v.n) ? mod(Math.floor(v.n), bank.length) : 0];
@@ -4187,9 +4633,12 @@
             const gain = (isNum(v.gain) ? clamp(v.gain, 0, 2) : 1) * ampOf(v);
             if (gain <= 0) return;
             const speed = isNum(v.speed) && v.speed !== 0 ? clamp(v.speed, -16, 16) : 1;
-            let semitones = isNum(v.note) ? v.note - 60 : isNum(v.midinote) ? v.midinote - 60 : 0;
+            const target = isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60;
+            // A pitched bank plays its nearest recording; others are pitched from middle C.
+            const file = this._pitchedFile(v.s, target);
+            let semitones = file ? target - file.midi : (isNum(v.note) || isNum(v.midinote) ? target - 60 : 0);
             if (isNum(v.up)) semitones += v.up;
-            let buffer = this._sampleBuffer(this._sampleUrl(bank, v), speed < 0);
+            let buffer = this._sampleBuffer(file ? file.url : this._sampleUrl(bank, v), speed < 0);
             if (!buffer) return; // still loading: it plays from the next event on
             if (isNum(v.coarse) && v.coarse >= 2) buffer = this._coarseBuffer(buffer, Math.min(64, Math.floor(v.coarse)));
             // With unit "c", speed is in cycles: speed 1 plays the whole sample in one cycle.
@@ -4707,8 +5156,10 @@
     function manifestUrl(source) {
         const github = /^github:([^/\s]+)\/([^/\s]+)(?:\/([^\s]+))?$/.exec(source.trim());
         if (github) {
-            const [, user, repo, branch] = github;
-            return `https://raw.githubusercontent.com/${user}/${repo}/${branch || 'main'}/strudel.json`;
+            const [, user, repo, rest] = github;
+            // github:user/repo/file.json is a manifest in the main branch; github:user/repo/branch a branch.
+            if (rest && /\.json$/.test(rest)) return `https://raw.githubusercontent.com/${user}/${repo}/main/${rest}`;
+            return `https://raw.githubusercontent.com/${user}/${repo}/${rest || 'main'}/strudel.json`;
         }
         if (/\.json(\?.*)?$/.test(source)) return source;
         return source.replace(/\/?$/, '/') + 'strudel.json';

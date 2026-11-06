@@ -299,6 +299,13 @@ stack([
   sound("drum*2 drum:1").speed("<1 2 -1>").gain(0.8)
 ])` },
 
+    { group: 'Samples', title: 'Piano (pitched samples)', code: `// A pitched bank: note() picks the nearest recording and tunes it.
+// Salamander Grand Piano by Alexander Holm (CC BY 3.0), via felixroos/dough-samples.
+samples("github:felixroos/dough-samples/piano.json")
+setCPS(0.35)
+sound("piano").note("<[c3,e4,g4,b4] [a2,c4,e4,g4] [f2,a3,c4,e4] [g2,b3,d4,f4]>").legato(1).room(0.4)
+sound("piano*8").note(scale("c:major", "<[0 2 4 7] [5 4 2 0]>*2").add(14)).gain(0.6)` },
+
     { group: 'Pattern fundamentals', title: 'sound() and n()', code: 'sound("bd*2 [sn cp] bd [sn sn:2]").n("<0 1 2>")' },
     { group: 'Pattern fundamentals', title: 'note()', code: '// The first bar of Ode to Joy\nsound("arpy").note("e4 e4 f4 g4")' },
     { group: 'Pattern fundamentals', title: 'up()', code: '// Twinkle Twinkle, an octave higher every other cycle\nsound("arpy").note("c4 c4 g4 g4 a4 a4 g4@2").up("<0 12>")' },
@@ -413,6 +420,36 @@ sound("~ hh*2").set(cut(1)).gain(0.6)` },
   sound("hh*16").struct(binaryN(16, "<43690 21845 4369>")).gain(0.6),
   sound("arpy*8").note(toScale([0, 3, 5, 7, 10], markovPat(8, 0, [[0.2, 0.5, 0.3, 0, 0], [0.3, 0, 0.4, 0.3, 0], [0, 0.4, 0.2, 0.4, 0], [0, 0, 0.5, 0, 0.5], [0.6, 0, 0, 0.4, 0]])))
 ])` },
+
+    { group: 'Streams', title: 'Streams with mute and solo', code: `// Each d1... is a stream: above the cycle view, M mutes it and S solos it.
+setCPS(0.55)
+d1(sound("bd*2 [~ bd] ~ bd"))
+d2(sound("~ sn ~ sn").room(0.2))
+d3(sound("hh*8").gain("0.6 0.3"))
+d4(sound("saw*8").note("<c2 c2 a1 f1>").lpf(900).legato(0.6).gain(0.6))` },
+
+    { group: 'Streams', title: 'Crossfade while you play', code: `// Play this, then change the pattern below (try "hh*16" or another note):
+// with live update on, each change crossfades into the new version over 8 cycles.
+d1(sound("bd*4"))
+xfadeIn(2, 8, sound("arpy*8").note("<c e g b>").gain(0.7))` },
+
+    { group: 'Streams', title: 'Anticipate the drop', code: `// Play it, then change "bd sn" to "bd*2 [sn cp]" and play again:
+// the old beat echoes faster and faster for 4 cycles before the new one drops.
+d1(sound("hh*8").gain(0.5))
+anticipateIn(2, 4, sound("bd sn").room(0.2))` },
+
+    { group: 'Streams', title: 'Song structure with ur()', code: `setCPS(0.55)
+// Eight cycles of structure; "verse:double" plays the verse with an effect.
+ur(8, "intro verse [verse, hats] verse:double", {
+  intro: sound("bd ~ ~ ~").room(0.4),
+  verse: sound("bd*2 [~ bd] sn ~"),
+  hats: sound("hh*8").gain(0.5)
+}, { double: x => x.fast(2) })` },
+
+    { group: 'Streams', title: 'Stepwise: stepcat and pace', code: `// stepcat gives every step the same length: 2 + 3 + 4 steps in one cycle.
+stepcat(sound("bd sn"), sound("hh hh hh"), sound("arpy*4").note("c e g b"))
+// pace plays any pattern at 8 steps per cycle.
+sound("cp ~ cp").pace(8).gain(0.5)` },
 ];
 
 const FIRST_SONG = EXAMPLES.find((e) => e.title === 'Ode to Joy, club edit') ?? EXAMPLES[0];

@@ -261,6 +261,7 @@ Note: `export` is a JavaScript keyword, so the function is called `exportPattern
 | Phase 6: System | 6 | Complete |
 | Phase 7: Samples and more of Tidal | 15 | Complete |
 | Phase 8: The rest of Tidal's library | 120+ | Complete (see the notes) |
+| Phase 9: Streams, transitions, stepwise | 40+ | Complete |
 
 ---
 
@@ -342,14 +343,49 @@ sine2 cosine2 saw2 isaw2 tri2 square2 envL envLR envEq envEqR       // [done]
 - Parameters: `delay` is now the echo level, as in Tidal, with `delaytime`, `delayfeedback` and `lock`; `shape`, `distort`, `coarse` (samples), `cut`, `accelerate`, `djf`, `hpq`, `bpq`, `lpq`, `amp`, `octave`, `unit`, tremolo, phaser, ring modulation, and the short aliases (`sz`, `ctf`, `dfb`, `sus`, `att`, `rel`...).
 
 ### Not included, and why
-- Transitions (`xfadeIn`, `jumpIn`, `clutch`, `anticipate`...): they switch between versions of a numbered pattern stream (`d1`); TidalJS replaces all its patterns on every evaluation.
-- `ur`, `inhabit`, `weave`, `interlace`, `chew`, `snowball`, `swap`, `arpg`, `stepwise` functions (`s_*`, `stepcat`...), `nrpn`: possible, but rarely used.
+- `interlace` (deprecated in Tidal), `weaveWith`, `nrpn`, and the stepwise functions Tidal itself has commented out (`s_while`, `s_nth`, `s_taper`...).
+- `histpan`, `waitT`, `jumpIn'` (the variants of transitions with Haskell-only names); `jumpMod` covers switching on a cycle boundary.
 - SuperCollider-only effects (`squiz`, `krush`, `triode`, `leslie`, `waveloss`, spectral effects such as `binshift` and `freeze`) and the control buses (`in0`..`in127`, `*bus`, `*recv`): they need SuperDirt.
 - Pattern internals (`Sound.Tidal.Pattern`: `withQueryTime`, `filterValues`...): JavaScript code can use `.query()` and `.withValue()` instead.
 
+## Phase 9: Streams, transitions, stepwise (complete)
+
+### 9.1 Streams, mute and solo
+```javascript
+d1(p) ... d16(p)   // [done] named streams, as Tidal's d1 $
+p("name", p)       // [done] Tidal's p "name" $
+mute(1) unmute(1) solo(1) unsolo(1) unmuteAll() unsoloAll()   // [done]
+```
+The editor lists the playing streams above the cycle view, with mute (M) and solo (S) buttons. Patterns without a stream are #1, #2... Live updates keep the streams whose events did not change.
+
+### 9.2 Transitions
+```javascript
+xfade xfadeIn jump jumpIn jumpMod clutch clutchIn anticipate anticipateIn
+interpolate interpolateIn wait mortal   // [done]
+```
+Each runs from the stream's previous pattern, from the cycle where the code is evaluated.
+
+### 9.3 Stepwise (Sound.Tidal.Stepwise)
+```javascript
+stepcat s_cat steptake stepdrop expand contract extend pace stepalt stepzip .steps()   // [done]
+```
+Patterns count their steps as Tidal does: a mini-notation sequence has as many steps as its weights add up to, `<a b>` has 1, `{...}%n` has n, `stack` takes the least common multiple and `fastcat` the sum.
+
+### 9.4 More of Tidal
+```javascript
+ur inhabit weave swap snowball chew arpg   // [done]
+```
+
+### 9.5 Pitched sample banks
+```javascript
+samples("github:felixroos/dough-samples/piano.json")   // [done] { piano: { C4: "...", Ds4: "..." } }
+sound("piano").note("c e g")                           //        nearest recording, tuned
+```
+`github:user/repo/file.json` loads a manifest other than strudel.json.
+
 ## What could come next
 
-- Transitions between versions of a pattern (`xfadeIn`, `jumpIn`) with named streams
-- Pitched sample banks (one file per note) chosen by `note`
-- `ur` and the stepwise functions
-- A visual pattern editor and per-pattern mute/solo in the editor
+- A visual pattern editor: draw steps on a grid and get the mini-notation
+- Recording a session (code and audio) to replay it
+- A MIDI input mapped to buses (`bus()`), like Tidal's control buses
+- Export and import, save to localstorage or WebDB

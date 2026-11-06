@@ -307,12 +307,45 @@ kbd {
 }
 .cycle-head {
     display: flex;
+    align-items: center;
     justify-content: space-between;
+    gap: 12px;
     font-size: 0.78rem;
     color: var(--muted);
     margin-bottom: 8px;
     font-family: var(--mono);
 }
+
+/* Streams with mute and solo */
+.streams { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; justify-content: center; min-width: 0; }
+.stream {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 2px 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    transition: opacity 0.15s;
+}
+.stream.silent { opacity: 0.45; }
+.stream-name { margin-right: 4px; }
+.stream-toggle {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+.stream-toggle:hover { background: #222834; color: var(--text); }
+.stream-toggle[aria-pressed="true"]:first-of-type { background: var(--error); color: #2a0b0f; }
+.stream-toggle[aria-pressed="true"]:last-of-type { background: var(--warn); color: #2b1d05; }
 .cycle canvas { display: block; width: 100%; height: 84px; }
 
 /* Status line */

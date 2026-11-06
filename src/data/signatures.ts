@@ -350,8 +350,61 @@ Object.assign(GLOBAL_SIGNATURES, {
     once: ['Play the first cycle once, right away', P('pattern', PATTERN)],
 });
 for (let i = 1; i <= 16; i++) {
-    GLOBAL_SIGNATURES['d' + i] = ['A pattern to play, as in Tidal\'s d' + i + ' $ ...', P('pattern', PATTERN)];
+    GLOBAL_SIGNATURES['d' + i] = ['Play a pattern in stream d' + i + ', as Tidal\'s d' + i + ' $ ...', P('pattern', PATTERN)];
 }
+
+const ID = P('stream', 'a number (1 is d1) or a name');
+const CYCLES = (what: string) => P('cycles', what);
+Object.assign(GLOBAL_SIGNATURES, {
+    // Streams and transitions
+    p: ['Play a pattern in a named stream, as Tidal\'s p "name" $ ...', P('name', 'a name or number'), P('pattern', PATTERN)],
+    xfade: ['Crossfade the stream to a new pattern over 4 cycles', ID, P('pattern', PATTERN)],
+    xfadeIn: ['Crossfade the stream to a new pattern', ID, CYCLES('length of the crossfade'), P('pattern', PATTERN)],
+    jump: ['Switch the stream to a new pattern now', ID, P('pattern', PATTERN)],
+    jumpIn: ['Switch the stream after some cycles', ID, CYCLES('cycles to wait'), P('pattern', PATTERN)],
+    jumpMod: ['Switch the stream at the next cycle divisible by n', ID, P('n', 'e.g. 4 to switch at the start of a 4-cycle phrase'), P('pattern', PATTERN)],
+    clutch: ['Swap events of the old pattern for the new one over 2 cycles', ID, P('pattern', PATTERN)],
+    clutchIn: ['Swap events of the old pattern for the new one at random', ID, CYCLES('length of the change'), P('pattern', PATTERN)],
+    anticipate: ['Echo the old pattern faster and faster for 8 cycles, then switch', ID, P('pattern', PATTERN)],
+    anticipateIn: ['Echo the old pattern faster and faster, then switch', ID, CYCLES('length of the build-up'), P('pattern', PATTERN)],
+    interpolate: ['Glide numeric controls to the new pattern over 4 cycles', ID, P('pattern', PATTERN)],
+    interpolateIn: ['Glide numeric controls to the new pattern', ID, CYCLES('length of the glide'), P('pattern', PATTERN)],
+    wait: ['Silence, then the new pattern', ID, CYCLES('cycles of silence'), P('pattern', PATTERN)],
+    mortal: ['Play the new pattern for a while, then fade it out', ID, P('life', 'cycles it plays'), P('release', 'cycles it fades over'), P('pattern', PATTERN)],
+    mute: ['Mute a stream', ID],
+    unmute: ['Unmute a stream', ID],
+    solo: ['Solo a stream: only soloed streams play', ID],
+    unsolo: ['Stop soloing a stream', ID],
+    unmuteAll: ['Unmute every stream'],
+    unsoloAll: ['Stop soloing every stream'],
+
+    // Stepwise
+    stepcat: ['Patterns in one cycle, each given time by its steps', P('patterns', 'patterns, e.g. sound("bd sn"), sound("hh hh hh")')],
+    s_cat: ['Same as stepcat', P('patterns', 'patterns')],
+    stepalt: ['Alternate between lists of patterns, stepwise', P('groups', 'lists of patterns, e.g. [[sound("bd sn")], [sound("hh*3"), sound("cp")]]')],
+    stepzip: ['Interleave the steps of several patterns', P('patterns', 'a list of patterns')],
+
+    // More of Tidal
+    ur: ['A pattern of named patterns, over many cycles', P('cycles', 'how long the structure lasts'), P('structure', 'names, e.g. "intro [verse, drums:fast]"'),
+        P('patterns', '{ name: pattern }'), P('fx?', '{ name: function } for "name:fx"')],
+    inhabit: ['Named patterns squeezed into the steps of a pattern of names', P('patterns', '{ a: sound("bd sn"), b: ... }'), P('names', 'e.g. "a [b a]"')],
+    swap: ['Replace values from a table', P('table', '{ a: "bd", b: "sn" }'), P('pattern', 'e.g. "a b a"')],
+    weave: ['Spread a control pattern across patterns, offset in time', P('cycles', 'how long one pass takes'), P('controls', 'a control pattern, e.g. pan(saw)'), P('patterns', 'a list of patterns')],
+    snowball: ['Accumulate a function, cycle by cycle', P('depth', 'cycles'), P('combine', '(a, b) => a.add(b)'), P('fn', FN), P('pattern', PATTERN)],
+});
+
+Object.assign(METHOD_SIGNATURES, {
+    steptake: ['Keep the first n steps (the last n if negative)', P('n', 'steps, or a pattern')],
+    stepdrop: ['Drop steps from the end (the start if negative)', P('n', 'steps, or a pattern')],
+    expand: ['Multiply the steps, so stepcat gives more room', P('factor', 'e.g. 2')],
+    contract: ['Divide the steps', P('factor', 'e.g. 2')],
+    extend: ['Repeat the pattern and multiply its steps', P('factor', 'e.g. 2')],
+    pace: ['Play a given number of steps per cycle', P('steps', 'steps per cycle')],
+    steps: ['The number of steps of the pattern'],
+    snowball: ['Accumulate a function, cycle by cycle', P('depth', 'cycles'), P('combine', '(a, b) => a.add(b)'), P('fn', FN)],
+    chew: ['Like bite, changing the speed of each part to fit', P('n', 'parts per cycle'), P('indices', 'index pattern, e.g. "0 [2 3]"')],
+    arpg: ['Same as arp', P('mode?', 'arpeggio mode (default up)')],
+});
 for (const name of CONTROL_NAMES) {
     if (!GLOBAL_SIGNATURES[name]) GLOBAL_SIGNATURES[name] = METHOD_SIGNATURES[name];
 }
