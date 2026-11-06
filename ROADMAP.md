@@ -260,6 +260,7 @@ Note: `export` is a JavaScript keyword, so the function is called `exportPattern
 | Phase 5: Advanced | 12 | Complete |
 | Phase 6: System | 6 | Complete |
 | Phase 7: Samples and more of Tidal | 15 | Complete |
+| Phase 8: The rest of Tidal's library | 120+ | Complete (see the notes) |
 
 ---
 
@@ -302,9 +303,53 @@ Note: "nT functions" is read as Tidal's `nTake`, which steps through a list acro
 .github/workflows/ci.yml   // [done] engine tests, type-check and build, SibuJS lint, on Node 22 and 24, for every push and pull request
 ```
 
+## Phase 8: The rest of Tidal's library (complete)
+
+Compared function by function with Tidal's source (`tidal-core`: Core, UI, Control, Chords, Scales, Params).
+
+### 8.1 Operators and control patterns
+```javascript
+n("0 2") speed(2) ...   // [done] every control is also a function, as in Tidal
+.set()                  // [done] Tidal's # (structure from the left)
+.add() .sub() .mul()    // [done] |+ |- |* (and .div() .mod() .pow()); notes add as semitones, strings join
+d1() ... d16()          // [done] return the pattern; every top-level pattern plays
+once() qtrigger() trigger() // [done]
+```
+
+### 8.2 Structure, time and conditions
+```javascript
+brak mask inv sew stitch wedge euclidOff zoom fastGap trunc repeatCycles loopFirst
+press pressBy plyWith rolled rolledBy when ifp foldEvery someCyclesBy always never
+inside outside chunkBack fix unfix contrast spread fastspread spreadChoose pickF selectF
+select squeeze soak fadeIn fadeOut stripe       // [done]
+```
+
+### 8.3 Echoes, samples, values and generators
+```javascript
+echo echoWith stut stutWith stutter ghost ghostWith                 // [done]
+slice splice randslice loopAt smash spin striateBy                  // [done]
+rangex qfloor qceiling qround toScale run scan                      // [done]
+fromList fastFromList fromMaybes timeCat wrandcat binary binaryN ascii necklace
+brand brandBy chooseBy wchooseBy markovPat lindenmayer              // [done]
+sine2 cosine2 saw2 isaw2 tri2 square2 envL envLR envEq envEqR       // [done]
+```
+
+### 8.4 Mini-notation, harmony and parameters
+- Patterned modifiers: `"bd*<2 3>"`, `"bd/[1 2]"`, `"bd(<3 5>,8,<0 2>)"`.
+- Patterned arguments for `euclid`, `chunk`, `swingBy`, `scramble`, `shuffle`.
+- Tidal's full scale table (70 scales, including microtonal maqamat) and chord table (every alias), and the `pinkyupdown` and `thumbupdown` arpeggios.
+- `n` accepts note names (`n("c e g")`).
+- Parameters: `delay` is now the echo level, as in Tidal, with `delaytime`, `delayfeedback` and `lock`; `shape`, `distort`, `coarse` (samples), `cut`, `accelerate`, `djf`, `hpq`, `bpq`, `lpq`, `amp`, `octave`, `unit`, tremolo, phaser, ring modulation, and the short aliases (`sz`, `ctf`, `dfb`, `sus`, `att`, `rel`...).
+
+### Not included, and why
+- Transitions (`xfadeIn`, `jumpIn`, `clutch`, `anticipate`...): they switch between versions of a numbered pattern stream (`d1`); TidalJS replaces all its patterns on every evaluation.
+- `ur`, `inhabit`, `weave`, `interlace`, `chew`, `snowball`, `swap`, `arpg`, `stepwise` functions (`s_*`, `stepcat`...), `nrpn`: possible, but rarely used.
+- SuperCollider-only effects (`squiz`, `krush`, `triode`, `leslie`, `waveloss`, spectral effects such as `binshift` and `freeze`) and the control buses (`in0`..`in127`, `*bus`, `*recv`): they need SuperDirt.
+- Pattern internals (`Sound.Tidal.Pattern`: `withQueryTime`, `filterValues`...): JavaScript code can use `.query()` and `.withValue()` instead.
+
 ## What could come next
 
+- Transitions between versions of a pattern (`xfadeIn`, `jumpIn`) with named streams
 - Pitched sample banks (one file per note) chosen by `note`
-- More of Tidal's library: `stut`/`echo`, `range` on patterns of patterns, `squeeze`, `ur`, `fix`
-- Patterned arguments for the remaining functions (`chunk`, `euclid`, `swingBy`'s amount)
+- `ur` and the stepwise functions
 - A visual pattern editor and per-pattern mute/solo in the editor

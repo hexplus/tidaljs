@@ -31,7 +31,7 @@ stack([
   sound("[~ hh]*4").gain(0.6),
   sound("saw*8").note("<c2 g1 c2 g1 c2 g1 c2 [g1 c2]>")
     .lpf(sine.range(300, 1500).slow(8)).legato(0.6).gain(0.6),
-  sound("arpy").note(melody).up(12).delay(0.375).room(0.3)
+  sound("arpy").note(melody).up(12).delay(0.5).delaytime(0.375).delayfeedback(0.35).room(0.3)
 ])` },
 
     { group: 'Songs', title: 'Für Elise (Beethoven, 1810)', code: `// Für Elise - Beethoven (1810), opening theme. One cycle = one bar of 3/8.
@@ -220,7 +220,7 @@ stack([
   sound("arpy").note(bell).gain(0.7),
   sound("tri").note("<~!4 [d5@2 c5 d5 bb4@2]!12>").legato(0.9).gain(0.4).pan(-0.4),
   sound("tri").note("<~!8 [g5@2 f5 g5 d5@2]!8>").legato(0.9).gain(0.3).pan(0.4),
-  sound("sine").note("<~!12 [d6 c6 bb5 a5 g5 f#5]!4>").gain(0.25).delay(0.25).room(0.5),
+  sound("sine").note("<~!12 [d6 c6 bb5 a5 g5 f#5]!4>").gain(0.25).delay(0.5).delaytime(0.25).room(0.5),
   sound("saw").note("<g2 g2 f2 f2 eb2 eb2 d2 d2>").lpf(400).legato(1).gain(0.5)
 ])` },
 
@@ -324,7 +324,7 @@ stack([
     { group: 'Effects', title: 'lpf()', code: 'sound("saw*8").note("c2 c3").lpf("300 600 1200 2400")' },
     { group: 'Effects', title: 'hpf()', code: 'sound("bd sn bd sn").hpf(400)' },
     { group: 'Effects', title: 'bpf()', code: 'sound("arpy*4").bpf(1000)' },
-    { group: 'Effects', title: 'delay()', code: 'sound("cp ~ ~ ~").delay(0.25)' },
+    { group: 'Effects', title: 'delay()', code: '// delay is the echo level, delaytime the time between echoes (seconds)\nsound("cp ~ ~ ~").delay(0.6).delaytime(0.25).delayfeedback(0.5)' },
     { group: 'Effects', title: 'reverb()', code: 'sound("sn ~ arpy ~").note("c e").reverb(0.6)' },
     { group: 'Effects', title: 'distortion()', code: 'sound("bd sn bd sn").distortion(5)' },
     { group: 'Effects', title: 'crush()', code: 'sound("arpy*4").note("c e g b").crush(4)' },
@@ -342,7 +342,7 @@ stack([
     { group: 'Composition', title: 'nTake()', code: '// Each played snare takes the next variation from the list\nsound("~ sn ~ sn*2").nTake("snares", [0, 1, 2, 3, 2])' },
 
     { group: 'Mini-notation', title: 'Subdivision and alternation', code: 'sound("bd [~ bd] <sn cp> [hh hh hh]")' },
-    { group: 'Mini-notation', title: 'Euclidean rhythms', code: '// (3,8) is the Cuban tresillo, (5,8) the cinquillo\nstack([\n  sound("bd(3,8)"),\n  sound("hh(5,8,2)").gain(0.5),\n  sound("cp(2,5)").delay(0.25)\n])' },
+    { group: 'Mini-notation', title: 'Euclidean rhythms', code: '// (3,8) is the Cuban tresillo, (5,8) the cinquillo\nstack([\n  sound("bd(3,8)"),\n  sound("hh(5,8,2)").gain(0.5),\n  sound("cp(2,5)").delay(0.5).delaytime(0.25)\n])' },
     { group: 'Mini-notation', title: 'Polymeter', code: 'sound("{bd sn hh, cp hh oh hh cp}")' },
     { group: 'Mini-notation', title: 'Probability and repeats', code: 'sound("bd!2 sn? [hh hh?0.3]!2 cp:1")' },
     { group: 'Mini-notation', title: 'Random choice', code: 'sound("bd [sn | cp | oh] bd [hh | ~]")' },
@@ -358,7 +358,7 @@ stack([
 
     { group: 'Harmony', title: 'scale()', code: 'sound("arpy*8")\n  .note(scale("e:minor", "0 2 4 <7 9> 4 2 0 -3"))\n  .lpf(2400)' },
     { group: 'Harmony', title: 'Chords', code: '// The I-V-vi-IV progression in C\nsound("saw").note("<c\'maj g3\'maj a3\'min f3\'maj>")\n  .lpf(1200).gain(0.6).legato(1)' },
-    { group: 'Harmony', title: 'arp()', code: 'sound("arpy").note("<c\'maj\'5 a3\'min7\'5>")\n  .arp("<up updown>")\n  .delay(0.375)' },
+    { group: 'Harmony', title: 'arp()', code: 'sound("arpy").note("<c\'maj\'5 a3\'min7\'5>")\n  .arp("<up updown>")\n  .delay(0.5).delaytime(0.375)' },
     { group: 'Harmony', title: 'fit()', code: 'sound(fit(1, ["bd", "sn", "hh", "cp"], "0 1 2 1"))' },
 
     { group: 'Signals', title: 'Filter sweep', code: 'sound("saw*8").note("c2 c3")\n  .lpf(sine.range(200, 4000).slow(4))\n  .resonance(8)' },
@@ -371,6 +371,48 @@ stack([
 
     { group: 'Conditions', title: 'within() and while()', code: 'sound("hh*8")\n  .within(0.5, 1, x => x.speed(2))\n  .while("1 0 0 1", x => x.gain(0.3))' },
     { group: 'Conditions', title: 'until() and playFor()', code: 'stack([\n  sound("bd*4").until(4, x => x.lpf(300)),\n  sound("cp ~ cp ~").playFor(2, 6)\n])' },
+
+    { group: 'Tidal style', title: 'Controls, # and |+', code: `// As in Tidal: controls on their own, combined with set (#) and add (|+).
+// d1 $ n "0 .. 7" # s "arpy" |+ n "<0 3 5>" # speed "1 2"
+d1(n("0 .. 7").sound("arpy").add(n("<0 3 5>")).set(speed("1 2")))
+d2(sound("bd*2 [~ bd] sn ~").set(gain(0.9)))` },
+
+    { group: 'Tidal style', title: 'Echoes and ghost notes', code: `stack([
+  sound("bd ~ ~ bd ~ ~ bd ~"),
+  sound("~ sn").ghost(),
+  sound("arpy").note("<c e g>").stut(4, 0.4, 1/8),
+  sound("cp ~ ~ ~").echoWith(3, 1/16, x => x.speed(1.5).gain(0.7)).slow(2)
+])` },
+
+    { group: 'Tidal style', title: 'Strummed chords', code: `setCPS(0.5)
+sound("tri").note("<c'maj'5 a3'min7'5 f3'maj'5 g3'dom7'5>")
+  .rolledBy("<0.25 0.5 -0.25 0.125>").legato(1).room(0.4)
+sound("sine").note("<c2 a1 f1 g1>").legato(1)` },
+
+    { group: 'Tidal style', title: 'Breakbeat with splice()', code: `// splice fits each slice of the break to its step, at any tempo.
+samples("github:tidalcycles/dirt-samples")
+setCPS(0.55)
+sound("breaks125").splice(8, "0 1 <2 6> 3 [4 5] 6 <7 2> [6 7]")
+  .sometimesBy(0.15, x => x.speed(2))
+sound("~ hh*2").set(cut(1)).gain(0.6)` },
+
+    { group: 'Tidal style', title: 'brak, press and sew', code: `stack([
+  sound("bd*2 [~ bd] sn ~").brak(),
+  sound("hh*4").press().gain(0.7),
+  sound("cp*8").sew("t <f t> f f", sound("arpy*16").note("c e g b")).gain(0.6)
+])` },
+
+    { group: 'Tidal style', title: 'New effects', code: `stack([
+  sound("bd*4").shape(0.6),
+  sound("saw*8").note("<c2 a1>").djf(sine.slow(8)).legato(0.8),
+  sound("tri").note("<c'maj7 a3'min7>").legato(1).tremolorate(6).tremolodepth(0.6).gain(0.5),
+  sound("square*4").note("g4 e4").phaserrate(0.5).phaserdepth(0.8).ring(0.5).ringf(220).gain(0.3)
+])` },
+
+    { group: 'Tidal style', title: 'Markov chains and binary rhythms', code: `stack([
+  sound("hh*16").struct(binaryN(16, "<43690 21845 4369>")).gain(0.6),
+  sound("arpy*8").note(toScale([0, 3, 5, 7, 10], markovPat(8, 0, [[0.2, 0.5, 0.3, 0, 0], [0.3, 0, 0.4, 0.3, 0], [0, 0.4, 0.2, 0.4, 0], [0, 0, 0.5, 0, 0.5], [0.6, 0, 0, 0.4, 0]])))
+])` },
 ];
 
 const FIRST_SONG = EXAMPLES.find((e) => e.title === 'Ode to Joy, club edit') ?? EXAMPLES[0];

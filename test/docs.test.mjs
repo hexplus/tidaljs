@@ -56,7 +56,7 @@ for (const [name, doc] of Object.entries(all)) {
 // Every example evaluates and plays without errors or warnings. Sample-bank
 // names only exist once samples() has loaded, so those warnings are allowed.
 const ALLOWED = /Unknown sound "(breaks125|drum)"|Web MIDI is not available/;
-const SILENT = new Set(['query', 'firstCycle', 'exportPattern']);
+const SILENT = new Set(['query', 'firstCycle', 'exportPattern', 'once']);
 const examples = [
     ...Object.entries(DOCS), ...Object.entries(GLOBAL_DOCS), ...Object.entries(SOUND_DOCS), ...Object.entries(MINI_DOCS),
 ].filter(([, doc]) => doc.example);

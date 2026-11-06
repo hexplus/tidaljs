@@ -102,70 +102,221 @@
     const midiToFreq = (midi) => 440 * Math.pow(2, (midi - 69) / 12);
     const freqToMidi = (freq) => 69 + 12 * Math.log2(freq / 440);
 
+    // Scales from Tidal (Sound.Tidal.Scales), by lower-case name.
     const SCALES = {
+        minpent: [0, 3, 5, 7, 10],
+        majpent: [0, 2, 4, 7, 9],
+        ritusen: [0, 2, 5, 7, 9],
+        egyptian: [0, 2, 5, 7, 10],
+        kumai: [0, 2, 3, 7, 9],
+        hirajoshi: [0, 2, 3, 7, 8],
+        iwato: [0, 1, 5, 6, 10],
+        chinese: [0, 4, 6, 7, 11],
+        indian: [0, 4, 5, 7, 10],
+        pelog: [0, 1, 3, 7, 8],
+        prometheus: [0, 2, 4, 6, 11],
+        scriabin: [0, 1, 4, 7, 9],
+        gong: [0, 2, 4, 7, 9],
+        shang: [0, 2, 5, 7, 10],
+        jiao: [0, 3, 5, 8, 10],
+        zhi: [0, 2, 5, 7, 9],
+        yu: [0, 3, 5, 7, 10],
+        augmented: [0, 3, 4, 7, 8, 11],
+        augmented2: [0, 1, 4, 5, 8, 9],
+        hexmajor7: [0, 2, 4, 7, 9, 11],
+        hexdorian: [0, 2, 3, 5, 7, 10],
+        hexphrygian: [0, 1, 3, 5, 8, 10],
+        hexsus: [0, 2, 5, 7, 9, 10],
+        hexmajor6: [0, 2, 4, 5, 7, 9],
+        hexaeolian: [0, 3, 5, 7, 8, 10],
         major: [0, 2, 4, 5, 7, 9, 11],
         ionian: [0, 2, 4, 5, 7, 9, 11],
-        minor: [0, 2, 3, 5, 7, 8, 10],
-        aeolian: [0, 2, 3, 5, 7, 8, 10],
         dorian: [0, 2, 3, 5, 7, 9, 10],
         phrygian: [0, 1, 3, 5, 7, 8, 10],
         lydian: [0, 2, 4, 6, 7, 9, 11],
         mixolydian: [0, 2, 4, 5, 7, 9, 10],
+        aeolian: [0, 2, 3, 5, 7, 8, 10],
+        minor: [0, 2, 3, 5, 7, 8, 10],
         locrian: [0, 1, 3, 5, 6, 8, 10],
-        majpent: [0, 2, 4, 7, 9],
-        minpent: [0, 3, 5, 7, 10],
         harmonicminor: [0, 2, 3, 5, 7, 8, 11],
+        harmonicmajor: [0, 2, 4, 5, 7, 8, 11],
         melodicminor: [0, 2, 3, 5, 7, 9, 11],
+        melodicminordesc: [0, 2, 3, 5, 7, 8, 10],
+        melodicmajor: [0, 2, 4, 5, 7, 8, 10],
+        todi: [0, 1, 3, 6, 7, 8, 11],
+        purvi: [0, 1, 4, 6, 7, 8, 11],
+        marva: [0, 1, 4, 6, 7, 9, 11],
+        bhairav: [0, 1, 4, 5, 7, 8, 11],
+        ahirbhairav: [0, 1, 4, 5, 7, 9, 10],
+        superlocrian: [0, 1, 3, 4, 6, 8, 10],
+        romanianminor: [0, 2, 3, 6, 7, 9, 10],
+        hungarianminor: [0, 2, 3, 6, 7, 8, 11],
+        neapolitanminor: [0, 1, 3, 5, 7, 8, 11],
+        enigmatic: [0, 1, 4, 6, 8, 10, 11],
+        spanish: [0, 1, 4, 5, 7, 8, 10],
+        leadingwhole: [0, 2, 4, 6, 8, 10, 11],
+        lydianminor: [0, 2, 4, 6, 7, 8, 10],
+        neapolitanmajor: [0, 1, 3, 5, 7, 9, 11],
+        locrianmajor: [0, 2, 4, 5, 6, 8, 10],
+        diminished: [0, 1, 3, 4, 6, 7, 9, 10],
+        octatonic: [0, 1, 3, 4, 6, 7, 9, 10],
+        diminished2: [0, 2, 3, 5, 6, 8, 9, 11],
+        octatonic2: [0, 2, 3, 5, 6, 8, 9, 11],
+        messiaen3: [0, 2, 3, 4, 6, 7, 8, 10, 11],
+        messiaen4: [0, 1, 2, 5, 6, 7, 8, 11],
+        messiaen5: [0, 1, 5, 6, 7, 11],
+        messiaen6: [0, 2, 4, 5, 6, 8, 10, 11],
+        messiaen7: [0, 1, 2, 3, 5, 6, 7, 8, 9, 11],
+        chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        bayati: [0, 1.5, 3, 5, 7, 8, 10],
+        hijaz: [0, 1, 4, 5, 7, 8.5, 10],
+        sikah: [0, 1.5, 3.5, 5.5, 7, 8.5, 10.5],
+        rast: [0, 2, 3.5, 5, 7, 9, 10.5],
+        saba: [0, 1.5, 3, 4, 6, 8, 10],
+        iraq: [0, 1.5, 3.5, 5, 6.5, 8.5, 10.5],
         whole: [0, 2, 4, 6, 8, 10],
         wholetone: [0, 2, 4, 6, 8, 10],
-        chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        messiaen1: [0, 2, 4, 6, 8, 10],
+        messiaen2: [0, 1, 3, 4, 6, 7, 9, 10],
         blues: [0, 3, 5, 6, 7, 10],
-        ritusen: [0, 2, 5, 7, 9],
-        egyptian: [0, 2, 5, 7, 10],
-        hexmajor7: [0, 2, 4, 7, 9, 11],
-        hexdorian: [0, 2, 3, 5, 7, 10],
-        hexphrygian: [0, 1, 3, 5, 8, 10],
-        bhairav: [0, 1, 4, 5, 7, 8, 11],
-        diminished: [0, 2, 3, 5, 6, 8, 9, 11],
-        augmented: [0, 3, 4, 7, 8, 11],
-        hungarianminor: [0, 2, 3, 6, 7, 8, 11],
-        pelog: [0, 1, 3, 7, 8],
-        hirajoshi: [0, 2, 3, 7, 8],
-        iwato: [0, 1, 5, 6, 10],
-        kumai: [0, 2, 3, 7, 9],
     };
 
+    // Chords from Tidal (Sound.Tidal.Chords), with all their aliases.
     const CHORDS = {
-        major: [0, 4, 7], maj: [0, 4, 7], M: [0, 4, 7],
-        aug: [0, 4, 8], plus: [0, 4, 8],
-        six: [0, 4, 7, 9], 6: [0, 4, 7, 9],
-        sixNine: [0, 4, 7, 9, 14], six9: [0, 4, 7, 9, 14],
-        major7: [0, 4, 7, 11], maj7: [0, 4, 7, 11],
-        major9: [0, 4, 7, 11, 14], maj9: [0, 4, 7, 11, 14],
+        major: [0, 4, 7],
+        maj: [0, 4, 7],
+        M: [0, 4, 7],
+        aug: [0, 4, 8],
+        plus: [0, 4, 8],
+        sharp5: [0, 4, 8],
+        six: [0, 4, 7, 9],
+        "6": [0, 4, 7, 9],
+        sixNine: [0, 4, 7, 9, 14],
+        six9: [0, 4, 7, 9, 14],
+        sixby9: [0, 4, 7, 9, 14],
+        "6by9": [0, 4, 7, 9, 14],
+        major7: [0, 4, 7, 11],
+        maj7: [0, 4, 7, 11],
+        M7: [0, 4, 7, 11],
+        major9: [0, 4, 7, 11, 14],
+        maj9: [0, 4, 7, 11, 14],
+        M9: [0, 4, 7, 11, 14],
         add9: [0, 4, 7, 14],
-        major11: [0, 4, 7, 11, 14, 17], maj11: [0, 4, 7, 11, 14, 17],
+        major11: [0, 4, 7, 11, 14, 17],
+        maj11: [0, 4, 7, 11, 14, 17],
+        M11: [0, 4, 7, 11, 14, 17],
         add11: [0, 4, 7, 17],
-        major13: [0, 4, 7, 11, 14, 21], maj13: [0, 4, 7, 11, 14, 21],
+        major13: [0, 4, 7, 11, 14, 21],
+        maj13: [0, 4, 7, 11, 14, 21],
+        M13: [0, 4, 7, 11, 14, 21],
         add13: [0, 4, 7, 21],
-        dom7: [0, 4, 7, 10], dom9: [0, 4, 7, 14], dom11: [0, 4, 7, 17], dom13: [0, 4, 7, 21],
-        sevenFlat5: [0, 4, 6, 10], sevenSharp5: [0, 4, 8, 10], sevenFlat9: [0, 4, 7, 10, 13],
-        nine: [0, 4, 7, 10, 14], eleven: [0, 4, 7, 10, 14, 17], thirteen: [0, 4, 7, 10, 14, 17, 21],
-        minor: [0, 3, 7], min: [0, 3, 7], m: [0, 3, 7],
-        diminished: [0, 3, 6], dim: [0, 3, 6],
-        minorSharp5: [0, 3, 8], msharp5: [0, 3, 8],
-        minor6: [0, 3, 7, 9], min6: [0, 3, 7, 9], m6: [0, 3, 7, 9],
-        minorSixNine: [0, 3, 9, 7, 14], minor69: [0, 3, 9, 7, 14],
-        minor7flat5: [0, 3, 6, 10], m7flat5: [0, 3, 6, 10],
-        minorMajor7: [0, 3, 7, 11], mmaj7: [0, 3, 7, 11],
-        diminished7: [0, 3, 6, 9], dim7: [0, 3, 6, 9],
-        minor7: [0, 3, 7, 10], min7: [0, 3, 7, 10], m7: [0, 3, 7, 10],
-        minor9: [0, 3, 7, 10, 14], min9: [0, 3, 7, 10, 14], m9: [0, 3, 7, 10, 14],
-        minor11: [0, 3, 7, 10, 14, 17], min11: [0, 3, 7, 10, 14, 17], m11: [0, 3, 7, 10, 14, 17],
-        minor13: [0, 3, 7, 10, 14, 17, 21], min13: [0, 3, 7, 10, 14, 17, 21], m13: [0, 3, 7, 10, 14, 17, 21],
-        one: [0], 1: [0], five: [0, 7], 5: [0, 7],
-        sus2: [0, 2, 7], sus4: [0, 5, 7],
-        sevenSus2: [0, 2, 7, 10], sevenSus4: [0, 5, 7, 10],
+        dom7: [0, 4, 7, 10],
+        dom9: [0, 4, 7, 14],
+        dom11: [0, 4, 7, 17],
+        dom13: [0, 4, 7, 21],
+        sevenFlat5: [0, 4, 6, 10],
+        "7f5": [0, 4, 6, 10],
+        sevenSharp5: [0, 4, 8, 10],
+        "7s5": [0, 4, 8, 10],
+        sevenFlat9: [0, 4, 7, 10, 13],
+        "7f9": [0, 4, 7, 10, 13],
+        nine: [0, 4, 7, 10, 14],
+        eleven: [0, 4, 7, 10, 14, 17],
+        "11": [0, 4, 7, 10, 14, 17],
+        thirteen: [0, 4, 7, 10, 14, 17, 21],
+        "13": [0, 4, 7, 10, 14, 17, 21],
+        minor: [0, 3, 7],
+        min: [0, 3, 7],
+        m: [0, 3, 7],
+        diminished: [0, 3, 6],
+        dim: [0, 3, 6],
+        minorSharp5: [0, 3, 8],
+        msharp5: [0, 3, 8],
+        mS5: [0, 3, 8],
+        minor6: [0, 3, 7, 9],
+        min6: [0, 3, 7, 9],
+        m6: [0, 3, 7, 9],
+        minorSixNine: [0, 3, 9, 7, 14],
+        minor69: [0, 3, 9, 7, 14],
+        min69: [0, 3, 9, 7, 14],
+        minSixNine: [0, 3, 9, 7, 14],
+        m69: [0, 3, 9, 7, 14],
+        mSixNine: [0, 3, 9, 7, 14],
+        m6by9: [0, 3, 9, 7, 14],
+        minor7flat5: [0, 3, 6, 10],
+        minor7f5: [0, 3, 6, 10],
+        min7flat5: [0, 3, 6, 10],
+        min7f5: [0, 3, 6, 10],
+        m7flat5: [0, 3, 6, 10],
+        m7f5: [0, 3, 6, 10],
+        minor7: [0, 3, 7, 10],
+        min7: [0, 3, 7, 10],
+        m7: [0, 3, 7, 10],
+        minor7sharp5: [0, 3, 8, 10],
+        minor7s5: [0, 3, 8, 10],
+        min7sharp5: [0, 3, 8, 10],
+        min7s5: [0, 3, 8, 10],
+        m7sharp5: [0, 3, 8, 10],
+        m7s5: [0, 3, 8, 10],
+        minor7flat9: [0, 3, 7, 10, 13],
+        minor7f9: [0, 3, 7, 10, 13],
+        min7flat9: [0, 3, 7, 10, 13],
+        min7f9: [0, 3, 7, 10, 13],
+        m7flat9: [0, 3, 7, 10, 13],
+        m7f9: [0, 3, 7, 10, 13],
+        minor7sharp9: [0, 3, 7, 10, 15],
+        minor7s9: [0, 3, 7, 10, 15],
+        min7sharp9: [0, 3, 7, 10, 15],
+        min7s9: [0, 3, 7, 10, 15],
+        m7sharp9: [0, 3, 7, 10, 15],
+        m7s9: [0, 3, 7, 10, 15],
+        diminished7: [0, 3, 6, 9],
+        dim7: [0, 3, 6, 9],
+        minor9: [0, 3, 7, 10, 14],
+        min9: [0, 3, 7, 10, 14],
+        m9: [0, 3, 7, 10, 14],
+        minor11: [0, 3, 7, 10, 14, 17],
+        min11: [0, 3, 7, 10, 14, 17],
+        m11: [0, 3, 7, 10, 14, 17],
+        minor13: [0, 3, 7, 10, 14, 17, 21],
+        min13: [0, 3, 7, 10, 14, 17, 21],
+        m13: [0, 3, 7, 10, 14, 17, 21],
+        minorMajor7: [0, 3, 7, 11],
+        minMaj7: [0, 3, 7, 11],
+        mmaj7: [0, 3, 7, 11],
+        one: [0],
+        "1": [0],
+        five: [0, 7],
+        "5": [0, 7],
+        sus2: [0, 2, 7],
+        sus4: [0, 5, 7],
+        sevenSus2: [0, 2, 7, 10],
+        "7sus2": [0, 2, 7, 10],
+        sevenSus4: [0, 5, 7, 10],
+        "7sus4": [0, 5, 7, 10],
         nineSus4: [0, 5, 7, 10, 14],
+        ninesus4: [0, 5, 7, 10, 14],
+        "9sus4": [0, 5, 7, 10, 14],
+        sevenFlat10: [0, 4, 7, 10, 15],
+        "7f10": [0, 4, 7, 10, 15],
+        nineSharp5: [0, 1, 13],
+        "9sharp5": [0, 1, 13],
+        "9s5": [0, 1, 13],
+        minor9sharp5: [0, 1, 14],
+        minor9s5: [0, 1, 14],
+        min9sharp5: [0, 1, 14],
+        min9s5: [0, 1, 14],
+        m9sharp5: [0, 1, 14],
+        m9s5: [0, 1, 14],
+        sevenSharp5flat9: [0, 4, 8, 10, 13],
+        "7s5f9": [0, 4, 8, 10, 13],
+        minor7sharp5flat9: [0, 3, 8, 10, 13],
+        m7sharp5flat9: [0, 3, 8, 10, 13],
+        elevenSharp: [0, 4, 7, 10, 14, 18],
+        "11s": [0, 4, 7, 10, 14, 18],
+        minor11sharp: [0, 3, 7, 10, 14, 18],
+        m11sharp: [0, 3, 7, 10, 14, 18],
+        m11s: [0, 3, 7, 10, 14, 18],
     };
 
     function rootOffset(root) {
@@ -448,8 +599,10 @@
 
         /** Delays events in the second half of each 1/n slice by x/n. */
         swingBy(x, n) {
-            const amount = requireNumber('swingBy', x);
-            const slices = requireNumber('swingBy', n);
+            return patternedAll(this, 'swingBy', [x, n], (p, amount, slices) => p._swingBy(amount, slices));
+        }
+
+        _swingBy(amount, slices) {
             if (!(slices > 0)) return this;
             const shift = amount / slices;
             return this._derive((b, e) => {
@@ -502,12 +655,12 @@
 
         /** Plays the pattern on k of n evenly spread steps (Euclidean rhythm), rotated by `rotation`. */
         euclid(k, n, rotation = 0) {
-            return this.struct(euclidBools(this.tidal, requireNumber('euclid', k), requireNumber('euclid', n), requireNumber('euclid', rotation), false));
+            return patternedAll(this, 'euclid', [k, n, rotation], (p, kk, nn, rr) => p.struct(euclidBools(p.tidal, kk, nn, rr, false)));
         }
 
         /** Plays the pattern on the steps a Euclidean rhythm leaves empty. */
         euclidInv(k, n, rotation = 0) {
-            return this.struct(euclidBools(this.tidal, requireNumber('euclidInv', k), requireNumber('euclidInv', n), requireNumber('euclidInv', rotation), true));
+            return patternedAll(this, 'euclidInv', [k, n, rotation], (p, kk, nn, rr) => p.struct(euclidBools(p.tidal, kk, nn, rr, true)));
         }
 
         /** The pattern on the hits of a Euclidean rhythm and `other` on its rests. */
@@ -560,9 +713,13 @@
 
         /** Divides cycles into n parts and applies fn to one part per cycle, in turn. */
         chunk(n, fn) {
-            const parts = Math.floor(requireNumber('chunk', n));
-            if (parts < 1) throw new RangeError('chunk() expects n >= 1');
             const transformed = applyTransform('chunk', fn, this);
+            return patterned(this, 'chunk', n, (p, x) => p._chunk(x, transformed));
+        }
+
+        _chunk(n, transformed) {
+            const parts = Math.floor(n);
+            if (parts < 1) throw new RangeError('chunk() expects n >= 1');
             return this._derive((b, e) => eachCycle(b, e, (c, s, t) => {
                 const k = mod(c, parts);
                 const lo = c + k / parts;
@@ -654,7 +811,11 @@
 
         /** Splits cycles into n parts and plays n randomly chosen parts (with repeats). */
         scramble(n) {
-            const parts = Math.floor(requireNumber('scramble', n));
+            return patterned(this, 'scramble', n, (p, x) => p._scramble(x));
+        }
+
+        _scramble(n) {
+            const parts = Math.floor(n);
             if (parts < 1) throw new RangeError('scramble() expects n >= 1');
             const seed = nextSeed();
             return rearrange(this, parts, (c, i) => Math.floor(timeRand(c + i / parts, seed) * parts));
@@ -662,7 +823,11 @@
 
         /** Splits cycles into n parts and plays them in a random order (no repeats). */
         shuffle(n) {
-            const parts = Math.floor(requireNumber('shuffle', n));
+            return patterned(this, 'shuffle', n, (p, x) => p._shuffle(x));
+        }
+
+        _shuffle(n) {
+            const parts = Math.floor(n);
             if (parts < 1) throw new RangeError('shuffle() expects n >= 1');
             const seed = nextSeed();
             let lastCycle = null;
@@ -1041,13 +1206,27 @@
         },
         pinkyup: (x) => x.slice(0, -1).flatMap((n) => [n, x[x.length - 1]]),
         thumbup: (x) => x.slice(1).flatMap((n) => [x[0], n]),
+        pinkyupdown: (x) => {
+            const p = ARP_MODES.pinkyup(x);
+            return p.slice(0, -1).concat(p.slice().reverse().slice(0, -1));
+        },
+        thumbupdown: (x) => {
+            const p = ARP_MODES.thumbup(x);
+            return p.slice(0, -1).concat(p.slice().reverse().slice(0, -1));
+        },
     };
 
     // Control methods: each one sets a value on every event.
     const coerceNumber = (v) => toNumber(v);
     const CONTROLS = {
         s: (v) => (v === undefined || v === null || v === '~' ? undefined : String(v)),
-        n: coerceNumber,
+        // A number, or a note name as semitones from c ("e" is 4), as in Tidal.
+        n: (v) => {
+            const x = toNumber(v);
+            if (x !== undefined && /^-?\d*\.?\d+$/.test(String(v).trim())) return x;
+            const midi = noteNameToMidi(v);
+            return midi === undefined ? x : midi - 60;
+        },
         note: (v, tidal) => {
             const x = typeof v === 'number' ? v : (/^-?\d+(\.\d+)?$/.test(String(v)) ? parseFloat(v) : undefined);
             if (x !== undefined) return 60 + x; // numbers are semitones from middle C
@@ -1090,14 +1269,50 @@
         ccv: coerceNumber,
         pgm: coerceNumber,
         midichan: coerceNumber,
+        // More of Tidal's (SuperDirt's) parameters
+        delaytime: coerceNumber,
+        delayfeedback: coerceNumber,
+        lock: coerceNumber,
+        shape: coerceNumber,
+        coarse: coerceNumber,
+        cut: coerceNumber,
+        accelerate: coerceNumber,
+        djf: coerceNumber,
+        hpq: coerceNumber,
+        bpq: coerceNumber,
+        amp: coerceNumber,
+        octave: coerceNumber,
+        unit: (v) => (['r', 'c', 's'].includes(String(v)) ? String(v) : undefined),
+        distort: coerceNumber,
+        tremolorate: coerceNumber,
+        tremolodepth: coerceNumber,
+        phaserrate: coerceNumber,
+        phaserdepth: coerceNumber,
+        ring: coerceNumber,
+        ringf: coerceNumber,
     };
     const CONTROL_ALIASES = {
         sound: 's',
         cutoff: 'lpf',
+        ctf: 'lpf',
         hcutoff: 'hpf',
         bandf: 'bpf',
         room: 'reverb',
+        sz: 'size',
         velocity: 'vel',
+        lpq: 'resonance',
+        hresonance: 'hpq',
+        bandq: 'bpq',
+        delayt: 'delaytime',
+        delayfb: 'delayfeedback',
+        dfb: 'delayfeedback',
+        sus: 'sustain',
+        att: 'attack',
+        rel: 'release',
+        tremr: 'tremolorate',
+        tremdp: 'tremolodepth',
+        phasr: 'phaserrate',
+        phasdp: 'phaserdepth',
     };
 
     for (const [name, coerce] of Object.entries(CONTROLS)) {
@@ -1109,8 +1324,822 @@
         PatternBuilder.prototype[alias] = PatternBuilder.prototype[name];
     }
 
+    // ==================================================================
+    // More of Tidal's library
+    // ==================================================================
+    //
+    // Functions from Sound.Tidal.UI, Core and Control, as methods. Where
+    // Tidal takes a pattern as the first arguments (fast "<1 2>"), so do
+    // these, through patterned().
+
+    /** Calls apply(pattern, a, b, ...) with each argument patterned (nested). */
+    function patternedAll(pattern, fname, args, apply) {
+        const step = (p, i, values) => {
+            if (i === args.length) return apply(p, ...values);
+            return patterned(p, fname, args[i], (q, x) => step(q, i + 1, [...values, x]));
+        };
+        return step(pattern, 0, []);
+    }
+
+    /** The parts of cycle c where `values` (a pattern or signal) has one value. */
+    function partsOf(values, c) {
+        if (values._signal) return [{ begin: c, end: c + 1, value: values._signal(c) }];
+        return values.query(c - 1, c + 1).filter((ev) => ev.end > c && ev.begin < c + 1);
+    }
+
+    /**
+     * For each part of `selector` within a cycle, plays the pattern that
+     * choose(value, part) returns over that part (Tidal's innerJoin).
+     */
+    function joinOver(tidal, selector, choose) {
+        return new PatternBuilder(tidal, (b, e) => eachCycle(b, e, (c, s, t) => {
+            const out = [];
+            for (const part of partsOf(selector, c)) {
+                const lo = Math.max(s, part.begin);
+                const hi = Math.min(t, part.end);
+                if (lo >= hi) continue;
+                const chosen = choose(part.value, part, c);
+                if (!chosen) continue;
+                for (const ev of chosen.query(lo, hi)) out.push(ev);
+            }
+            return out;
+        }));
+    }
+
+    /** Maps cycle c + [a, z) of the pattern onto the whole cycle c (Tidal's zoom). */
+    function zoomPattern(pattern, a, z) {
+        const d = z - a;
+        if (!(d > 0)) return silence(pattern.tidal);
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            const toSrc = (x) => c + a + (x - c) * d;
+            const fromSrc = (y) => c + (y - c - a) / d;
+            return pattern.query(toSrc(s), toSrc(t)).map(
+                (ev) => ({ begin: fromSrc(ev.begin), end: fromSrc(ev.end), value: ev.value })
+            );
+        }));
+    }
+
+    /** Applies fn to the events of the cycles for which test(cycle) is true. */
+    function perCycle(pattern, test, transformed, otherwise = pattern) {
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) =>
+            (test(c) ? transformed : otherwise).query(s, t)
+        ));
+    }
+
+    /** Multiplies a numeric control of every event (missing values count as `fallback`). */
+    function scaleControl(pattern, name, factor, fallback = 1) {
+        return pattern.withValue((v) => {
+            const o = asObject(v);
+            return { ...o, [name]: (isNum(o[name]) ? o[name] : fallback) * factor };
+        });
+    }
+
+    /** True if every key of `match` equals the event's value (arrays: any of them). */
+    function matchesControls(value, match) {
+        const o = asObject(value);
+        return Object.entries(match).every(([key, want]) => {
+            const options = Array.isArray(want) ? want : [want];
+            return options.some((w) => {
+                const got = o[key];
+                if (key === 's' && typeof w === 'string' && w.includes(':')) {
+                    const sv = soundValue(w);
+                    return got === sv.s && o.n === sv.n;
+                }
+                if (isNum(got) && toNumber(w) !== undefined) {
+                    return key === 'note' ? got === CONTROLS.note(w) : got === toNumber(w);
+                }
+                return String(got) === String(w);
+            });
+        });
+    }
+
+    /**
+     * Combines two event values for set() and the arithmetic operators.
+     * Control objects combine key by key (keys only on the right are added);
+     * a plain number acts on note, else n. Notes are combined as semitones
+     * from middle C, so note("0") .add(note("12")) is note("12").
+     */
+    function combineValues(a, b, op) {
+        const num = (x) => toNumber(x);
+        const onNote = (key, x, y) => (key === 'note' ? op(x - 60, y - 60) + 60 : op(x, y));
+        if (op === SET) {
+            if (b && typeof b === 'object') return { ...asObject(a), ...b };
+            return a && typeof a === 'object' ? a : b;
+        }
+        if (a && typeof a === 'object') {
+            if (b && typeof b === 'object') {
+                const out = { ...a };
+                for (const [key, y] of Object.entries(b)) {
+                    const x = a[key];
+                    if (x === undefined) out[key] = y;
+                    else if (isNum(x) && isNum(y)) out[key] = onNote(key, x, y);
+                    else if (typeof x === 'string' && typeof y === 'string' && op === ADD) out[key] = x + y;
+                }
+                // "bd" + ":3" is the sound bd with n 3.
+                if (typeof out.s === 'string' && out.s.includes(':') && out.s !== a.s) Object.assign(out, soundValue(out.s));
+                return out;
+            }
+            const y = num(b);
+            if (y === undefined) return a;
+            for (const key of ['note', 'n']) {
+                if (isNum(a[key])) return { ...a, [key]: key === 'note' ? op(a.note - 60, y) + 60 : op(a[key], y) };
+            }
+            return a;
+        }
+        if (b && typeof b === 'object') return combineValues(asObject(a), b, op);
+        const x = num(a);
+        const y = num(b);
+        if (x !== undefined && y !== undefined) return op(x, y);
+        if (op === ADD && typeof a === 'string' && typeof b === 'string') return a + b;
+        return a;
+    }
+    const SET = () => undefined;
+    const ADD = (x, y) => x + y;
+    const OPS = {
+        add: ADD,
+        sub: (x, y) => x - y,
+        mul: (x, y) => x * y,
+        div: (x, y) => (y === 0 ? 0 : x / y),
+        mod: (x, y) => (y === 0 ? 0 : mod(x, y)),
+        pow: (x, y) => Math.pow(x, y),
+    };
+
+    /** Values of `other` (a number, a mini-notation string or a pattern) at this pattern's events. */
+    function operatePattern(pattern, other, fname, op) {
+        const tidal = pattern.tidal;
+        let right;
+        if (other instanceof PatternBuilder) right = other;
+        else if (typeof other === 'number' || typeof other === 'boolean') right = pure(tidal, other);
+        else if (typeof other === 'string' || Array.isArray(other)) right = toRaw(tidal, other, fname);
+        else if (other && typeof other === 'object') right = pure(tidal, { ...other });
+        else throw new TypeError(`${fname}() expects a number, a mini-notation string or a pattern`);
+
+        if (pattern._signal) {
+            const sig = pattern._signal;
+            return signal(tidal, (t) => {
+                const hit = eventAt(right, t);
+                return hit ? combineValues(sig(t), hit.value, op) : sig(t);
+            });
+        }
+        return pattern._derive((b, e) => {
+            const out = [];
+            for (const ev of pattern.query(b, e)) {
+                for (const hit of eventsAt(right, ev.begin)) {
+                    out.push({ begin: ev.begin, end: ev.end, value: combineValues(ev.value, hit.value, op) });
+                }
+            }
+            return out;
+        });
+    }
+
+    Object.assign(PatternBuilder.prototype, {
+        // --- Combining patterns (Tidal's #, |+, |-, |*, |/, |%) -------------
+
+        /** Tidal's #: the rhythm of this pattern, with the controls of `other` added or replaced. */
+        set(other) { return operatePattern(this, other, 'set', SET); },
+        /** Tidal's |+: adds numbers (or joins strings) key by key; the rhythm comes from this pattern. */
+        add(other) { return operatePattern(this, other, 'add', OPS.add); },
+        sub(other) { return operatePattern(this, other, 'sub', OPS.sub); },
+        mul(other) { return operatePattern(this, other, 'mul', OPS.mul); },
+        div(other) { return operatePattern(this, other, 'div', OPS.div); },
+        mod(other) { return operatePattern(this, other, 'mod', OPS.mod); },
+        pow(other) { return operatePattern(this, other, 'pow', OPS.pow); },
+
+        // --- Structure -----------------------------------------------------
+
+        /** Squashes every other cycle into its first half and shifts it a quarter cycle (a breakbeat feel). */
+        brak() {
+            const squashed = shiftPattern(fastcat(this.tidal, [this, silence(this.tidal)]), 0.25);
+            return perCycle(this, (c) => mod(c, 2) === 1, squashed);
+        },
+
+        /** Keeps only the events where a boolean pattern is true ("1 0 1 1", "t f"). */
+        mask(booleans) {
+            const bools = toRaw(this.tidal, booleans, 'mask');
+            return this._filter((ev) => {
+                const hit = eventAt(bools, ev.begin);
+                return !!hit && isTruthy(hit.value);
+            });
+        },
+
+        /** Inverts a boolean pattern: true becomes false and the other way round. */
+        inv() {
+            return this.withValue((v) => !isTruthy(v));
+        },
+
+        /** This pattern where the booleans are true, `other` where they are false. */
+        sew(booleans, other) {
+            const bools = toRaw(this.tidal, booleans, 'sew');
+            return stackPatterns(this.tidal, [this.mask(bools), toPattern(this.tidal, other, 'sew').mask(bools.inv())]);
+        },
+
+        /** The rhythm of a boolean pattern: true steps take this pattern's value, false steps `other`'s. */
+        stitch(booleans, other) {
+            const bools = toRaw(this.tidal, booleans, 'stitch');
+            const rest = toPattern(this.tidal, other, 'stitch');
+            return stackPatterns(this.tidal, [
+                this.struct(bools.withValue((v) => isTruthy(v))),
+                rest.struct(bools.withValue((v) => !isTruthy(v))),
+            ]);
+        },
+
+        /** Squashes this pattern into the first `time` of each cycle and `other` into the rest. */
+        wedge(time, other) {
+            const t = clamp(requireNumber('wedge', time), 0, 1);
+            if (t === 0) return toPattern(this.tidal, other, 'wedge');
+            if (t === 1) return this;
+            return stackPatterns(this.tidal, [compressPattern(this, 0, t), compressPattern(toPattern(this.tidal, other, 'wedge'), t, 1)]);
+        },
+
+        /** Euclidean rhythm with a rotation, as Tidal's euclidOff (same as euclid with three arguments). */
+        euclidOff(k, n, rotation) { return this.euclid(k, n, rotation); },
+        eoff(k, n, rotation) { return this.euclid(k, n, rotation); },
+        euclidOffFull(k, n, rotation, other) { return this.euclidFull(k, n, other, rotation); },
+
+        /** Zooms into part of each cycle: zoom(0.25, 0.75) plays the middle half, stretched to fill the cycle. */
+        zoom(begin, end) {
+            if (Array.isArray(begin)) [begin, end] = begin;
+            return zoomPattern(this, requireNumber('zoom', begin), requireNumber('zoom', end));
+        },
+        zoomArc(begin, end) { return this.zoom(begin, end); },
+
+        /** Squashes each cycle into its first 1/n, leaving the rest silent. */
+        fastGap(n) {
+            return patterned(this, 'fastGap', n, (p, x) => (x > 0 ? compressPattern(p, 0, Math.min(1, 1 / Math.max(1, x))) : silence(p.tidal)));
+        },
+        densityGap(n) { return this.fastGap(n); },
+
+        /** Plays only the first part of each cycle (trunc(0.75): the first three quarters). */
+        trunc(fraction) {
+            return patterned(this, 'trunc', fraction, (p, x) => {
+                const len = clamp(x, 0, 1);
+                return p._derive((b, e) => p.query(b, e)
+                    .filter((ev) => cyclePos(ev.begin) < len - 1e-9)
+                    .map((ev) => ({ ...ev, end: Math.min(ev.end, Math.floor(ev.begin) + len) })));
+            });
+        },
+
+        /** Repeats each cycle n times before moving on. */
+        repeatCycles(n) {
+            return patterned(this, 'repeatCycles', n, (p, x) => {
+                const times = Math.max(1, Math.floor(x));
+                return p._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+                    const offset = c - Math.floor(c / times);
+                    return p.query(s - offset, t - offset).map((ev) => ({ begin: ev.begin + offset, end: ev.end + offset, value: ev.value }));
+                }));
+            });
+        },
+
+        /** Plays the first cycle of the pattern over and over. */
+        loopFirst() {
+            return this._derive((b, e) => eachCycle(b, e, (c, s, t) =>
+                this.query(s - c, t - c).map((ev) => ({ begin: ev.begin + c, end: ev.end + c, value: ev.value }))
+            ));
+        },
+
+        /** Same as segment(). */
+        discretise(n) { return this.segment(n); },
+
+        /** Shifts each event later by `ratio` of its length, keeping its end: pressBy(0.5) plays on the off-beats. */
+        pressBy(ratio) {
+            return patterned(this, 'pressBy', ratio, (p, r) => p._derive((b, e) => {
+                const out = [];
+                for (const ev of p.query(Math.floor(b) - 1, e)) {
+                    const begin = ev.begin + (ev.end - ev.begin) * clamp(r, 0, 1);
+                    if (begin >= b && begin < e) out.push({ begin, end: ev.end, value: ev.value });
+                }
+                return out;
+            }));
+        },
+        press() { return this.pressBy(0.5); },
+
+        /** Repeats each event n times within its span; each repeat applies fn once more (Tidal's plyWith). */
+        plyWith(n, fn) {
+            requireFunction('plyWith', fn);
+            return patterned(this, 'plyWith', n, (p, x) => {
+                const times = Math.max(1, Math.round(x));
+                const layers = [p];
+                for (let k = 1; k < times; k++) layers.push(applyTransform('plyWith', fn, layers[k - 1]));
+                return p._derive((b, e) => {
+                    const out = [];
+                    layers.forEach((layer, k) => {
+                        for (const ev of layer.query(Math.floor(b) - 1, e)) {
+                            const step = (ev.end - ev.begin) / times;
+                            const begin = ev.begin + k * step;
+                            if (begin >= b && begin < e) out.push({ begin, end: begin + step, value: ev.value });
+                        }
+                    });
+                    return out;
+                });
+            });
+        },
+
+        /** Plays the notes of each chord one after another, like strumming: 1/4 of the event between the first and last. */
+        rolled() { return this.rolledBy(0.25); },
+
+        /** Strums chords: each note of a chord starts `amount` of the event later than the one below; negative strums down. */
+        rolledBy(amount) {
+            return patterned(this, 'rolledBy', amount, (p, t) => {
+                if (t === 0) return p;
+                return p._derive((b, e) => {
+                    const groups = new Map();
+                    for (const ev of p.query(Math.floor(b) - 1, e)) {
+                        const key = `${ev.begin}:${ev.end}`;
+                        if (!groups.has(key)) groups.set(key, []);
+                        groups.get(key).push(ev);
+                    }
+                    const out = [];
+                    for (const group of groups.values()) {
+                        const notes = group.slice().sort((x, y) => pitchOf(x.value) - pitchOf(y.value));
+                        if (t < 0) notes.reverse();
+                        const shift = ((group[0].end - group[0].begin) * Math.abs(t)) / notes.length;
+                        notes.forEach((ev, i) => {
+                            const begin = ev.begin + i * shift;
+                            if (begin >= b && begin < e) out.push({ begin, end: ev.end, value: ev.value });
+                        });
+                    }
+                    return out;
+                });
+            });
+        },
+
+        // --- Conditions ----------------------------------------------------
+
+        /** Applies fn on the cycles for which test(cycle) is true. */
+        when(test, fn) {
+            requireFunction('when', test);
+            return perCycle(this, (c) => !!test(c), applyTransform('when', fn, this));
+        },
+
+        /** Applies fa on the cycles for which test(cycle) is true, fb on the others. */
+        ifp(test, fa, fb) {
+            requireFunction('ifp', test);
+            return perCycle(this, (c) => !!test(c), applyTransform('ifp', fa, this), applyTransform('ifp', fb, this));
+        },
+
+        /** Applies fn on the cycles divisible by any of the numbers: foldEvery([3, 5], f). */
+        foldEvery(ns, fn) {
+            const list = (Array.isArray(ns) ? ns : [ns]).map((n) => Math.floor(requireNumber('foldEvery', n))).filter((n) => n >= 1);
+            return perCycle(this, (c) => list.some((n) => mod(c, n) === 0), applyTransform('foldEvery', fn, this));
+        },
+
+        /** Applies fn to whole cycles at random, each with probability `prob`. */
+        someCyclesBy(prob, fn) {
+            const transformed = applyTransform('someCyclesBy', fn, this);
+            const seed = nextSeed();
+            return patterned(this, 'someCyclesBy', prob, (p, x) =>
+                perCycle(p, (c) => timeRand(c, seed) < clamp(x, 0, 1), transformed));
+        },
+        someCycles(fn) { return this.someCyclesBy(0.5, fn); },
+        somecyclesBy(prob, fn) { return this.someCyclesBy(prob, fn); },
+        somecycles(fn) { return this.someCyclesBy(0.5, fn); },
+
+        /** Always applies fn: the same as fn(pattern). */
+        always(fn) { return applyTransform('always', fn, this); },
+        /** Never applies fn: the pattern unchanged. */
+        never(fn) { requireFunction('never', fn); return this; },
+
+        /** Applies fn "inside" a cycle: inside(2, rev) reverses each half cycle. */
+        inside(n, fn) {
+            requireFunction('inside', fn);
+            return patterned(this, 'inside', n, (p, x) => fastPattern(applyTransform('inside', fn, fastPattern(p, 1 / x)), x));
+        },
+        /** Applies fn over several cycles: outside(2, rev) reverses each pair of cycles. */
+        outside(n, fn) {
+            requireFunction('outside', fn);
+            return patterned(this, 'outside', n, (p, x) => fastPattern(applyTransform('outside', fn, fastPattern(p, x)), 1 / x));
+        },
+
+        /** Like chunk, moving backwards through the parts. */
+        chunkBack(n, fn) {
+            const transformed = applyTransform('chunkBack', fn, this);
+            return patterned(this, 'chunkBack', n, (p, x) => {
+                const parts = Math.floor(x);
+                if (parts < 1) throw new RangeError('chunkBack() expects n >= 1');
+                return p._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+                    const k = mod(-c - 1, parts);
+                    const inside = (ev) => ev.begin >= c + k / parts && ev.begin < c + (k + 1) / parts;
+                    return [...p.query(s, t).filter((ev) => !inside(ev)), ...transformed.query(s, t).filter(inside)];
+                }));
+            });
+        },
+
+        /** Applies fn to the events whose controls match: fix(x => x.fast(2), { s: "bd" }). */
+        fix(fn, match) {
+            return this.contrast(fn, (x) => x, match);
+        },
+        /** Applies fn to the events whose controls do not match. */
+        unfix(fn, match) {
+            return this.contrast((x) => x, fn, match);
+        },
+        /** Applies fa to the events that match the controls and fb to the others. */
+        contrast(fa, fb, match) {
+            if (!match || typeof match !== 'object') throw new TypeError('contrast() expects controls to match, e.g. { s: "bd" }');
+            const hit = this._filter((ev) => matchesControls(ev.value, match));
+            const miss = this._filter((ev) => !matchesControls(ev.value, match));
+            return stackPatterns(this.tidal, [applyTransform('contrast', fa, hit), applyTransform('contrast', fb, miss)]);
+        },
+
+        /** Applies a function with each value of a list, one per cycle: spread((p, x) => p.fast(x), [1, 2]). */
+        spread(fn, values) {
+            requireFunction('spread', fn);
+            if (!Array.isArray(values) || values.length === 0) throw new TypeError('spread() expects a function and a list, e.g. spread((p, x) => p.fast(x), [1, 2])');
+            return slowcat(this.tidal, values.map((v) => spreadItem(fn, this, v)));
+        },
+        slowspread(fn, values) { return this.spread(fn, values); },
+        /** Like spread, with all the values squeezed into one cycle. */
+        fastspread(fn, values) {
+            requireFunction('fastspread', fn);
+            return fastcat(this.tidal, values.map((v) => spreadItem(fn, this, v)));
+        },
+        /** Like spread, picking a value at random each cycle. */
+        spreadChoose(fn, values) {
+            requireFunction('spreadChoose', fn);
+            return randcat(this.tidal, values.map((v) => spreadItem(fn, this, v)));
+        },
+        spreadr(fn, values) { return this.spreadChoose(fn, values); },
+
+        /** Applies the function from a list that an index pattern picks: pickF("<0 1>", [x => x.rev(), x => x.fast(2)]). */
+        pickF(indices, fns) {
+            const list = checkFunctions('pickF', fns).map((f) => applyTransform('pickF', f, this));
+            return joinOver(this.tidal, toRaw(this.tidal, indices, 'pickF'), (v) => {
+                const i = toNumber(v);
+                return i === undefined ? null : list[mod(Math.floor(i), list.length)];
+            });
+        },
+        /** Like pickF, with a number from 0 to 1 choosing the function. */
+        selectF(amount, fns) {
+            const list = checkFunctions('selectF', fns).map((f) => applyTransform('selectF', f, this));
+            return joinOver(this.tidal, toRaw(this.tidal, amount, 'selectF'), (v) => {
+                const x = toNumber(v);
+                return x === undefined ? null : list[clamp(Math.floor(x * list.length), 0, list.length - 1)];
+            });
+        },
+
+        /** Applies fn repeatedly, once more each cycle, for `depth` cycles (Tidal's soak). */
+        soak(depth, fn) {
+            const n = Math.max(1, Math.floor(requireNumber('soak', depth)));
+            const layers = [this];
+            for (let i = 1; i < n; i++) layers.push(applyTransform('soak', fn, layers[i - 1]));
+            return slowcat(this.tidal, layers);
+        },
+
+        // --- Randomness ----------------------------------------------------
+
+        /** Fades the pattern out over n cycles by removing more and more events. */
+        fadeOut(n) {
+            const cycles = requireNumber('fadeOut', n);
+            const seed = nextSeed();
+            return this._filter((ev) => timeRand(ev.begin, seed) >= clamp(ev.begin / cycles, 0, 1));
+        },
+        /** Fades the pattern in over n cycles, from silence. */
+        fadeIn(n) {
+            const cycles = requireNumber('fadeIn', n);
+            const seed = nextSeed();
+            return this._filter((ev) => timeRand(ev.begin, seed) >= 1 - clamp(ev.begin / cycles, 0, 1));
+        },
+        fadeOutFrom(from, n) { return this._afterCycle(requireNumber('fadeOutFrom', from), n, false); },
+        fadeInFrom(from, n) { return this._afterCycle(requireNumber('fadeInFrom', from), n, true); },
+
+        _afterCycle(from, n, fadeIn) {
+            const cycles = requireNumber(fadeIn ? 'fadeInFrom' : 'fadeOutFrom', n);
+            const seed = nextSeed();
+            return this._filter((ev) => {
+                const amount = clamp((ev.begin - from) / cycles, 0, 1);
+                return timeRand(ev.begin, seed) >= (fadeIn ? 1 - amount : amount);
+            });
+        },
+
+        /** Plays each cycle as n segments of random length, each a whole cycle at a random speed. */
+        stripe(n) {
+            const seed = nextSeed();
+            return patterned(this, 'stripe', n, (p, x) => stripePattern(p, Math.max(1, Math.floor(x)), seed));
+        },
+        /** Like stripe, spread over n cycles. */
+        slowstripe(n) {
+            return patterned(this, 'slowstripe', n, (p, x) => fastPattern(p.stripe(1), 1 / Math.max(1, x)));
+        },
+
+        // --- Repeats and echoes --------------------------------------------
+
+        /** Echoes: n copies, each `time` cycles later and with `feedback` times the gain of the one before. */
+        echo(count, time, feedback) {
+            const fb = requireNumber('echo', feedback);
+            return this.echoWith(count, time, (x) => scaleControl(x, 'gain', fb));
+        },
+        /** Echoes changed by a function: each copy is fn applied once more, `time` cycles later. */
+        echoWith(count, time, fn) {
+            requireFunction('echoWith', fn);
+            return patternedAll(this, 'echoWith', [count, time], (p, n, t) => echoWithPattern(p, Math.floor(n), t, fn));
+        },
+        stutWith(count, time, fn) { return this.echoWith(count, time, fn); },
+        /** Tidal's classic stut: count copies, `time` apart, getting quieter by `feedback`. */
+        stut(count, feedback, time) {
+            return patternedAll(this, 'stut', [count, feedback, time], (p, n, fb, t) => {
+                const copies = Math.max(1, Math.floor(n));
+                const layers = [p];
+                for (let x = 1; x < copies; x++) {
+                    const level = fb + (1 - fb) * ((copies - x) / copies);
+                    layers.push(shiftPattern(scaleControl(p, 'gain', level), x * t));
+                }
+                return stackPatterns(p.tidal, layers);
+            });
+        },
+        /** n copies of each event, `time` apart: a stutter. */
+        stutter(count, time) {
+            return this.echoWith(count, time, (x) => x);
+        },
+
+        /** Adds two quieter, shorter, higher ghost notes after each event (drum ghost notes). */
+        ghost() {
+            return this.ghostWith(0.125, (x) => scaleControl(scaleControl(x, 'gain', 0.7), 'speed', 1.25).withValue((v) => ({ ...asObject(v), end: 0.2 })));
+        },
+        /** Ghost notes changed by fn, `time` * 1.5 and * 2.5 after each event. */
+        ghostWith(time, fn) {
+            const a = requireNumber('ghostWith', time);
+            requireFunction('ghostWith', fn);
+            const inner = stackPatterns(this.tidal, [this, shiftPattern(applyTransform('ghostWith', fn, this), a * 1.5)]);
+            return stackPatterns(this.tidal, [inner, shiftPattern(applyTransform('ghostWith', fn, inner), a * 2.5)]);
+        },
+
+        // --- Values --------------------------------------------------------
+
+        /** Scales values from 0..1 to lo..hi exponentially (good for frequencies). */
+        rangex(lo, hi) {
+            const a = Math.log(requireNumber('rangex', lo));
+            const z = Math.log(requireNumber('rangex', hi));
+            return this.withValue((v) => {
+                const x = toNumber(v);
+                return x === undefined ? v : Math.exp(a + x * (z - a));
+            });
+        },
+        qfloor() { return this.withValue((v) => (toNumber(v) === undefined ? v : Math.floor(toNumber(v)))); },
+        qceiling() { return this.withValue((v) => (toNumber(v) === undefined ? v : Math.ceil(toNumber(v)))); },
+        qround() { return this.quantise(); },
+
+        /** Turns numbers into notes of a scale given as semitones: toScale([0, 2, 4, 5, 7, 9, 11]). */
+        toScale(steps) {
+            const list = checkNumbers('toScale', steps);
+            return this.withValue((v) => {
+                const x = toNumber(v);
+                if (x === undefined) return v;
+                const d = Math.floor(x);
+                return list[mod(d, list.length)] + 12 * Math.floor(d / list.length);
+            });
+        },
+
+        // --- Samples -------------------------------------------------------
+
+        /** Plays slices of each sample: slice(4, "0 2") plays the first and third quarters, in the rhythm of the index pattern. */
+        slice(n, indices) {
+            return patterned(this, 'slice', n, (p, x) => {
+                const parts = Math.max(1, Math.floor(x));
+                const index = toRaw(p.tidal, indices, 'slice');
+                return p._derive((b, e) => {
+                    const out = [];
+                    for (const iev of index.query(b, e)) {
+                        const i = toNumber(iev.value);
+                        const base = eventAt(p, iev.begin);
+                        if (i === undefined || !base) continue;
+                        const k = mod(Math.floor(i), parts);
+                        out.push({ begin: iev.begin, end: iev.end, value: { ...asObject(base.value), begin: k / parts, end: (k + 1) / parts } });
+                    }
+                    return out;
+                });
+            });
+        },
+        /** Like slice, with each slice sped up or slowed down to fill its step. */
+        splice(n, indices) {
+            return patterned(this, 'splice', n, (p, x) => {
+                const parts = Math.max(1, Math.floor(x));
+                const sliced = p.slice(parts, indices);
+                return sliced._derive((b, e) => sliced.query(b, e).map((ev) => {
+                    const v = asObject(ev.value);
+                    const speed = (1 / parts) / (ev.end - ev.begin) * (isNum(v.speed) ? v.speed : 1);
+                    return { ...ev, value: { ...v, speed, unit: 'c' } };
+                }));
+            });
+        },
+        /** Plays a random slice (of n) of each sample. */
+        randslice(n) {
+            const seed = nextSeed();
+            return patterned(this, 'randslice', n, (p, x) => {
+                const parts = Math.max(1, Math.floor(x));
+                return p._derive((b, e) => p.query(b, e).map((ev) => {
+                    const k = Math.floor(timeRand(ev.begin, seed) * parts);
+                    return { ...ev, value: { ...asObject(ev.value), begin: k / parts, end: (k + 1) / parts } };
+                }));
+            });
+        },
+        /** Stretches each sample to last n cycles and slows the pattern to match: for loops and breakbeats. */
+        loopAt(n) {
+            return patterned(this, 'loopAt', n, (p, x) => {
+                if (!(x > 0)) return silence(p.tidal);
+                return fastPattern(p, 1 / x).withValue((v) => {
+                    const o = asObject(v);
+                    return { ...o, speed: (isNum(o.speed) ? o.speed : 1) / x, unit: 'c' };
+                });
+            });
+        },
+        /** Cuts each sample into n slices with striate and plays them at the speeds of a list, one per cycle. */
+        smash(n, factors) {
+            const list = checkNumbers('smash', factors);
+            const striated = this.striate(n);
+            return slowcat(this.tidal, list.map((f) => fastPattern(striated, 1 / f)));
+        },
+        /** n copies, each shifted by 1/n of a cycle and panned across the stereo field. */
+        spin(n) {
+            return patterned(this, 'spin', n, (p, x) => {
+                const copies = Math.max(1, Math.floor(x));
+                const layers = [];
+                for (let i = 0; i < copies; i++) {
+                    layers.push(shiftPattern(p, -i / copies).withValue((v) => ({ ...asObject(v), pan: (2 * i) / copies - 1 + (copies === 1 ? 1 : 0) })));
+                }
+                return stackPatterns(p.tidal, layers);
+            });
+        },
+        /** Like striate, with each slice overlapping by `length` (0 to 1) of the sample. */
+        striateBy(n, length) {
+            return patternedAll(this, 'striateBy', [n, length], (p, x, len) => {
+                const parts = Math.max(1, Math.floor(x));
+                const slices = [];
+                for (let i = 0; i < parts; i++) {
+                    const begin = parts > 1 ? ((1 - len) * i) / (parts - 1) : 0;
+                    slices.push(p.withValue((v) => ({ ...asObject(v), begin, end: begin + len })));
+                }
+                return fastcat(p.tidal, slices);
+            });
+        },
+
+        // --- Triggers ------------------------------------------------------
+
+        /** Restarts the pattern from its first cycle at the next cycle after the code runs. */
+        qtrigger() {
+            const at = this.tidal && this.tidal.isPlaying ? Math.ceil(this.tidal.getCyclePosition() - 1e-9) : 0;
+            return at ? shiftPattern(this, at) : this;
+        },
+        qt() { return this.qtrigger(); },
+        /** Restarts the pattern from its beginning at the moment the code runs. */
+        trigger() {
+            const at = this.tidal && this.tidal.isPlaying ? this.tidal.getCyclePosition() : 0;
+            return at ? shiftPattern(this, at) : this;
+        },
+        /** Plays the first cycle of the pattern once, right away. */
+        once() {
+            if (this.tidal) this.tidal.playOnce(this);
+            return undefined;
+        },
+    });
+
+    /** spread() helper: fn(pattern, value), checked to return a pattern. */
+    function spreadItem(fn, pattern, value) {
+        const result = fn(pattern, value);
+        if (!(result instanceof PatternBuilder)) throw new TypeError('spread(): the function must return a pattern, e.g. (p, x) => p.fast(x)');
+        return result;
+    }
+
+    function checkFunctions(fname, fns) {
+        if (!Array.isArray(fns) || fns.length === 0 || !fns.every((f) => typeof f === 'function')) {
+            throw new TypeError(`${fname}() expects a list of functions, e.g. [x => x.rev(), x => x.fast(2)]`);
+        }
+        return fns;
+    }
+
+    function checkNumbers(fname, list) {
+        if (!Array.isArray(list) || list.length === 0 || !list.every((x) => toNumber(x) !== undefined)) {
+            throw new TypeError(`${fname}() expects a list of numbers, e.g. [0, 2, 4]`);
+        }
+        return list.map(toNumber);
+    }
+
+    /** Tidal's echoWith: the pattern plus fn applied once more every `time` cycles, `count` times in all. */
+    function echoWithPattern(pattern, count, time, fn) {
+        let result = pattern;
+        let layer = pattern;
+        for (let i = 1; i < count; i++) {
+            layer = shiftPattern(applyTransform('echoWith', fn, layer), time);
+            result = stackPatterns(pattern.tidal, [result, layer]);
+        }
+        return result;
+    }
+
+    /** Each cycle split into n segments of random length, each playing a whole cycle squeezed into it. */
+    function stripePattern(pattern, n, seed) {
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            const weights = Array.from({ length: n }, (_, j) => 0.05 + timeRand(c + j / n, seed));
+            const total = weights.reduce((x, y) => x + y, 0);
+            const out = [];
+            let pos = 0;
+            weights.forEach((w, j) => {
+                const a = pos / total;
+                pos += w;
+                const z = pos / total;
+                const lo = Math.max(s, c + a);
+                const hi = Math.min(t, c + z);
+                if (lo >= hi) return;
+                const src = c * n + j; // a different cycle of the pattern in each segment
+                const toSrc = (x) => src + (x - c - a) / (z - a);
+                const fromSrc = (y) => c + a + (y - src) * (z - a);
+                for (const ev of pattern.query(toSrc(lo), toSrc(hi))) {
+                    out.push({ begin: fromSrc(ev.begin), end: fromSrc(ev.end), value: ev.value });
+                }
+            });
+            return out;
+        }));
+    }
+
+    /** Bits of n, most significant first. */
+    function bitsOf(n, bits) {
+        const out = [];
+        for (let i = bits - 1; i >= 0; i--) out.push(Math.floor(n / Math.pow(2, i)) % 2 === 1);
+        return out;
+    }
+
+    /** Applies L-system rules ("a:b,b:ab") n times to an axiom. */
+    function lindenmayer(n, rules, axiom) {
+        const table = {};
+        for (const rule of String(rules).split(',')) {
+            const [from, to] = rule.split(':');
+            if (from !== undefined && to !== undefined && from.length === 1) table[from] = to;
+        }
+        let text = String(axiom);
+        for (let i = 0; i < Math.floor(n) && text.length < 100000; i++) {
+            text = [...text].map((ch) => (table[ch] !== undefined ? table[ch] : ch)).join('');
+        }
+        return text;
+    }
+
+    /** States of a Markov chain, n per cycle, starting from xi each cycle (Tidal's markovPat). */
+    function markovPattern(tidal, n, xi, matrix) {
+        const steps = Math.max(1, Math.floor(n));
+        if (!Array.isArray(matrix) || !matrix.every((row) => Array.isArray(row) && row.length === matrix.length)) {
+            throw new TypeError('markovPat() expects a square matrix, e.g. [[0.2, 0.8], [0.5, 0.5]]');
+        }
+        const seed = nextSeed();
+        const chain = (c) => {
+            const states = [mod(Math.floor(xi), matrix.length)];
+            for (let k = 1; k < steps; k++) {
+                const row = matrix[states[k - 1]].map((x) => Math.max(0, toNumber(x) || 0));
+                const total = row.reduce((x, y) => x + y, 0) || 1;
+                const r = timeRand(c + k / steps, seed);
+                let acc = 0;
+                let next = row.length - 1;
+                for (let i = 0; i < row.length; i++) {
+                    acc += row[i] / total;
+                    if (r <= acc) { next = i; break; }
+                }
+                states.push(next);
+            }
+            return states;
+        };
+        return new PatternBuilder(tidal, (b, e) => eachCycle(b, e, (c, s, t) => {
+            const out = [];
+            chain(c).forEach((state, k) => {
+                const begin = c + k / steps;
+                if (begin >= s && begin < t) out.push({ begin, end: c + (k + 1) / steps, value: state });
+            });
+            return out;
+        }));
+    }
+
+    /** n steps: 0 1 ... n-1 in one cycle. */
+    function runPattern(tidal, n) {
+        const steps = Math.floor(n);
+        if (steps < 1) return silence(tidal);
+        return fastcat(tidal, Array.from({ length: steps }, (_, i) => pure(tidal, i)));
+    }
+
     function asObject(v) {
         return v && typeof v === 'object' ? v : { s: v === undefined || v === null ? v : String(v) };
+    }
+
+    /**
+     * A pattern of one control on its own, as Tidal's n "0 1" or speed 2:
+     * each event's value is { [name]: value }. Rests and invalid values are dropped.
+     */
+    function controlPattern(tidal, name, input) {
+        const coerce = CONTROLS[name];
+        if (input === undefined || input === null) throw new TypeError(`${name}() needs a value`);
+        const values = typeof input === 'number' || typeof input === 'boolean' ? pure(tidal, input) : toRaw(tidal, input, name);
+        if (values._signal) {
+            return values.withValue((v) => {
+                const x = coerce(v, tidal);
+                return x === undefined ? {} : { [name]: x };
+            });
+        }
+        return values._derive((b, e) => {
+            const out = [];
+            for (const ev of values.query(b, e)) {
+                const x = coerce(ev.value, tidal);
+                if (x !== undefined) out.push({ begin: ev.begin, end: ev.end, value: { [name]: x } });
+            }
+            return out;
+        });
+    }
+
+    /** Volume factor of SuperDirt's amp control, whose default is 0.4. */
+    function ampOf(v) {
+        return isNum(v.amp) ? clamp(v.amp, 0, 2) / 0.4 : 1;
     }
 
     // ==================================================================
@@ -1528,30 +2557,43 @@
             return fail(`unexpected "${t.v}"`);
         }
 
+        // A number, or a pattern of numbers in < > or [ ], as in "bd*<2 3>" or "bd(<3 5>,8)".
+        const numberOrPattern = () => {
+            const t = peek();
+            if (t && t.type === 'sym' && (t.v === '<' || t.v === '[')) return parseAtom();
+            return number();
+        };
+
         function parseTerm() {
             let p = parseAtom();
             let weight = 1;
             let copies = 1;
             while (peek() && !peek().spaceBefore && '*/!@?('.includes(peek().v)) {
                 const op = next().v;
-                if (op === '*') p = fastPattern(p, number());
-                else if (op === '/') {
-                    const f = number();
-                    p = f > 0 ? fastPattern(p, 1 / f) : silence(tidal);
+                if (op === '*') {
+                    const f = numberOrPattern();
+                    p = typeof f === 'number' ? fastPattern(p, f) : patterned(p, 'fast', f, fastPattern);
+                } else if (op === '/') {
+                    const f = numberOrPattern();
+                    const slowBy = (q, x) => (x > 0 ? fastPattern(q, 1 / x) : silence(tidal));
+                    p = typeof f === 'number' ? slowBy(p, f) : patterned(p, 'slow', f, slowBy);
                 } else if (op === '!') copies += attachedNumber() ? number() - 1 : 1;
                 else if (op === '@') weight = number();
                 else if (op === '?') p = degradePattern(p, attachedNumber() ? number() : 0.5, nextSeed());
                 else if (op === '(') {
-                    const k = number();
+                    const k = numberOrPattern();
                     expect(',');
-                    const n = number();
+                    const n = numberOrPattern();
                     let rotation = 0;
                     if (peek() && peek().v === ',') {
                         next();
-                        rotation = number();
+                        rotation = numberOrPattern();
                     }
                     expect(')');
-                    p = euclidPattern(tidal, p, k, n, rotation);
+                    const args = [k, n, rotation];
+                    p = args.every((a) => typeof a === 'number')
+                        ? euclidPattern(tidal, p, k, n, rotation)
+                        : patternedAll(p, 'euclid', args, (q, kk, nn, rr) => euclidPattern(tidal, q, kk, nn, rr));
                 }
             }
             const steps = [];
@@ -2193,6 +3235,8 @@
             g.stopRecording = () => this.stopRecording();
             g.exportPattern = (pattern, cycles, format) => this.exportPattern(pattern, cycles, format);
 
+            this._setupTidalLibrary(g);
+
             // Plays a short 440 Hz beep to check that audio output works.
             g.testAudio = () => {
                 const ctx = this.audioContext;
@@ -2218,6 +3262,159 @@
 
         timeAt(cycle) {
             return this._anchorTime + (cycle - this._anchorCycle) / this.cps;
+        }
+
+        /** Global functions from the rest of Tidal's library (see "More of Tidal's library"). */
+        _setupTidalLibrary(g) {
+            const pat = (input, fname) => toPattern(this, input, fname);
+            const raw = (input, fname) => toRaw(this, input, fname);
+            const pairs = (fname, list, order) => {
+                if (!Array.isArray(list) || list.length === 0 || !list.every((x) => Array.isArray(x) && x.length === 2)) {
+                    throw new TypeError(`${fname}() expects a list of pairs, e.g. ${order}`);
+                }
+                return list;
+            };
+
+            // Control patterns on their own, as in Tidal: n("0 .. 7"), note("c e g"), speed(2).
+            // Combine them with a sound: n("0 2").sound("drum"), or sound("drum*4").set(n("0 2")).
+            for (const name of [...Object.keys(CONTROLS), ...Object.keys(CONTROL_ALIASES)]) {
+                if (name === 's' || name === 'sound') continue;
+                const control = CONTROL_ALIASES[name] || name;
+                g[name] = (value) => controlPattern(this, control, value);
+            }
+
+            // Numbers
+            g.run = (n) => (typeof n === 'number' ? runPattern(this, n)
+                : patterned(pure(this, 0), 'run', n, (p, x) => runPattern(this, x)));
+            g.scan = (n) => {
+                const top = Math.max(1, Math.floor(requireNumber('scan', n)));
+                return slowcat(this, Array.from({ length: top }, (_, i) => runPattern(this, i + 1)));
+            };
+            g.toScale = (steps, pattern) => raw(pattern, 'toScale').toScale(steps);
+            g.markovPat = (n, xi, matrix) => markovPattern(this, requireNumber('markovPat', n), requireNumber('markovPat', xi), matrix);
+            g.lindenmayer = (n, rules, axiom) => lindenmayer(requireNumber('lindenmayer', n), rules, axiom);
+
+            // Lists to patterns
+            g.fromList = (list) => slowcat(this, (list || []).map((x) => pure(this, x)));
+            g.fastFromList = (list) => fastcat(this, (list || []).map((x) => pure(this, x)));
+            g.listToPat = g.fastFromList;
+            g.fromMaybes = (list) => fastcat(this, (list || []).map((x) => (x === null || x === undefined ? silence(this) : pure(this, x))));
+            g.timeCat = (steps) => timecat(this, pairs('timeCat', steps, '[[1, sound("bd*4")], [1, sound("hh*8")]]')
+                .map(([weight, p]) => ({ weight: requireNumber('timeCat', weight), pattern: pat(p, 'timeCat') })));
+            g.timecat = g.timeCat;
+            g.wrandcat = (items) => {
+                const list = pairs('wrandcat', items, '[[sound("bd*2"), 3], [sound("cp"), 1]]');
+                const weights = list.map(([, w]) => Math.max(0, requireNumber('wrandcat', w)));
+                const total = weights.reduce((x, y) => x + y, 0) || 1;
+                const patterns = list.map(([p]) => pat(p, 'wrandcat'));
+                const seed = nextSeed();
+                return new PatternBuilder(this, (b, e) => eachCycle(b, e, (c, s, t) => {
+                    let r = timeRand(c + 0.5, seed) * total;
+                    const i = weights.findIndex((w) => (r -= w) < 0);
+                    return patterns[i < 0 ? patterns.length - 1 : i].query(s, t);
+                }));
+            };
+
+            // Booleans
+            g.binaryN = (bits, n) => patternedAll(pure(this, 0), 'binaryN', [bits, n], (p, b, x) =>
+                fastcat(this, bitsOf(Math.floor(x), Math.max(1, Math.floor(b))).map((on) => pure(this, on))));
+            g.binary = (n) => g.binaryN(8, n);
+            g.ascii = (text) => fastcat(this, [...String(text)].flatMap((ch) => bitsOf(ch.charCodeAt(0) & 255, 8)).map((x) => pure(this, x)));
+            g.necklace = (perCycle, list) => {
+                const lengths = checkNumbers('necklace', list).map((x) => Math.max(1, Math.floor(x)));
+                const bools = lengths.flatMap((x) => [true, ...new Array(x - 1).fill(false)]);
+                return fastPattern(fastcat(this, bools.map((x) => pure(this, x))), requireNumber('necklace', perCycle) / bools.length);
+            };
+            g.brand = signal(this, (t) => timeRand(t, 4091) < 0.5);
+            g.brandBy = (prob) => {
+                const p = requireNumber('brandBy', prob);
+                return signal(this, (t) => timeRand(t, 4091) < p);
+            };
+
+            // Choosing
+            g.chooseBy = (sig, list) => {
+                if (!Array.isArray(list) || list.length === 0) throw new TypeError('chooseBy() expects a signal and a list');
+                return (sig instanceof PatternBuilder ? sig : raw(sig, 'chooseBy')).withValue((v) => {
+                    const x = toNumber(v);
+                    return x === undefined ? undefined : list[clamp(Math.floor(x * list.length), 0, list.length - 1)];
+                });
+            };
+            g.wchooseBy = (sig, items) => {
+                const list = pairs('wchooseBy', items, '[["bd", 3], ["sn", 1]]');
+                const total = list.reduce((x, [, w]) => x + Math.max(0, toNumber(w) || 0), 0) || 1;
+                return (sig instanceof PatternBuilder ? sig : raw(sig, 'wchooseBy')).withValue((v) => {
+                    let r = (toNumber(v) || 0) * total;
+                    const hit = list.find(([, w]) => (r -= Math.max(0, toNumber(w) || 0)) < 0);
+                    return (hit || list[list.length - 1])[0];
+                });
+            };
+            g.select = (amount, patterns) => {
+                const list = (patterns || []).map((p) => pat(p, 'select'));
+                if (list.length === 0) throw new TypeError('select() expects a number pattern and a list of patterns');
+                return joinOver(this, raw(amount, 'select'), (v) => {
+                    const x = toNumber(v);
+                    return x === undefined ? null : list[clamp(Math.floor(x * list.length), 0, list.length - 1)];
+                });
+            };
+            g.squeeze = (indices, patterns) => {
+                const list = (patterns || []).map((p) => pat(p, 'squeeze'));
+                if (list.length === 0) throw new TypeError('squeeze() expects an index pattern and a list of patterns');
+                const index = raw(indices, 'squeeze');
+                return new PatternBuilder(this, (b, e) => {
+                    const out = [];
+                    for (const iev of index.query(Math.floor(b) - 1, e)) {
+                        const i = toNumber(iev.value);
+                        if (i === undefined) continue;
+                        const c = Math.floor(iev.begin);
+                        const inner = compressPattern(list[mod(Math.floor(i), list.length)], iev.begin - c, Math.min(1, iev.end - c));
+                        for (const ev of inner.query(Math.max(b, iev.begin), Math.min(e, iev.end))) out.push(ev);
+                    }
+                    return out;
+                });
+            };
+            g.pickF = (indices, fns, pattern) => pat(pattern, 'pickF').pickF(indices, fns);
+            g.selectF = (amount, fns, pattern) => pat(pattern, 'selectF').selectF(amount, fns);
+            g.sew = (booleans, a, b) => pat(a, 'sew').sew(booleans, b);
+            g.stitch = (booleans, a, b) => pat(a, 'stitch').stitch(booleans, b);
+            g.wedge = (time, a, b) => pat(a, 'wedge').wedge(time, b);
+            g.spread = (fn, values, pattern) => pat(pattern, 'spread').spread(fn, values);
+            g.fastspread = (fn, values, pattern) => pat(pattern, 'fastspread').fastspread(fn, values);
+
+            // Signals: the bipolar versions go from -1 to 1; envelopes run once, over the first cycle.
+            const bipolar = (sig) => sig.withValue((v) => v * 2 - 1);
+            g.sine2 = bipolar(g.sine);
+            g.cosine2 = bipolar(g.cosine);
+            g.saw2 = bipolar(g.saw);
+            g.isaw2 = bipolar(g.isaw);
+            g.tri2 = bipolar(g.tri);
+            g.square2 = bipolar(g.square);
+            const ramp = (t) => clamp(t, 0, 1);
+            g.envL = signal(this, (t) => ramp(t));
+            g.envLR = signal(this, (t) => 1 - ramp(t));
+            g.envEq = signal(this, (t) => Math.sqrt(Math.sin((Math.PI / 2) * ramp(1 - t))));
+            g.envEqR = signal(this, (t) => Math.sqrt(Math.cos((Math.PI / 2) * ramp(1 - t))));
+
+            // Playing
+            g.once = (pattern) => this.playOnce(pat(pattern, 'once'));
+            for (let i = 1; i <= 16; i++) g['d' + i] = (pattern) => pat(pattern, 'd' + i);
+        }
+
+        /**
+         * Plays the first cycle of a pattern once, starting now (Tidal's once).
+         * It plays on its own; nothing is added to what is playing.
+         */
+        playOnce(pattern) {
+            const ctx = this.audioContext;
+            if (!ctx) return;
+            if (!this._session) this._session = this._createSession();
+            const start = ctx.currentTime + 0.05;
+            for (const ev of pattern.query(0, 1)) {
+                try {
+                    this.playEvent(asObject(ev.value), start + ev.begin / this.cps, (ev.end - ev.begin) / this.cps);
+                } catch (error) {
+                    console.error('TidalJS: could not play event:', error);
+                }
+            }
         }
 
         /** Current position in cycles (fractional), 0 when stopped. */
@@ -2273,7 +3470,8 @@
             const ctx = this.audioContext;
             if (!ctx) throw new Error('Call tidal.init() before playing patterns');
             if (ctx.state === 'suspended') ctx.resume();
-            this._session = this._createSession();
+            // once() may already have opened a session while stopped.
+            this._session = this._session || this._createSession();
             this._anchorTime = ctx.currentTime + 0.05;
             this._anchorCycle = 0;
             this._nextCycle = 0;
@@ -2549,7 +3747,7 @@
         _createSession() {
             const out = this.audioContext.createGain();
             out.connect(this.masterGain);
-            return { out, nodes: [out], delays: new Map(), reverbs: new Map() };
+            return { out, nodes: [out], delays: new Map(), reverbs: new Map(), cuts: new Map() };
         }
 
         _noiseBuffer(color = 'white') {
@@ -2608,6 +3806,11 @@
                 if (kind === 'distortion') {
                     const k = amount * 4;
                     curve[i] = ((1 + k) * x) / (1 + k * Math.abs(x));
+                } else if (kind === 'shape') {
+                    // SuperDirt's shape: amount 0 to 0.99, as a hundredth here.
+                    const a = amount / 100;
+                    const k = (2 * a) / (1 - a);
+                    curve[i] = ((1 + k) * x) / (1 + k * Math.abs(x));
                 } else {
                     const step = Math.pow(0.5, amount - 1);
                     curve[i] = Math.round(x / step) * step;
@@ -2617,10 +3820,11 @@
             return curve;
         }
 
-        _delayBus(time, orbit) {
+        _delayBus(time, amount, orbit) {
             const session = this._session;
             const ms = Math.round(time * 1000);
-            const key = `${orbit}:${ms}`;
+            const fb = Math.round(amount * 100);
+            const key = `${orbit}:${ms}:${fb}`;
             if (session.delays.has(key)) return session.delays.get(key);
             const ctx = this.audioContext;
             const input = ctx.createGain();
@@ -2628,8 +3832,8 @@
             const feedback = ctx.createGain();
             const wet = ctx.createGain();
             delay.delayTime.value = ms / 1000;
-            feedback.gain.value = 0.35;
-            wet.gain.value = 0.6;
+            feedback.gain.value = fb / 100;
+            wet.gain.value = 0.8;
             input.connect(delay);
             delay.connect(feedback);
             feedback.connect(delay);
@@ -2678,10 +3882,32 @@
                 add(f);
             };
 
+            // Oscillators that modulate this voice (ring, tremolo, phaser); stopped with it.
+            const lfos = [];
+            const lfo = (freq, depth, target, type = 'sine') => {
+                const osc = ctx.createOscillator();
+                const amount = ctx.createGain();
+                osc.type = type;
+                osc.frequency.value = freq;
+                amount.gain.value = depth;
+                osc.connect(amount);
+                amount.connect(target);
+                osc.start();
+                lfos.push(osc);
+                nodes.push(osc, amount);
+            };
+
             const q = isNum(v.resonance) ? clamp(v.resonance, 0.0001, 40) : 1;
             if (isNum(v.lpf) && v.lpf > 0) filter('lowpass', v.lpf, q);
-            if (isNum(v.hpf) && v.hpf > 0) filter('highpass', v.hpf, 1);
-            if (isNum(v.bpf) && v.bpf > 0) filter('bandpass', v.bpf, 1.5);
+            if (isNum(v.hpf) && v.hpf > 0) filter('highpass', v.hpf, isNum(v.hpq) ? clamp(v.hpq, 0.0001, 40) : 1);
+            if (isNum(v.bpf) && v.bpf > 0) filter('bandpass', v.bpf, isNum(v.bpq) ? clamp(v.bpq, 0.0001, 40) : 1.5);
+
+            // DJ filter: below 0.5 a low-pass closing down, above a high-pass opening up.
+            if (isNum(v.djf) && Math.abs(v.djf - 0.5) > 0.01) {
+                const x = clamp(v.djf, 0, 1);
+                if (x < 0.5) filter('lowpass', 20 * Math.pow(1000, x * 2), 1);
+                else filter('highpass', 20 * Math.pow(1000, (x - 0.5) * 2), 1);
+            }
 
             if (v.vowel && VOWELS[v.vowel]) {
                 const vin = ctx.createGain();
@@ -2704,10 +3930,20 @@
                 node = vout;
             }
 
-            if (isNum(v.distortion) && v.distortion > 0) {
+            // distortion (1 to 100) and Tidal's distort (0 to 1) share one waveshaper.
+            const drive = isNum(v.distortion) && v.distortion > 0 ? clamp(v.distortion, 1, 100)
+                : isNum(v.distort) && v.distort > 0 ? 1 + clamp(v.distort, 0, 1) * 99 : 0;
+            if (drive > 0) {
                 const shaper = ctx.createWaveShaper();
-                shaper.curve = this._curve('distortion', Math.round(clamp(v.distortion, 1, 100)));
+                shaper.curve = this._curve('distortion', Math.round(drive));
                 shaper.oversample = '4x';
+                add(shaper);
+            }
+
+            if (isNum(v.shape) && v.shape > 0) {
+                const shaper = ctx.createWaveShaper();
+                shaper.curve = this._curve('shape', Math.round(clamp(v.shape, 0, 0.99) * 100));
+                shaper.oversample = '2x';
                 add(shaper);
             }
 
@@ -2715,6 +3951,47 @@
                 const shaper = ctx.createWaveShaper();
                 shaper.curve = this._curve('crush', Math.floor(clamp(v.crush, 1, 16)));
                 add(shaper);
+            }
+
+            // Ring modulation: the sound times a sine at ringf Hz, mixed by ring (0 to 1).
+            if (isNum(v.ring) && v.ring > 0) {
+                const depth = clamp(v.ring, 0, 1);
+                const ringer = ctx.createGain();
+                ringer.gain.value = 1 - depth;
+                add(ringer);
+                lfo(isNum(v.ringf) ? clamp(v.ringf, 0, 20000) : 0, depth, ringer.gain);
+            }
+
+            // Phaser: four all-pass filters swept by a slow sine, mixed with the dry sound.
+            if (isNum(v.phaserrate) && v.phaserrate > 0) {
+                const depth = isNum(v.phaserdepth) ? clamp(v.phaserdepth, 0, 1) : 0.5;
+                const dry = node;
+                const out = ctx.createGain();
+                out.gain.value = 0.7;
+                let chain = dry;
+                for (let i = 0; i < 4; i++) {
+                    const ap = ctx.createBiquadFilter();
+                    ap.type = 'allpass';
+                    ap.frequency.value = 1000;
+                    ap.Q.value = 0.7;
+                    chain.connect(ap);
+                    chain = ap;
+                    nodes.push(ap);
+                    lfo(clamp(v.phaserrate, 0, 40), 900 * depth, ap.frequency);
+                }
+                chain.connect(out);
+                dry.connect(out);
+                nodes.push(out);
+                node = out;
+            }
+
+            // Tremolo: the volume swings tremolodepth (0 to 1) at tremolorate Hz.
+            if ((isNum(v.tremolorate) && v.tremolorate > 0) || (isNum(v.tremolodepth) && v.tremolodepth > 0)) {
+                const depth = isNum(v.tremolodepth) ? clamp(v.tremolodepth, 0, 1) : 0.5;
+                const trem = ctx.createGain();
+                trem.gain.value = 1 - depth / 2;
+                add(trem);
+                lfo(isNum(v.tremolorate) ? clamp(v.tremolorate, 0, 100) : 1, depth / 2, trem.gain);
             }
 
             if (isNum(v.pan) && typeof ctx.createStereoPanner === 'function') {
@@ -2725,11 +4002,16 @@
 
             node.connect(session.out);
 
+            // Tidal's delay: delay is the send level (0 to 1), delaytime the echo time in
+            // seconds (in cycles with lock(1)), delayfeedback how much each echo repeats.
             if (isNum(v.delay) && v.delay > 0) {
                 const send = ctx.createGain();
-                send.gain.value = 0.5;
+                send.gain.value = clamp(v.delay, 0, 1);
                 node.connect(send);
-                send.connect(this._delayBus(clamp(v.delay, 0.01, 2), orbit));
+                let time = isNum(v.delaytime) ? v.delaytime : 0.25;
+                if (isNum(v.lock) && v.lock >= 1) time /= this.cps;
+                const feedback = isNum(v.delayfeedback) ? clamp(v.delayfeedback, 0, 0.95) : 0.5;
+                send.connect(this._delayBus(clamp(time, 0.01, 2), feedback, orbit));
                 nodes.push(send);
             }
 
@@ -2742,10 +4024,33 @@
             }
 
             sources[0].onended = () => {
+                for (const osc of lfos) {
+                    try { osc.stop(); } catch (e) { /* already stopped */ }
+                }
                 for (const n of nodes) {
                     try { n.disconnect(); } catch (e) { /* already disconnected */ }
                 }
             };
+        }
+
+        /**
+         * Cut groups: a new sound in the same cut group (and orbit) as a sound
+         * still playing fades that one out at once, like an open hi-hat cut by
+         * a closed one.
+         */
+        _cutGroup(v, time, gate, sources) {
+            if (!isNum(v.cut) || v.cut <= 0) return;
+            const key = `${isNum(v.orbit) ? Math.floor(v.orbit) : 0}:${Math.floor(v.cut)}`;
+            const groups = this._session.cuts;
+            const previous = groups.get(key);
+            if (previous && previous.time < time) {
+                previous.gate.gain.cancelScheduledValues(time);
+                previous.gate.gain.setTargetAtTime(0, time, 0.004);
+                for (const src of previous.sources) {
+                    try { src.stop(time + 0.05); } catch (e) { /* already stopped */ }
+                }
+            }
+            groups.set(key, { time, gate, sources });
         }
 
         // --- Samples ---------------------------------------------------
@@ -2848,6 +4153,26 @@
             return entry.reversed;
         }
 
+        /** A copy of a buffer at a lower sample rate (every sample held `factor` times), for coarse. */
+        _coarseBuffer(buffer, factor) {
+            if (!this._coarse) this._coarse = new WeakMap();
+            let byFactor = this._coarse.get(buffer);
+            if (!byFactor) {
+                byFactor = new Map();
+                this._coarse.set(buffer, byFactor);
+            }
+            if (!byFactor.has(factor)) {
+                const copy = this.audioContext.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+                for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+                    const from = buffer.getChannelData(ch);
+                    const to = copy.getChannelData(ch);
+                    for (let i = 0; i < from.length; i++) to[i] = from[i - (i % factor)];
+                }
+                byFactor.set(factor, copy);
+            }
+            return byFactor.get(factor);
+        }
+
         /** The file of a bank that n selects (wrapping around). */
         _sampleUrl(bank, v) {
             return bank[isNum(v.n) ? mod(Math.floor(v.n), bank.length) : 0];
@@ -2859,14 +4184,17 @@
          * legato/sustain cut it, loop repeats it, attack/release fade it.
          */
         _playSample(v, time, duration, bank) {
-            const gain = isNum(v.gain) ? clamp(v.gain, 0, 2) : 1;
+            const gain = (isNum(v.gain) ? clamp(v.gain, 0, 2) : 1) * ampOf(v);
             if (gain <= 0) return;
             const speed = isNum(v.speed) && v.speed !== 0 ? clamp(v.speed, -16, 16) : 1;
             let semitones = isNum(v.note) ? v.note - 60 : isNum(v.midinote) ? v.midinote - 60 : 0;
             if (isNum(v.up)) semitones += v.up;
-            const rate = Math.abs(speed) * Math.pow(2, clamp(semitones, -48, 48) / 12);
-            const buffer = this._sampleBuffer(this._sampleUrl(bank, v), speed < 0);
+            let buffer = this._sampleBuffer(this._sampleUrl(bank, v), speed < 0);
             if (!buffer) return; // still loading: it plays from the next event on
+            if (isNum(v.coarse) && v.coarse >= 2) buffer = this._coarseBuffer(buffer, Math.min(64, Math.floor(v.coarse)));
+            // With unit "c", speed is in cycles: speed 1 plays the whole sample in one cycle.
+            const base = v.unit === 'c' ? buffer.duration * this.cps * Math.abs(speed) : Math.abs(speed);
+            const rate = clamp(base, 0.01, 64) * Math.pow(2, clamp(semitones, -48, 48) / 12);
 
             const begin = isNum(v.begin) ? clamp(v.begin, 0, 1) : 0;
             const end = isNum(v.end) ? clamp(v.end, 0, 1) : 1;
@@ -2890,7 +4218,11 @@
 
             const src = ctx.createBufferSource();
             src.buffer = buffer;
-            src.playbackRate.value = rate;
+            src.playbackRate.setValueAtTime(rate, time);
+            // accelerate: the speed changes by this much (relative to 1) over the sound.
+            if (isNum(v.accelerate) && v.accelerate !== 0) {
+                src.playbackRate.linearRampToValueAtTime(Math.max(0.01, rate * (1 + v.accelerate)), time + Math.max(0.01, window));
+            }
             const amp = ctx.createGain();
             amp.gain.value = level;
             const gate = ctx.createGain();
@@ -2902,6 +4234,7 @@
             amp.connect(gate);
             src.start(time, Math.min(offset, buffer.duration));
             src.stop(stopAt);
+            this._cutGroup(v, time, gate, [src]);
             this._route(gate, v, [src], [amp]);
         }
 
@@ -2943,7 +4276,7 @@
                 return;
             }
 
-            const gain = isNum(v.gain) ? clamp(v.gain, 0, 2) : 1;
+            const gain = (isNum(v.gain) ? clamp(v.gain, 0, 2) : 1) * ampOf(v);
             if (gain <= 0) return;
             const level = gain * (def.level ?? 0.5);
 
@@ -2952,6 +4285,8 @@
             else if (isNum(v.midinote)) freq = midiToFreq(clamp(v.midinote, 0, 127));
             else if (isNum(v.note)) freq = midiToFreq(clamp(v.note, 0, 127));
             if (isNum(v.up)) freq *= Math.pow(2, clamp(v.up, -48, 48) / 12);
+            // octave, as in SuperDirt: 5 is the default, each step one octave.
+            if (isNum(v.octave)) freq *= Math.pow(2, clamp(Math.round(v.octave), 0, 10) - 5);
             const speed = isNum(v.speed) && v.speed !== 0 ? clamp(Math.abs(v.speed), 0.01, 16) : 1;
             freq = clamp(freq * speed, 10, 20000);
 
@@ -3013,6 +4348,17 @@
             const voice = this._generate(def, o, time);
             voice.output.connect(gate);
             for (const src of voice.sources) src.stop(stopAt);
+            // accelerate: pitched synths glide by this much (relative to 1) over the sound.
+            if (isNum(v.accelerate) && v.accelerate !== 0 && (def.type === 'osc' || def.type === 'pluck' || def.type === 'noise')) {
+                const factor = Math.max(0.01, 1 + v.accelerate);
+                for (const src of voice.sources) {
+                    const param = src.frequency || src.playbackRate;
+                    if (!param) continue;
+                    param.setValueAtTime(param.value, time);
+                    param.linearRampToValueAtTime(param.value * factor, time + Math.max(0.01, o.window));
+                }
+            }
+            this._cutGroup(v, time, gate, voice.sources);
             this._route(gate, v, voice.sources, voice.nodes);
         }
 

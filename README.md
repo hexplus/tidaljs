@@ -20,14 +20,16 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 
 ## Features
 
-- **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`; `speed`, `begin`/`end`, `chop`, `striate`, `loop` and `legato` work on the recordings
-- **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, ranges (`"0 .. 7"`), chords
+- **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`; `speed`, `begin`/`end`, `chop`, `striate`, `slice`, `splice`, `loopAt`, `randslice`, `loop` and `legato` work on the recordings
+- **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, ranges (`"0 .. 7"`), chords, and patterned modifiers (`"bd*<2 3>"`, `"bd(<3 5>,8)"`)
 - **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `ply`, `iter`, `linger`, `rot`, `off`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`..., with patterned arguments such as `fast("<1 2>")`
-- **Composition**: `stack`, `cat`, `superimpose`, `jux`, `euclid`, `euclidFull`, `nTake`...
-- **Randomness and conditions**: `sometimes` and its relatives, `degradeBy`, `randcat`, `within`, `while`, `until`, `playFor`
-- **Audio effects**: filters with resonance, delay and reverb per orbit, distortion, bit crushing, vowel formants, envelopes
-- **Harmony**: notes, scales, chords, arpeggios, inversions
-- **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, with `range`, `segment`, `smooth`
+- **Composition**: `stack`, `cat`, `timeCat`, `wrandcat`, `superimpose`, `jux`, `euclid`, `euclidFull`, `nTake`, `sew`, `stitch`, `wedge`, `mask`, `select`, `squeeze`, `spread`, `pickF`, `fix`...
+- **Tidal's operators**: every control is also a function (`n("0 2")`, `speed(2)`), combined with `.set()` (`#`), `.add()` (`|+`), `.sub()`, `.mul()`, `.div()`, `.mod()`; `d1` to `d16`, `once`, `qtrigger`
+- **Echoes and repeats**: `echo`, `echoWith`, `stut`, `stutter`, `plyWith`, `ghost`, `rolled`
+- **Randomness and conditions**: `sometimes` and its relatives, `someCyclesBy`, `degradeBy`, `fadeIn`/`fadeOut`, `randcat`, `markovPat`, `within`, `while`, `when`, `ifp`, `foldEvery`, `inside`/`outside`, `until`, `playFor`
+- **Audio effects**: filters with resonance, the DJ filter, delay (level, time and feedback, as in Tidal) and reverb per orbit, distortion and `shape`, bit crushing, `coarse`, vowel formants, tremolo, phaser, ring modulation, cut groups, `accelerate`, envelopes
+- **Harmony**: notes, Tidal's 70+ scales (with the Arabic maqamat's quarter tones) and every chord of its table, arpeggios, inversions, strummed chords, `toScale`
+- **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, bipolar `sine2` and friends, envelopes `envL`/`envEq`, `brand`, with `range`, `rangex`, `segment`, `smooth`
 - **Output**: synthesised sounds, Web MIDI, OSC over WebSocket, audio recording, JSON and MIDI file export
 - **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the palette buttons show the same help), an insert palette for every function (Tab moves between parameters), live update while playing, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
 - **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes), Christmas carols (Jingle Bells, Silent Night, Deck the Halls, We Wish You a Merry Christmas, Good King Wenceslas, Carol of the Bells), genre grooves (house, boom bap, bossa nova, jungle) and recorded samples from Dirt-Samples
@@ -125,9 +127,22 @@ samples({ kick: ["kick1.wav", "kick2.wav"] }, "https://example.com/samples/")
 
 A manifest is a JSON object of bank names and file lists, with an optional `_base` URL (the format Strudel uses). `samples()` returns a promise; in the editor the code runs again once the samples have loaded. Files are loaded and decoded the first time they are needed.
 
+### Tidal's operators
+
+Every control is also a function on its own, as in Tidal, and `.set()` is Tidal's `#`. `.add()`, `.sub()`, `.mul()`, `.div()` and `.mod()` are `|+`, `|-`, `|*`, `|/` and `|%`: the rhythm comes from the pattern on the left, and controls combine key by key (notes as semitones, strings joined).
+
+```javascript
+// d1 $ n "0 .. 7" # s "arpy" |+ n "<0 3 5>" # speed "1 2"
+d1(n("0 .. 7").sound("arpy").add(n("<0 3 5>")).set(speed("1 2")))
+sound("drum*4").add(s(":3"))            // drum:3
+sound("bd*4").set({ gain: 0.8 })
+```
+
+Differences from Tidal: note names use scientific octaves (`a4` is 440 Hz; Tidal calls it `a5`), `pan` goes from -1 to 1, and functions are JavaScript arrow functions (`x => x.fast(2)`).
+
 ### Patterned arguments
 
-The numeric arguments of `fast`, `slow`, `density`, `hurry`, `ply`, `iter`, `linger`, `rot`, `late`, `early`, `off`, `every`, `degradeBy`, `chop`, `striate`, `segment` and `swing` can be patterns:
+The numeric arguments of `fast`, `slow`, `density`, `hurry`, `ply`, `iter`, `linger`, `rot`, `late`, `early`, `off`, `every`, `degradeBy`, `chop`, `striate`, `segment`, `swing`, `swingBy`, `chunk`, `euclid`, `scramble`, `shuffle`, `run`, `binary` and most of the newer functions can be patterns, and so can the mini-notation's modifiers (`"bd*<2 3>"`, `"bd(<3 5>,8,<0 2>)"`):
 
 ```javascript
 sound("bd sn hh cp").fast("<1 2 [1 4]>")   // a different speed each cycle
@@ -215,7 +230,7 @@ sound("arpy*4").crush(4).distortion(5)
 sound("bd sn bd sn")
   .every(8, x => x.rev())
   .sometimes(x => x.lpf(600))
-  .delay(0.25)
+  .delay(0.5).delaytime(0.25)
   .reverb(0.4)
 
 // Effects take patterns too
@@ -267,7 +282,7 @@ sound("saw*8").note("c2").lpf("300 600 1200 2400")
 | `lpf(freq)` | Low-pass filter | `.lpf(800)` |
 | `hpf(freq)` | High-pass filter | `.hpf(200)` |
 | `bpf(freq)` | Band-pass filter | `.bpf(1000)` |
-| `delay(time)` | Echo, delay time in seconds | `.delay(0.25)` |
+| `delay(level)` | Echo level, 0 to 1 (as in Tidal); `delaytime` sets the time in seconds and `delayfeedback` the repeats | `.delay(0.5).delaytime(0.25)` |
 | `reverb(amount)` | Reverb amount, 0 to 1 | `.reverb(0.3)` |
 | `distortion(n)` | Distortion, 1 to 100 | `.distortion(5)` |
 | `crush(bits)` | Bit crusher, 1 to 16 bits | `.crush(4)` |

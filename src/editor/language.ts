@@ -2,7 +2,7 @@
  * What the editor knows about TidalJS code: completion sources, highlighting,
  * problem-marker rendering and the texts of the hover help. No DOM here.
  */
-import { GLOBAL_SIGNATURES, METHOD_SIGNATURES, type Signature } from "../data/signatures.ts";
+import { CONTROL_NAMES, GLOBAL_SIGNATURES, METHOD_SIGNATURES, type Signature } from "../data/signatures.ts";
 import { DOCS, GLOBAL_DOCS, SCALE_DOCS, SOUND_DOCS, type Doc } from "../data/docs.ts";
 import { SNIPPETS } from "../data/snippets.ts";
 import { TidalJS, patternMethods } from "../engine.ts";
@@ -71,6 +71,17 @@ export const GLOBALS: CompletionItem[] = ([
   ["setCPS", "fn"], ["setcps", "fn"], ["setTempo", "fn"], ["stopAll", "call"], ["hush", "call"],
   ["choose", "fn"], ["wchoose", "fn"], ["cycleChoose", "fn"], ["setOscUrl", "fn"],
   ["midiOutputs", "call"], ["record", "call"], ["stopRecording", "call"], ["exportPattern", "fn"],
+  // More of Tidal's library
+  ["run", "fn"], ["scan", "fn"], ["toScale", "fn"], ["markovPat", "fn"], ["lindenmayer", "fn"],
+  ["fromList", "fn"], ["fastFromList", "fn"], ["listToPat", "fn"], ["fromMaybes", "fn"], ["timeCat", "fn"], ["timecat", "fn"],
+  ["wrandcat", "fn"], ["binary", "fn"], ["binaryN", "fn"], ["ascii", "fn"], ["necklace", "fn"], ["brand", "value"], ["brandBy", "fn"],
+  ["chooseBy", "fn"], ["wchooseBy", "fn"], ["select", "fn"], ["squeeze", "fn"], ["pickF", "fn"], ["selectF", "fn"],
+  ["sew", "fn"], ["stitch", "fn"], ["wedge", "fn"], ["spread", "fn"], ["fastspread", "fn"],
+  ["sine2", "value"], ["cosine2", "value"], ["saw2", "value"], ["isaw2", "value"], ["tri2", "value"], ["square2", "value"],
+  ["envL", "value"], ["envLR", "value"], ["envEq", "value"], ["envEqR", "value"], ["once", "fn"],
+  ...Array.from({ length: 16 }, (_, i) => ["d" + (i + 1), "fn"]),
+  // Controls on their own: n("0 2"), speed(2)
+  ...CONTROL_NAMES.filter((name) => name !== "s" && name !== "sound").map((name) => [name, "fn"]),
   ["const", "kw"], ["let", "kw"],
 ] as [string, CompletionKind][]).map(([name, kind]) => {
   const sig = GLOBAL_SIGNATURES[name];
