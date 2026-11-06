@@ -259,11 +259,52 @@ Note: `export` is a JavaScript keyword, so the function is called `exportPattern
 | Phase 4: Technical | 17 | Complete |
 | Phase 5: Advanced | 12 | Complete |
 | Phase 6: System | 6 | Complete |
+| Phase 7: Samples and more of Tidal | 15 | Complete |
+
+---
+
+## Phase 7: Samples and more of Tidal (complete)
+
+### 7.1 Real samples
+```javascript
+samples()   // [done] samples("github:tidalcycles/dirt-samples"), a strudel.json URL, or { name: [files] }
+```
+A loaded bank replaces the synthesised sound of the same name; `n` (or `"bd:3"`) picks the file. `speed` (negative plays backwards), `note`/`up`, `begin`/`end`, `chop`, `striate`, `loop`, `legato`/`sustain`, `attack`/`release` and every effect work on the recordings. Files are fetched and decoded the first time they are needed; the editor runs the code again once a `samples()` call has loaded.
+
+### 7.2 Patterned arguments
+```javascript
+.fast("<1 2>")        // [done] also slow, density, sparsity, hurry, late, early, every,
+.ply("1 2")           //        degradeBy, chop, striate, segment, swing, ply, iter, linger, rot, off
+```
+As in Tidal, each value applies over the part of the cycle where it holds; signals work too (sampled once per cycle).
+
+### 7.3 Ranges in mini-notation
+```javascript
+"0 .. 7"    // [done] the steps 0 1 2 3 4 5 6 7; also "7 .. 0" and "0..7"
+```
+
+### 7.4 More of Tidal's library
+```javascript
+jux()       // [done] the pattern left, f(pattern) right (and juxBy)
+off()       // [done] a shifted, changed copy on top
+ply()       // [done] repeat each event n times
+iter()      // [done] start each cycle one nth further on (and iterBack)
+linger()    // [done] repeat the first (or last) part of each cycle
+rot()       // [done] shift values along the events, keeping the rhythm
+euclid()    // [done] Euclidean rhythm as a method (and euclidInv)
+euclidFull() // [done] one pattern on the hits, another on the rests
+nTake()     // [done] each played event takes the next value of a list as n
+```
+Note: "nT functions" is read as Tidal's `nTake`, which steps through a list across cycles.
+
+### 7.5 Tests in CI
+```text
+.github/workflows/ci.yml   // [done] engine tests, type-check and build, SibuJS lint, on Node 22 and 24, for every push and pull request
+```
 
 ## What could come next
 
-- Real samples: loading audio files (for example the Dirt-Samples library) so `chop`, `striate`, `begin` and `end` work on recordings
-- Patterned arguments for transformations, such as `fast("<1 2>")`
-- Ranges in mini-notation (`"0 .. 7"`)
-- More of Tidal's library: `jux`, `off`, `ply`, `iter`, `linger`, `rot`, `euclidFull`, `nT` functions
-- Tests that run in CI
+- Pitched sample banks (one file per note) chosen by `note`
+- More of Tidal's library: `stut`/`echo`, `range` on patterns of patterns, `squeeze`, `ur`, `fix`
+- Patterned arguments for the remaining functions (`chunk`, `euclid`, `swingBy`'s amount)
+- A visual pattern editor and per-pattern mute/solo in the editor

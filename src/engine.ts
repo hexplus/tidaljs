@@ -42,6 +42,12 @@ export interface Tidal {
   queryActive(begin: number, end: number): PatternEvent[];
   startRecording(): boolean;
   stopRecording(filename?: string): Promise<Blob | null>;
+  /** Loaded sample banks: name -> file URLs. */
+  readonly sampleBanks: Map<string, string[]>;
+  /** Loads sample banks from "github:user/repo", a manifest URL or { name: [files] }. */
+  loadSamples(source: string | Record<string, unknown>, base?: string): Promise<number>;
+  isLoadingSamples(): boolean;
+  whenSamplesLoaded(): Promise<void>;
 }
 
 interface TidalStatic {

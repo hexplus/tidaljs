@@ -6,6 +6,7 @@ import { effect, signal } from "sibujs";
 import { DEFAULT_CODE, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
+import { setSampleBanks } from "./editor/language.ts";
 import { TidalJS, type Tidal } from "./engine.ts";
 
 const KEYS = { code: "tidaljs:code", live: "tidaljs:live", category: "tidaljs:snippetCategory" };
@@ -58,6 +59,7 @@ export function createSession() {
 
   let tidal: Tidal | null = null;
   let lastRunCode: string | null = null;
+  let loadingSamples = false;
   let liveTimer: ReturnType<typeof setTimeout> | undefined;
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -90,6 +92,23 @@ export function createSession() {
     return tidal;
   }
 
+  /**
+   * After code that calls samples(), waits for the banks and files to load,
+   * then runs the same code again so the real samples play.
+   */
+  async function afterSamplesLoad(engine: Tidal, text: string, live: boolean) {
+    if (!engine.isLoadingSamples() || loadingSamples) return;
+    loadingSamples = true;
+    report(engine.isPlaying ? "playing" : "", "Loading samples...");
+    try {
+      await engine.whenSamplesLoaded();
+    } finally {
+      loadingSamples = false;
+    }
+    setSampleBanks(new Map([...engine.sampleBanks].map(([name, files]) => [name, files.length])));
+    if (editor.getValue() === text) runCode(engine, live);
+  }
+
   /** Runs the editor code. Live updates keep the old music on warnings. */
   function runCode(engine: Tidal, live: boolean) {
     const text = editor.getValue();
@@ -98,6 +117,8 @@ export function createSession() {
     setTempo(+engine.cps.toFixed(3));
     editor.showProblems(result, text);
     const where = result.location ? " (line " + result.location.line + ")" : "";
+    void afterSamplesLoad(engine, text, live);
+    if (loadingSamples) return;
 
     if (result.pending) {
       report("playing warn", "Waiting for valid code; the previous patterns keep playing.", result.warnings);

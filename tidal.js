@@ -328,33 +328,59 @@
 
         // --- Time transformations --------------------------------------
 
+        // Numeric arguments of these transformations may also be patterns,
+        // e.g. .fast("<1 2>") or .ply("2 3").
+
         /** Plays the pattern `factor` times per cycle. */
         fast(factor) {
-            return fastPattern(this, requireNumber('fast', factor));
+            return patterned(this, 'fast', factor, (p, f) => fastPattern(p, f));
         }
 
         /** Stretches the pattern over `factor` cycles. */
         slow(factor) {
-            const f = requireNumber('slow', factor);
-            return f > 0 ? fastPattern(this, 1 / f) : silence(this.tidal);
+            return patterned(this, 'slow', factor, (p, f) => (f > 0 ? fastPattern(p, 1 / f) : silence(p.tidal)));
         }
 
         /** Same as fast(). */
         density(factor) {
-            return fastPattern(this, requireNumber('density', factor));
+            return patterned(this, 'density', factor, (p, f) => fastPattern(p, f));
         }
 
         /** Same as slow(), as in Tidal. */
         sparsity(factor) {
-            return this.slow(factor);
+            return patterned(this, 'sparsity', factor, (p, f) => (f > 0 ? fastPattern(p, 1 / f) : silence(p.tidal)));
         }
 
         /** fast() that also raises the playback speed (and pitch). */
         hurry(factor) {
-            const f = requireNumber('hurry', factor);
-            return fastPattern(this, f).withValue((v) => (v && typeof v === 'object'
+            return patterned(this, 'hurry', factor, (p, f) => fastPattern(p, f).withValue((v) => (v && typeof v === 'object'
                 ? { ...v, speed: (isNum(v.speed) ? v.speed : 1) * f }
-                : v));
+                : v)));
+        }
+
+        /** Repeats each event n times within its span. */
+        ply(n) {
+            return patterned(this, 'ply', n, plyPattern);
+        }
+
+        /** Starts each cycle one nth further into the pattern, cycling through n starts. */
+        iter(n) {
+            return patterned(this, 'iter', n, (p, x) => iterPattern(p, x, false));
+        }
+
+        /** Like iter(), moving backwards. */
+        iterBack(n) {
+            return patterned(this, 'iterBack', n, (p, x) => iterPattern(p, x, true));
+        }
+
+        /** Repeats the first part of each cycle (e.g. 0.25 for a quarter); negative takes the end. */
+        linger(fraction) {
+            return patterned(this, 'linger', fraction, lingerPattern);
+        }
+
+        /** Shifts values n steps along the events of each cycle, keeping the rhythm. */
+        rot(n) {
+            return patterned(this, 'rot', n, rotPattern);
         }
 
         /** Reverses every cycle. */
@@ -379,12 +405,12 @@
 
         /** Shifts the pattern later in time by `cycles` (Tidal's ~>). */
         late(cycles) {
-            return shiftPattern(this, requireNumber('late', cycles));
+            return patterned(this, 'late', cycles, (p, x) => shiftPattern(p, x));
         }
 
         /** Shifts the pattern earlier in time by `cycles` (Tidal's <~). */
         early(cycles) {
-            return shiftPattern(this, -requireNumber('early', cycles));
+            return patterned(this, 'early', cycles, (p, x) => shiftPattern(p, -x));
         }
 
         /** Plays the pattern, then its reverse, alternating every cycle. */
@@ -441,17 +467,65 @@
 
         /** Swing with a third of a slice, like Tidal's swing. */
         swing(n) {
-            return this.swingBy(1 / 3, n);
+            return patterned(this, 'swing', n, (p, x) => p.swingBy(1 / 3, x));
         }
 
-        /** Applies fn on cycles 0, n, 2n, ... */
+        /** Applies fn on cycles 0, n, 2n, ... (n may be a pattern, e.g. "<2 4>"). */
         every(n, fn) {
-            const period = Math.floor(requireNumber('every', n));
-            if (period < 1) throw new RangeError('every() expects n >= 1');
             const transformed = applyTransform('every', fn, this);
-            return this._derive((b, e) => eachCycle(b, e, (c, s, t) =>
-                (mod(c, period) === 0 ? transformed : this).query(s, t)
-            ));
+            return patterned(this, 'every', n, (p, x) => {
+                const period = Math.floor(x);
+                if (period < 1) throw new RangeError('every() expects n >= 1');
+                return p._derive((b, e) => eachCycle(b, e, (c, s, t) =>
+                    (mod(c, period) === 0 ? transformed : p).query(s, t)
+                ));
+            });
+        }
+
+        /** Plays fn(pattern) shifted later by `time` cycles on top of the pattern. */
+        off(time, fn) {
+            const shifted = patterned(this, 'off', time, (p, x) => shiftPattern(p, x));
+            return stackPatterns(this.tidal, [this, applyTransform('off', fn, shifted)]);
+        }
+
+        /** The pattern panned left and fn(pattern) panned right. */
+        jux(fn) {
+            return this.juxBy(1, fn);
+        }
+
+        /** Like jux(), panned by `amount` (0 to 1) instead of fully left and right. */
+        juxBy(amount, fn) {
+            const width = clamp(requireNumber('juxBy', amount), 0, 1);
+            const right = applyTransform('jux', fn, this);
+            return stackPatterns(this.tidal, [this.pan(-width), right.pan(width)]);
+        }
+
+        /** Plays the pattern on k of n evenly spread steps (Euclidean rhythm), rotated by `rotation`. */
+        euclid(k, n, rotation = 0) {
+            return this.struct(euclidBools(this.tidal, requireNumber('euclid', k), requireNumber('euclid', n), requireNumber('euclid', rotation), false));
+        }
+
+        /** Plays the pattern on the steps a Euclidean rhythm leaves empty. */
+        euclidInv(k, n, rotation = 0) {
+            return this.struct(euclidBools(this.tidal, requireNumber('euclidInv', k), requireNumber('euclidInv', n), requireNumber('euclidInv', rotation), true));
+        }
+
+        /** The pattern on the hits of a Euclidean rhythm and `other` on its rests. */
+        euclidFull(k, n, other, rotation = 0) {
+            const rest = toPattern(this.tidal, other, 'euclidFull');
+            return stackPatterns(this.tidal, [this.euclid(k, n, rotation), rest.euclidInv(k, n, rotation)]);
+        }
+
+        /**
+         * Gives each played event the next value of `list` as its n, keeping
+         * count under `name` across cycles and code changes (Tidal's nTake).
+         */
+        nTake(name, list) {
+            if (!Array.isArray(list) || list.length === 0 || !list.every((x) => toNumber(x) !== undefined)) {
+                throw new TypeError('nTake() expects a name and a list of numbers, e.g. nTake("a", [0, 2, 4])');
+            }
+            const take = { name: String(name), list: list.map(toNumber) };
+            return this.withValue((v) => ({ ...asObject(v), nTake: take }));
         }
 
         /** Applies fn when (cycle mod n) >= offset, like Tidal's whenmod. */
@@ -563,7 +637,7 @@
 
         /** Randomly removes events with probability `amount`. */
         degradeBy(amount) {
-            return degradePattern(this, clamp(requireNumber('degradeBy', amount), 0, 1), nextSeed());
+            return patterned(this, 'degradeBy', amount, (p, x) => degradePattern(p, clamp(x, 0, 1), nextSeed()));
         }
 
         /** Randomly removes half of the events. */
@@ -639,7 +713,11 @@
 
         /** Cuts each event into n parts, each playing a slice of the sound. */
         chop(n) {
-            const parts = Math.floor(requireNumber('chop', n));
+            return patterned(this, 'chop', n, (p, x) => p._chop(x));
+        }
+
+        _chop(n) {
+            const parts = Math.floor(n);
             if (parts < 1) throw new RangeError('chop() expects n >= 1');
             return this._derive((b, e) => {
                 const out = [];
@@ -665,7 +743,11 @@
 
         /** Plays the pattern n times per cycle, each time a different slice of every sound. */
         striate(n) {
-            const parts = Math.floor(requireNumber('striate', n));
+            return patterned(this, 'striate', n, (p, x) => p._striate(x));
+        }
+
+        _striate(n) {
+            const parts = Math.floor(n);
             if (parts < 1) throw new RangeError('striate() expects n >= 1');
             const slices = [];
             for (let i = 0; i < parts; i++) {
@@ -718,9 +800,11 @@
 
         /** Samples the pattern (or a signal such as sine) n times per cycle. */
         segment(n) {
-            const steps = Math.floor(requireNumber('segment', n));
-            if (steps < 1) throw new RangeError('segment() expects n >= 1');
-            return this.struct(fastPattern(pure(this.tidal, true), steps));
+            return patterned(this, 'segment', n, (p, x) => {
+                const steps = Math.floor(x);
+                if (steps < 1) throw new RangeError('segment() expects n >= 1');
+                return p.struct(fastPattern(pure(p.tidal, true), steps));
+            });
         }
 
         // --- Values ----------------------------------------------------
@@ -1076,6 +1160,131 @@
         ));
     }
 
+    /**
+     * Calls apply(pattern, x) with a number argument, or, for a pattern of
+     * numbers such as "<1 2>" or "1 [2 4]", with each of its values over the
+     * part of the cycle where that value holds (as Tidal's patterned
+     * arguments do). Transformed patterns are cached per value, so random
+     * functions keep their seeds.
+     */
+    function patterned(pattern, fname, arg, apply) {
+        const plain = typeof arg === 'number' || (typeof arg === 'string' && /^\s*-?(\d+\.?\d*|\.\d+)\s*$/.test(arg));
+        if (plain || !(typeof arg === 'string' || arg instanceof PatternBuilder || Array.isArray(arg))) {
+            return apply(pattern, requireNumber(fname, arg));
+        }
+        const values = toRaw(pattern.tidal, arg, fname);
+        if (!values._signal) {
+            for (const ev of values.query(0, 4)) {
+                if (toNumber(ev.value) === undefined) {
+                    throw new TypeError(`${fname}() expects a number or a pattern of numbers, got "${ev.value}"`);
+                }
+            }
+        }
+        const cache = new Map();
+        const at = (x) => {
+            if (!cache.has(x)) {
+                if (cache.size > 64) cache.clear();
+                cache.set(x, apply(pattern, x));
+            }
+            return cache.get(x);
+        };
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            // The parts of this cycle where the argument has one value.
+            const parts = values._signal
+                ? [{ begin: c, end: c + 1, value: values._signal(c) }]
+                : values.query(c - 1, c + 1).filter((ev) => ev.end > c && ev.begin < c + 1);
+            const out = [];
+            for (const part of parts) {
+                const lo = Math.max(s, part.begin);
+                const hi = Math.min(t, part.end);
+                const x = toNumber(part.value);
+                if (lo >= hi || x === undefined) continue;
+                for (const ev of at(x).query(lo, hi)) out.push(ev);
+            }
+            return out;
+        }));
+    }
+
+    /** Repeats each event n times within its own span. */
+    function plyPattern(pattern, n) {
+        const times = Math.round(n);
+        if (times < 1) return silence(pattern.tidal);
+        if (times === 1) return pattern;
+        return pattern._derive((b, e) => {
+            const out = [];
+            // Repeats of events that started up to a cycle earlier may land here.
+            for (const ev of pattern.query(Math.floor(b) - 1, e)) {
+                const step = (ev.end - ev.begin) / times;
+                for (let i = 0; i < times; i++) {
+                    const begin = ev.begin + i * step;
+                    if (begin >= b && begin < e) out.push({ begin, end: begin + step, value: ev.value });
+                }
+            }
+            return out;
+        });
+    }
+
+    /** Starts each cycle (cycle mod n)/n later into the pattern; backwards the other way. */
+    function iterPattern(pattern, n, backwards) {
+        const parts = Math.floor(n);
+        if (parts < 1) return pattern;
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            const shift = (mod(c, parts) / parts) * (backwards ? -1 : 1);
+            return pattern.query(s + shift, t + shift).map(
+                (ev) => ({ begin: ev.begin - shift, end: ev.end - shift, value: ev.value })
+            );
+        }));
+    }
+
+    /** Repeats the first `fraction` of each cycle to fill it; a negative fraction takes the end. */
+    function lingerPattern(pattern, fraction) {
+        const len = Math.abs(fraction);
+        if (len === 0) return silence(pattern.tidal);
+        if (len >= 1) return pattern;
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            const source = fraction > 0 ? c : c + 1 - len;
+            const out = [];
+            for (let slot = c; slot < c + 1 - 1e-9; slot += len) {
+                const lo = Math.max(s, slot);
+                const hi = Math.min(t, slot + len, c + 1);
+                if (lo >= hi) continue;
+                const offset = slot - source;
+                for (const ev of pattern.query(lo - offset, hi - offset)) {
+                    out.push({ begin: ev.begin + offset, end: ev.end + offset, value: ev.value });
+                }
+            }
+            return out;
+        }));
+    }
+
+    /** Keeps the rhythm of each cycle but gives every event the value of the event n steps later. */
+    function rotPattern(pattern, n) {
+        const steps = Math.round(n);
+        if (steps === 0) return pattern;
+        return pattern._derive((b, e) => eachCycle(b, e, (c, s, t) => {
+            const events = pattern.query(c, c + 1).slice().sort((x, y) => x.begin - y.begin);
+            const out = [];
+            events.forEach((ev, i) => {
+                if (ev.begin >= s && ev.begin < t) {
+                    out.push({ begin: ev.begin, end: ev.end, value: events[mod(i + steps, events.length)].value });
+                }
+            });
+            return out;
+        }));
+    }
+
+    /** A boolean pattern with k hits spread over n steps, rotated left by `rotation`. */
+    function euclidBools(tidal, k, n, rotation, invert) {
+        const steps = Math.floor(n);
+        if (steps < 1) return silence(tidal);
+        let bools = bjorklund(Math.abs(k), steps);
+        if (k < 0) bools = bools.map((x) => !x);
+        if (invert) bools = bools.map((x) => !x);
+        const r = mod(Math.floor(rotation), steps);
+        bools = bools.slice(r).concat(bools.slice(0, r));
+        return fastcat(tidal, bools.map((on) => pure(tidal, on)));
+    }
+
     /** Maps each cycle c of the pattern into [c + a, c + z). */
     function compressPattern(pattern, a, z) {
         const span = z - a;
@@ -1226,9 +1435,38 @@
         return tokens;
     }
 
+    /** Expands "0 .. 3" and "0..3" into the steps 0 1 2 3 (descending ranges too). */
+    function expandRanges(tokens) {
+        const isInt = (t) => t && t.type === 'word' && /^-?\d+$/.test(t.v);
+        const range = (from, to, spaceBefore) => {
+            const out = [];
+            const step = from <= to ? 1 : -1;
+            for (let x = from; out.length <= 1000; x += step) {
+                out.push({ v: String(x), type: 'word', spaceBefore: out.length ? true : spaceBefore });
+                if (x === to) break;
+            }
+            return out;
+        };
+        const out = [];
+        for (let i = 0; i < tokens.length; i++) {
+            const t = tokens[i];
+            const joined = t.type === 'word' ? /^(-?\d+)\.\.(-?\d+)$/.exec(t.v) : null;
+            if (joined) {
+                out.push(...range(parseInt(joined[1], 10), parseInt(joined[2], 10), t.spaceBefore));
+            } else if (t.type === 'word' && t.v === '..' && isInt(out[out.length - 1]) && isInt(tokens[i + 1])) {
+                const start = out.pop();
+                out.push(...range(parseInt(start.v, 10), parseInt(tokens[i + 1].v, 10), start.spaceBefore));
+                i++;
+            } else {
+                out.push(t);
+            }
+        }
+        return out;
+    }
+
     function parseMini(tidal, source) {
         const src = String(source);
-        const tokens = tokenizeMini(src);
+        const tokens = expandRanges(tokenizeMini(src));
         let pos = 0;
         const peek = () => tokens[pos];
         const next = () => tokens[pos++];
@@ -1767,6 +2005,13 @@
             this._socketQueue = [];
             this._recorder = null;
             this._midiRequest = null;
+
+            // Loaded sample banks: name -> list of file URLs (see samples()).
+            this.sampleBanks = new Map();
+            this._sampleManifests = new Map(); // source -> promise
+            this._sampleBuffers = new Map();   // url -> { buffer, reversed, promise }
+            this._sampleLoads = new Set();     // promises still loading
+            this._nTakeCounters = new Map();   // nTake name -> next index
         }
 
         // --- Setup -----------------------------------------------------
@@ -1821,6 +2066,9 @@
             g.slowcat = g.cat;
             g.fastcat = (...patterns) => fastcat(this, patternsOf(patterns, 'fastcat'));
             g.randcat = (...patterns) => randcat(this, patternsOf(patterns, 'randcat'));
+            g.euclidFull = (k, n, pattern, other, rotation = 0) =>
+                toPattern(this, pattern, 'euclidFull').euclidFull(k, n, other, rotation);
+            g.samples = (source, base) => this.loadSamples(source, base);
             g.struct = (structure, pattern) => {
                 if (pattern === undefined) throw new TypeError('struct() expects a structure and a pattern');
                 return toPattern(this, pattern, 'struct').struct(structure);
@@ -2232,12 +2480,20 @@
                 }
                 // Query a few cycles up front: surfaces errors and unknown
                 // sounds now instead of in the middle of playback.
+                // Sample files used early on start loading now. Unknown
+                // names are not reported while sample banks are still loading:
+                // they may be in them.
                 for (const p of patterns) {
                     current = origin.get(p);
                     for (const ev of p.query(0, 4)) {
                         const v = asObject(ev.value);
-                        if (v.midi !== undefined || v.osc !== undefined) continue;
-                        if (v.s && !this.samples.has(v.s)) warnings.add(`Unknown sound "${v.s}"`);
+                        if (v.midi !== undefined || v.osc !== undefined || !v.s) continue;
+                        const bank = this.sampleBanks.get(v.s);
+                        if (bank) {
+                            if (this.audioContext) this._sampleBuffer(this._sampleUrl(bank, v), false);
+                        } else if (!this.samples.has(v.s) && !this.isLoadingSamples()) {
+                            warnings.add(`Unknown sound "${v.s}"`);
+                        }
                     }
                 }
 
@@ -2492,6 +2748,163 @@
             };
         }
 
+        // --- Samples ---------------------------------------------------
+
+        /**
+         * Loads banks of audio samples. A loaded bank is played instead of
+         * the synthesised sound of the same name, with n choosing the file.
+         *
+         *   samples('github:tidalcycles/dirt-samples')   // a repo's strudel.json
+         *   samples('https://example.com/strudel.json')   // a manifest URL
+         *   samples({ kick: ['kick1.wav', 'kick2.wav'] }, 'https://example.com/samples/')
+         *
+         * A manifest maps bank names to file lists, with an optional _base
+         * URL. Returns a promise of the number of banks loaded. Loading the
+         * same source again reuses the first load.
+         */
+        loadSamples(source, base = '') {
+            const key = typeof source === 'string' ? source + '|' + base : null;
+            if (key && this._sampleManifests.has(key)) return this._sampleManifests.get(key);
+
+            const job = (async () => {
+                let map = source;
+                let root = base;
+                if (typeof source === 'string') {
+                    const url = manifestUrl(source);
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`Could not load samples from ${url} (HTTP ${response.status})`);
+                    map = await response.json();
+                    if (!root) root = typeof map._base === 'string' ? map._base : url.slice(0, url.lastIndexOf('/') + 1);
+                } else if (!source || typeof source !== 'object') {
+                    throw new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }');
+                } else if (!root && typeof source._base === 'string') {
+                    root = source._base;
+                }
+                let banks = 0;
+                for (const [name, files] of Object.entries(map)) {
+                    if (name.startsWith('_')) continue;
+                    const list = (Array.isArray(files) ? files : typeof files === 'string' ? [files] : Object.values(files || {}))
+                        .filter((f) => typeof f === 'string');
+                    if (list.length === 0) continue;
+                    this.sampleBanks.set(name, list.map((f) => (/^(https?:|data:|blob:)/.test(f) ? f : root + f)));
+                    banks++;
+                }
+                return banks;
+            })();
+
+            if (key) this._sampleManifests.set(key, job);
+            this._trackLoad(job.catch((err) => {
+                if (key) this._sampleManifests.delete(key); // allow a retry
+                console.error('TidalJS:', err);
+                this._warnOnce(err.message);
+            }));
+            return job;
+        }
+
+        /** True while sample banks or files are still loading. */
+        isLoadingSamples() {
+            return this._sampleLoads.size > 0;
+        }
+
+        /** Resolves once every sample load started so far has finished. */
+        async whenSamplesLoaded() {
+            while (this._sampleLoads.size > 0) await Promise.all([...this._sampleLoads]);
+        }
+
+        _trackLoad(promise) {
+            const tracked = Promise.resolve(promise).finally(() => this._sampleLoads.delete(tracked));
+            this._sampleLoads.add(tracked);
+            return tracked;
+        }
+
+        /** The decoded buffer of a sample file (reversed if asked), or null while it loads. */
+        _sampleBuffer(url, reversed) {
+            let entry = this._sampleBuffers.get(url);
+            if (!entry) {
+                entry = { buffer: null, reversed: null, failed: false };
+                entry.promise = this._trackLoad(fetch(url)
+                    .then((response) => {
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        return response.arrayBuffer();
+                    })
+                    .then((data) => this.audioContext.decodeAudioData(data))
+                    .then((buffer) => { entry.buffer = buffer; })
+                    .catch((err) => {
+                        entry.failed = true;
+                        this._warnOnce(`Could not load sample ${url} (${err.message})`);
+                    }));
+                this._sampleBuffers.set(url, entry);
+            }
+            if (!entry.buffer) return null;
+            if (!reversed) return entry.buffer;
+            if (!entry.reversed) {
+                const src = entry.buffer;
+                const copy = this.audioContext.createBuffer(src.numberOfChannels, src.length, src.sampleRate);
+                for (let ch = 0; ch < src.numberOfChannels; ch++) {
+                    copy.getChannelData(ch).set(src.getChannelData(ch).slice().reverse());
+                }
+                entry.reversed = copy;
+            }
+            return entry.reversed;
+        }
+
+        /** The file of a bank that n selects (wrapping around). */
+        _sampleUrl(bank, v) {
+            return bank[isNum(v.n) ? mod(Math.floor(v.n), bank.length) : 0];
+        }
+
+        /**
+         * Plays a sample: speed and note/up change the playback rate (a
+         * negative speed plays it backwards), begin/end play part of it,
+         * legato/sustain cut it, loop repeats it, attack/release fade it.
+         */
+        _playSample(v, time, duration, bank) {
+            const gain = isNum(v.gain) ? clamp(v.gain, 0, 2) : 1;
+            if (gain <= 0) return;
+            const speed = isNum(v.speed) && v.speed !== 0 ? clamp(v.speed, -16, 16) : 1;
+            let semitones = isNum(v.note) ? v.note - 60 : isNum(v.midinote) ? v.midinote - 60 : 0;
+            if (isNum(v.up)) semitones += v.up;
+            const rate = Math.abs(speed) * Math.pow(2, clamp(semitones, -48, 48) / 12);
+            const buffer = this._sampleBuffer(this._sampleUrl(bank, v), speed < 0);
+            if (!buffer) return; // still loading: it plays from the next event on
+
+            const begin = isNum(v.begin) ? clamp(v.begin, 0, 1) : 0;
+            const end = isNum(v.end) ? clamp(v.end, 0, 1) : 1;
+            if (end <= begin) return;
+            let window = ((end - begin) * buffer.duration) / rate;
+            if (isNum(v.sustain) && v.sustain > 0) window = Math.min(window, v.sustain);
+            else if (isNum(v.legato) && v.legato > 0) window = Math.min(window, v.legato * duration);
+
+            const loops = isNum(v.loop) ? clamp(Math.floor(v.loop), 1, 32) : 1;
+            for (let i = 0; i < loops; i++) {
+                this._sampleVoice(v, time + i * window, buffer, rate, begin * buffer.duration, window, gain * 0.8);
+            }
+        }
+
+        _sampleVoice(v, time, buffer, rate, offset, window, level) {
+            const ctx = this.audioContext;
+            const attack = isNum(v.attack) ? clamp(v.attack, 0, 10) : 0;
+            const release = isNum(v.release) ? clamp(v.release, 0.001, 10) : 0.005;
+            const holdEnd = time + Math.max(window, attack);
+            const stopAt = holdEnd + release + 0.02;
+
+            const src = ctx.createBufferSource();
+            src.buffer = buffer;
+            src.playbackRate.value = rate;
+            const amp = ctx.createGain();
+            amp.gain.value = level;
+            const gate = ctx.createGain();
+            gate.gain.setValueAtTime(attack > 0 ? 0 : 1, time);
+            if (attack > 0) gate.gain.linearRampToValueAtTime(1, time + attack);
+            gate.gain.setValueAtTime(1, holdEnd);
+            gate.gain.linearRampToValueAtTime(0, holdEnd + release);
+            src.connect(amp);
+            amp.connect(gate);
+            src.start(time, Math.min(offset, buffer.duration));
+            src.stop(stopAt);
+            this._route(gate, v, [src], [amp]);
+        }
+
         // --- Events ----------------------------------------------------
 
         /**
@@ -2500,6 +2913,14 @@
          */
         playEvent(v, time, duration = 0.25) {
             if (!this.audioContext || !this._session) return;
+            if (v.nTake) {
+                // The next value of the list, counted per name across cycles.
+                const { name, list } = v.nTake;
+                const index = this._nTakeCounters.get(name) || 0;
+                this._nTakeCounters.set(name, index + 1);
+                v = { ...v, n: list[index % list.length] };
+                delete v.nTake;
+            }
             if (v.midi !== undefined) {
                 this._sendMidi(v, time, duration);
                 return;
@@ -2510,9 +2931,15 @@
             }
             const name = v.s;
             if (!name || name === '~') return;
+            // A loaded sample bank wins over the synthesised sound of the same name.
+            const bank = this.sampleBanks.get(name);
+            if (bank) {
+                this._playSample(v, time, duration, bank);
+                return;
+            }
             const def = this.samples.get(name);
             if (!def) {
-                this._warnOnce(`Unknown sound "${name}"`);
+                if (!this.isLoadingSamples()) this._warnOnce(`Unknown sound "${name}"`);
                 return;
             }
 
@@ -2925,6 +3352,20 @@
             const trackHeader = [0x4d, 0x54, 0x72, 0x6b, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff];
             return new Uint8Array([...header, ...trackHeader, ...track]);
         }
+    }
+
+    /**
+     * URL of a sample manifest: "github:user/repo" (or "github:user/repo/branch")
+     * is that repository's strudel.json; a folder URL gets /strudel.json added.
+     */
+    function manifestUrl(source) {
+        const github = /^github:([^/\s]+)\/([^/\s]+)(?:\/([^\s]+))?$/.exec(source.trim());
+        if (github) {
+            const [, user, repo, branch] = github;
+            return `https://raw.githubusercontent.com/${user}/${repo}/${branch || 'main'}/strudel.json`;
+        }
+        if (/\.json(\?.*)?$/.test(source)) return source;
+        return source.replace(/\/?$/, '/') + 'strudel.json';
     }
 
     function downloadBlob(blob, filename) {

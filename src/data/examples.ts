@@ -177,6 +177,35 @@ stack([
   sound("sine").note("<e1 e1 g1 [d1 a0]>").legato(1).gain(0.9)
 ])` },
 
+    { group: 'Samples', title: 'Dirt-Samples drum kit', code: `// Recorded samples from the Dirt-Samples library, loaded from GitHub the first time.
+// A loaded bank replaces the synth of the same name; n picks the file.
+samples("github:tidalcycles/dirt-samples")
+
+stack([
+  sound("bd*2 [~ bd] ~ bd"),
+  sound("~ sn:3 ~ sn:3").room(0.2),
+  sound("hh*8").n("0 .. 7").gain(0.6),
+  sound("jvbass*4").n("<0 2>").note("c e g e").legato(1)
+])` },
+
+    { group: 'Samples', title: 'Breakbeat slices', code: `// amencutup is a breakbeat cut into 32 slices: n picks the slice.
+samples("github:tidalcycles/dirt-samples")
+setCPS(0.55)
+
+sound("amencutup*16").n("0 .. 15")
+  .every(4, x => x.iter(4))
+  .sometimesBy(0.2, x => x.speed(-1))
+  .lpf(6000)` },
+
+    { group: 'Samples', title: 'chop() on a recording', code: `// chop() cuts each sample into slices that follow the pattern.
+samples("github:tidalcycles/dirt-samples")
+setCPS(0.5)
+
+stack([
+  sound("breaks125").chop(16).linger("<1 0.5 0.25 0.5>").legato(1),
+  sound("drum*2 drum:1").speed("<1 2 -1>").gain(0.8)
+])` },
+
     { group: 'Pattern fundamentals', title: 'sound() and n()', code: 'sound("bd*2 [sn cp] bd [sn sn:2]").n("<0 1 2>")' },
     { group: 'Pattern fundamentals', title: 'note()', code: '// The first bar of Ode to Joy\nsound("arpy").note("e4 e4 f4 g4")' },
     { group: 'Pattern fundamentals', title: 'up()', code: '// Twinkle Twinkle, an octave higher every other cycle\nsound("arpy").note("c4 c4 g4 g4 a4 a4 g4@2").up("<0 12>")' },
@@ -191,6 +220,12 @@ stack([
     { group: 'Time', title: 'density()', code: 'sound("bd sn cp").density(1.5)' },
     { group: 'Time', title: 'whenmod()', code: 'sound("bd sn hh cp")\n  .whenmod(8, 6, x => x.rev())' },
     { group: 'Time', title: 'late()', code: '// A melody against a copy of itself an eighth later\nsound("arpy").note("c4 e4 g4 b4")\n  .superimpose(x => x.late(0.125).up(12).gain(0.5))' },
+    { group: 'Time', title: 'Patterned arguments', code: '// Arguments can be patterns: a different speed each cycle\nsound("bd sn hh cp").fast("<1 2 [1 4]>")' },
+    { group: 'Time', title: 'ply()', code: 'sound("bd sn hh cp").ply("<1 2 3>")' },
+    { group: 'Time', title: 'iter()', code: 'sound("arpy*4").note("c e g b").iter(4)' },
+    { group: 'Time', title: 'linger()', code: 'sound("bd [~ bd] sn hh*2").linger("<1 0.25 0.5>")' },
+    { group: 'Time', title: 'rot()', code: '// Same rhythm, values shifted one step each cycle\nsound("bd ~ sn [hh cp]").rot("<0 1 2 3>")' },
+    { group: 'Time', title: 'off()', code: 'sound("arpy*4").note("c e g b")\n  .off(0.125, x => x.up(12).gain(0.5))' },
 
     { group: 'Effects', title: 'gain() and pan()', code: 'stack([\n  sound("hh*4").pan(-0.8),\n  sound("~ cp").pan(0.8).gain(0.6)\n])' },
     { group: 'Effects', title: 'lpf()', code: 'sound("saw*8").note("c2 c3").lpf("300 600 1200 2400")' },
@@ -209,12 +244,16 @@ stack([
     { group: 'Composition', title: 'superimpose()', code: 'sound("arpy*4").note("c e g b")\n  .superimpose(x => x.fast(2).up(12).gain(0.5))' },
     { group: 'Composition', title: 'overlay()', code: 'sound("bd ~ bd ~")\n  .overlay("~ sn ~ sn")' },
     { group: 'Composition', title: 'layer()', code: 'layer([\n  sound("bd ~ bd ~"),\n  sound("~ sn ~ sn"),\n  sound("hh hh hh hh").gain(0.3)\n])' },
+    { group: 'Composition', title: 'jux()', code: '// The scale on the left, backwards on the right\nsound("arpy*8").note(scale("major", "0 .. 7")).jux(x => x.rev())' },
+    { group: 'Composition', title: 'euclid() and euclidFull()', code: 'stack([\n  sound("bd").euclidFull(3, 8, sound("hh").gain(0.5)),\n  sound("cp").euclid(2, 8, 2)\n])' },
+    { group: 'Composition', title: 'nTake()', code: '// Each played snare takes the next variation from the list\nsound("~ sn ~ sn*2").nTake("snares", [0, 1, 2, 3, 2])' },
 
     { group: 'Mini-notation', title: 'Subdivision and alternation', code: 'sound("bd [~ bd] <sn cp> [hh hh hh]")' },
     { group: 'Mini-notation', title: 'Euclidean rhythms', code: '// (3,8) is the Cuban tresillo, (5,8) the cinquillo\nstack([\n  sound("bd(3,8)"),\n  sound("hh(5,8,2)").gain(0.5),\n  sound("cp(2,5)").delay(0.25)\n])' },
     { group: 'Mini-notation', title: 'Polymeter', code: 'sound("{bd sn hh, cp hh oh hh cp}")' },
     { group: 'Mini-notation', title: 'Probability and repeats', code: 'sound("bd!2 sn? [hh hh?0.3]!2 cp:1")' },
     { group: 'Mini-notation', title: 'Random choice', code: 'sound("bd [sn | cp | oh] bd [hh | ~]")' },
+    { group: 'Mini-notation', title: 'Ranges', code: '// "0 .. 7" is the steps 0 1 2 3 4 5 6 7\nsound("arpy*8").note(scale("minor", "<[0 .. 7] [7 .. 0]>"))' },
 
     { group: 'Rearranging', title: 'chunk()', code: 'sound("bd sn hh cp")\n  .chunk(4, x => x.hurry(2))' },
     { group: 'Rearranging', title: 'scramble() and shuffle()', code: '// Ode to Joy, scrambled\nstack([\n  sound("bd sn hh cp").shuffle(4),\n  sound("arpy*8").note("e4 e4 f4 g4 g4 f4 e4 d4").scramble(8).gain(0.5)\n])' },

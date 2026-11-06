@@ -20,6 +20,21 @@ export const REFERENCE: ReferenceSection[] = [
         ],
     },
     {
+        title: 'Samples',
+        notes: [
+            'Load recorded samples with `samples("github:tidalcycles/dirt-samples")`. A loaded bank replaces the synth of the same name, and `n` (or `"bd:3"`) picks the file.',
+        ],
+        items: [
+            ['samples("github:user/repo")', 'The banks in a repository\'s strudel.json'],
+            ['samples(url)', 'A strudel.json manifest at any URL'],
+            ['samples({ name: [files] }, base)', 'Your own files'],
+            ['.speed(x)', 'Rate and pitch; negative plays backwards'],
+            ['.begin(x) .end(x)', 'Play part of the sample'],
+            ['.chop(n) .striate(n)', 'Slice samples into parts'],
+            ['.loop(n) .legato(x)', 'Repeat or cut the sample'],
+        ],
+    },
+    {
         title: 'Mini-notation',
         items: [
             ['"bd sn"', 'Steps share one cycle'],
@@ -35,6 +50,7 @@ export const REFERENCE: ReferenceSection[] = [
             ['"bd@3 sn" "bd _"', 'Longer step'],
             ['"[bd | sn]"', 'Random choice per cycle'],
             ['"bd . hh hh"', 'Group steps'],
+            ['"0 .. 7"', 'Range: 0 1 2 3 4 5 6 7'],
             ['"c\'maj e\'min7\'i"', 'Chords in note patterns'],
         ],
     },
@@ -65,7 +81,13 @@ export const REFERENCE: ReferenceSection[] = [
             ['.almostAlways(f)', '90%'],
             ['.almostNever(f)', '10%'],
             ['.sometimesBy(x, f)', 'Apply f with probability x'],
+            ['.ply(n)', 'Repeat each event n times'],
+            ['.iter(n) .iterBack(n)', 'Start each cycle one nth further on'],
+            ['.linger(x)', 'Repeat the first part of each cycle'],
+            ['.rot(n)', 'Shift values, keep the rhythm'],
+            ['.off(t, f)', 'A shifted, changed copy on top'],
         ],
+        after: 'Numeric arguments can be patterns too: `.fast("<1 2>")`, `.ply("2 3")`, `.every("<2 4>", f)`.',
     },
     {
         title: 'Effects',
@@ -94,6 +116,11 @@ export const REFERENCE: ReferenceSection[] = [
             ['.append(p)', 'Play p in the next cycle'],
             ['.overlay(p)', 'Play p at the same time'],
             ['.superimpose(f)', 'Play the pattern and f(pattern)'],
+            ['.jux(f) .juxBy(x, f)', 'Pattern left, f(pattern) right'],
+            ['.euclid(k, n, r)', 'Play on k of n steps'],
+            ['.euclidInv(k, n, r)', 'Play on the other steps'],
+            ['euclidFull(k, n, p, q)', 'p on the hits, q on the rests'],
+            ['.nTake(name, list)', 'Next value of the list as n, each event'],
         ],
     },
     {

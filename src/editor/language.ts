@@ -31,10 +31,11 @@ export const NO_PROBLEMS: Problems = { errors: [], warnings: [] };
 // ---------------- Descriptions ----------------
 
 // From the insert palette, plus a few that it lacks. Sound names are left
-// out: in code, sine and saw are signals, not sounds.
+// out (in code, sine and saw are signals, not sounds), and so is the
+// Samples category, whose texts are about samples only.
 export const DESCRIPTIONS: Record<string, string> = {};
 for (const [category, list] of Object.entries(SNIPPETS)) {
-  if (category === "Sounds") continue;
+  if (category === "Sounds" || category === "Samples") continue;
   for (const s of list) {
     const key = s.l.replace(/^\./, "").replace(/\(\)$/, "");
     if (!DESCRIPTIONS[key]) DESCRIPTIONS[key] = s.t;
@@ -59,7 +60,7 @@ export const SOUND_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
 
 export const GLOBALS: CompletionItem[] = ([
   ["sound", "fn"], ["s", "fn"], ["stack", "fn"], ["layer", "fn"], ["cat", "fn"], ["slowcat", "fn"],
-  ["fastcat", "fn"], ["randcat", "fn"], ["struct", "fn"], ["silence", "value"],
+  ["fastcat", "fn"], ["randcat", "fn"], ["struct", "fn"], ["euclidFull", "fn"], ["samples", "fn"], ["silence", "value"],
   ["sine", "value"], ["cosine", "value"], ["saw", "value"], ["isaw", "value"], ["tri", "value"],
   ["square", "value"], ["rand", "value"], ["irand", "fn"], ["perlin", "value"],
   ["scale", "fn"], ["scaleP", "fn"], ["chord", "fn"], ["arp", "fn"], ["fit", "fn"],
@@ -90,8 +91,24 @@ export type StringContext = "sound" | "scale" | "chord" | "arp" | "vowel";
 const words = (names: string[], desc: string | ((name: string) => string)): CompletionItem[] =>
   names.map((name) => ({ name, kind: "word", desc: typeof desc === "function" ? desc(name) : desc }));
 
+/** Loaded sample banks (name -> number of files), for completion and hover help. */
+export const sampleBanks = new Map<string, number>();
+
+export function setSampleBanks(banks: Map<string, number>) {
+  sampleBanks.clear();
+  for (const [name, count] of banks) sampleBanks.set(name, count);
+}
+
+export const describeBank = (count: number) => "Sample bank, " + count + " file" + (count === 1 ? "" : "s") + " (n picks one)";
+
 export const STRING_SOURCES: Record<StringContext, () => CompletionItem[]> = {
-  sound: () => words(TidalJS.soundNames, (n) => SOUND_DESCRIPTIONS[n] || "Sound"),
+  sound: () => {
+    const synths = TidalJS.soundNames.filter((name) => !sampleBanks.has(name));
+    return [
+      ...words([...sampleBanks.keys()].sort(), (n) => describeBank(sampleBanks.get(n) ?? 0)),
+      ...words(synths, (n) => SOUND_DESCRIPTIONS[n] || "Sound"),
+    ];
+  },
   scale: () => words(TidalJS.scaleNames, "Scale"),
   chord: () => words(TidalJS.chordNames, "Chord"),
   arp: () => words(TidalJS.arpModes, "Arpeggio mode"),

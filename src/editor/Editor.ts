@@ -13,7 +13,7 @@ import type { Snippet } from "../data/snippets.ts";
 import { TidalJS, type EvalResult } from "../engine.ts";
 import {
   ARP_HELP, DESCRIPTIONS, GLOBALS, KEYWORD_HELP, METHODS, MINI_HELP, NO_PROBLEMS, SOUND_DESCRIPTIONS,
-  STRING_CONTEXT, STRING_SOURCES, findInStrings, gutterHtml, highlightHtml, marksHtml, midiFreq, midiName,
+  STRING_CONTEXT, STRING_SOURCES, describeBank, findInStrings, gutterHtml, highlightHtml, marksHtml, midiFreq, midiName, sampleBanks,
   noteToMidi, rankItems, type CompletionItem, type Problems, type Range,
 } from "./language.ts";
 
@@ -802,8 +802,11 @@ export function createEditor(options: EditorOptions): Editor {
     }
 
     switch (context) {
-      case "sound":
-        return help([], TidalJS.soundNames.includes(word) ? SOUND_DESCRIPTIONS[word] || "Sound" : "Unknown sound");
+      case "sound": {
+        const files = sampleBanks.get(word);
+        if (files !== undefined) return help([], describeBank(files));
+        return help([], TidalJS.soundNames.includes(word) ? SOUND_DESCRIPTIONS[word] || "Sound" : "Unknown sound (or a sample bank not loaded yet)");
+      }
       case "chord": {
         if (word.includes("'")) {
           const notes = TidalJS.parseChord(word);

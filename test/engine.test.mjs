@@ -333,4 +333,119 @@ eq(er.success, true);
 eq(er.activePatterns, 2);
 eq(JSON.stringify(TidalJS.splitStatementRanges('  a()\n// c\nb()\n  .c()')), JSON.stringify([{ text: 'a()', start: 2, end: 5 }, { text: 'b()\n  .c()', start: 11, end: 21 }]));
 
+// ---------------- Patterned arguments ----------------
+const pf = sound('bd sn').fast('<1 2>');
+eq(q(pf, 0, 1), 'bd@0 sn@0.5');
+eq(q(pf, 1, 2), 'bd@1 sn@1.25 bd@1.5 sn@1.75');
+eq(q(sound('bd sn').fast('1 2')), 'bd@0 bd@0.5 sn@0.75');
+eq(q(sound('bd sn').slow('<1 2>'), 1, 2), 'sn@1'); // slow(2) at absolute time: sn falls on cycle 1
+eq(q(sound('bd').ply('<2 3>'), 1, 2), 'bd@1 bd@1.3333 bd@1.6667');
+eq(q(sound('bd sn').late('<0 0.25>'), 1, 2), 'bd@1.25 sn@1.75');
+eq(q(sound('bd sn').every('<2 3>', (x) => x.rev()), 0, 1), 'sn@0 bd@0.5');
+eq(q(sound('hh*4').degradeBy('0 1')).split(' ').filter((s) => s.startsWith('hh@0.5') || s.startsWith('hh@0.75')).length, 0);
+eq(sound('bd sn').fast(saw.range(1, 3)).query(0, 1).length, 2);
+assert.throws(() => sound('bd').fast('x y'), /fast\(\) expects a number or a pattern of numbers/); passed++;
+eq(q(sound('bd sn').fast(2)), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+eq(q(sound('bd sn').fast('2')), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+
+// ---------------- Ranges in mini-notation ----------------
+const notes = (p) => p.query(0, 1).sort((a, b) => a.begin - b.begin).map((e) => e.value.note - 60).join(' ');
+eq(notes(sound('arpy').note('0 .. 3')), '0 1 2 3');
+eq(notes(sound('arpy').note('0..3')), '0 1 2 3');
+eq(notes(sound('arpy').note('3 .. 0')), '3 2 1 0');
+eq(notes(sound('arpy').note('[0 .. 2] 7')), '0 1 2 7');
+eq(sound('arpy').n('<0 .. 2>').query(2, 3)[0].value.n, 2);
+eq(notes(sound('arpy').note(scale('major', '0 .. 7'))), '0 2 4 5 7 9 11 12');
+
+// ---------------- More of Tidal's library ----------------
+eq(q(sound('bd sn').ply(2)), 'bd@0 bd@0.25 sn@0.5 sn@0.75');
+eq(q(sound('a b c d').iter(4), 1, 2), 'b@1 c@1.25 d@1.5 a@1.75');
+eq(q(sound('a b c d').iter(4), 4, 5), 'a@4 b@4.25 c@4.5 d@4.75');
+eq(q(sound('a b c d').iterBack(4), 1, 2), 'd@1 a@1.25 b@1.5 c@1.75');
+eq(q(sound('a b c d').linger(0.25)), 'a@0 a@0.25 a@0.5 a@0.75');
+eq(q(sound('a b c d').linger(0.5)), 'a@0 b@0.25 a@0.5 b@0.75');
+eq(q(sound('a b c d').linger(-0.25)), 'd@0 d@0.25 d@0.5 d@0.75');
+eq(q(sound('a b c d').rot(1)), 'b@0 c@0.25 d@0.5 a@0.75');
+eq(q(sound('a ~ b c').rot('<0 1>'), 1, 2), 'b@1 c@1.5 a@1.75');
+const jux = sound('bd sn').jux((x) => x.rev()).query(0, 1).map((e) => `${e.value.s}${e.value.pan}@${e.begin}`).sort().join(' ');
+eq(jux, 'bd-1@0 bd1@0.5 sn-1@0.5 sn1@0');
+eq(sound('bd').juxBy(0.5, (x) => x).query(0, 1).map((e) => e.value.pan).sort().join(), '-0.5,0.5');
+const off = sound('arpy').off(0.25, (x) => x.up(12)).query(0, 1).map((e) => `${e.value.up ?? 0}@${e.begin}`).sort().join(' ');
+eq(off, '0@0 12@0.25');
+eq(q(sound('bd').euclid(3, 8)), 'bd@0 bd@0.375 bd@0.75');
+eq(q(sound('bd').euclid(3, 8, 2)), 'bd@0.125 bd@0.5 bd@0.75');
+eq(q(sound('hh').euclidInv(3, 8)).split(' ').length, 5);
+eq(q(sound('bd').euclidFull(3, 8, sound('hh'))), 'bd@0 hh@0.125 hh@0.25 bd@0.375 hh@0.5 hh@0.625 bd@0.75 hh@0.875');
+eq(q(euclidFull(3, 8, 'bd', 'hh')).split(' ').length, 8);
+eq(JSON.stringify(sound('bd').nTake('a', [0, 2, 4]).query(0, 1)[0].value.nTake), JSON.stringify({ name: 'a', list: [0, 2, 4] }));
+assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
+
+// nTake counts across played events
+{
+    const taken = [];
+    t._session = {};
+    t.sampleBanks.set('kit', ['k0.wav', 'k1.wav', 'k2.wav', 'k3.wav', 'k4.wav']);
+    t._playSample = (v) => taken.push(v.n);
+    for (const ev of sound('kit*4').nTake('x', [0, 2, 4]).query(0, 2)) TidalJS.prototype.playEvent.call(t, ev.value, 0, 0.25);
+    eq(taken.join(','), '0,2,4,0,2,4,0,2');
+    t.sampleBanks.delete('kit');
+    delete t._playSample;
+    t._session = null;
+}
+
+// ---------------- Samples ----------------
+{
+    const fetched = [];
+    const manifest = { _base: 'https://cdn.test/kit/', kick: ['kick/a.wav', 'kick/b.wav'], snare: 'snare/a.wav', pitched: { c4: 'p/c4.wav' }, _meta: 1 };
+    globalThis.fetch = async (url) => {
+        fetched.push(url);
+        if (url.endsWith('.json')) return { ok: true, json: async () => manifest };
+        return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
+    };
+    const decoded = [];
+    t.audioContext.decodeAudioData = async () => { const b = { duration: 2, numberOfChannels: 1, length: 4, sampleRate: 2, getChannelData: () => new Float32Array([1, 2, 3, 4]) }; decoded.push(b); return b; };
+
+    const banks = await samples('github:someone/kit');
+    eq(fetched[0], 'https://raw.githubusercontent.com/someone/kit/main/strudel.json');
+    eq(banks, 3);
+    eq(JSON.stringify(t.sampleBanks.get('kick')), JSON.stringify(['https://cdn.test/kit/kick/a.wav', 'https://cdn.test/kit/kick/b.wav']));
+    eq(t.sampleBanks.get('snare')[0], 'https://cdn.test/kit/snare/a.wav');
+    eq(t.sampleBanks.has('_meta'), false);
+    eq(await samples('github:someone/kit'), 3);
+    eq(fetched.filter((u) => u.endsWith('.json')).length, 1); // second load reused
+    await samples({ tom: ['t.wav'] }, 'https://other.test/');
+    eq(t.sampleBanks.get('tom')[0], 'https://other.test/t.wav');
+
+    // eval: no "unknown" warning for a bank, and its first files start loading
+    r = t.eval('sound("kick*2 snare").n("<0 1>")');
+    eq(r.success, true);
+    eq(r.warnings.length, 0);
+    await t.whenSamplesLoaded();
+    eq(t.isLoadingSamples(), false);
+    eq(fetched.includes('https://cdn.test/kit/kick/a.wav'), true);
+
+    // Playback: n picks the file, speed/note set the rate, begin/end the slice
+    const voices = [];
+    t._session = {};
+    t._sampleVoice = (v, time, buffer, rate, offset, window, level) => voices.push({ time, rate: +rate.toFixed(4), offset, window: +window.toFixed(4), level });
+    TidalJS.prototype.playEvent.call(t, { s: 'kick', n: 0 }, 1, 0.5);
+    TidalJS.prototype.playEvent.call(t, { s: 'kick', n: 3, speed: 2, begin: 0.5 }, 2, 0.5); // n 3 wraps to the second file
+    TidalJS.prototype.playEvent.call(t, { s: 'kick', note: 72 }, 3, 0.5);
+    TidalJS.prototype.playEvent.call(t, { s: 'kick', legato: 0.5 }, 4, 0.5);
+    TidalJS.prototype.playEvent.call(t, { s: 'kick', loop: 2, end: 0.25 }, 5, 0.5);
+    eq(JSON.stringify(voices[0]), JSON.stringify({ time: 1, rate: 1, offset: 0, window: 2, level: 0.8 }));
+    eq(voices[1].time === 2 && voices[1].rate === 2 && voices[1].offset === 1 && voices[1].window === 0.5, true);
+    eq(voices[2].rate, 2);
+    eq(voices[3].window, 0.25);
+    eq(voices.slice(4).map((v) => v.time).join(), '5,5.5');
+    eq(t.sampleBanks.has('kick') && !!t._sampleBuffers.get('https://cdn.test/kit/kick/b.wav').buffer, true);
+
+    // A bad source is reported and can be retried
+    globalThis.fetch = async () => ({ ok: false, status: 404 });
+    await assert.rejects(() => samples('github:nobody/none'), /HTTP 404/); passed++;
+    eq(t._sampleManifests.has('github:nobody/none|'), false);
+    delete t._sampleVoice;
+    t._session = null;
+}
+
 console.log(`all ${passed} checks passed`);

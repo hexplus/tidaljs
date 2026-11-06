@@ -20,15 +20,17 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 
 ## Features
 
-- **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, chords
-- **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`...
+- **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`; `speed`, `begin`/`end`, `chop`, `striate`, `loop` and `legato` work on the recordings
+- **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, ranges (`"0 .. 7"`), chords
+- **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `ply`, `iter`, `linger`, `rot`, `off`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`..., with patterned arguments such as `fast("<1 2>")`
+- **Composition**: `stack`, `cat`, `superimpose`, `jux`, `euclid`, `euclidFull`, `nTake`...
 - **Randomness and conditions**: `sometimes` and its relatives, `degradeBy`, `randcat`, `within`, `while`, `until`, `playFor`
 - **Audio effects**: filters with resonance, delay and reverb per orbit, distortion, bit crushing, vowel formants, envelopes
 - **Harmony**: notes, scales, chords, arpeggios, inversions
 - **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, with `range`, `segment`, `smooth`
 - **Output**: synthesised sounds, Web MIDI, OSC over WebSocket, audio recording, JSON and MIDI file export
 - **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete with parameter help, hover help that explains the code under the pointer, an insert palette for every function (Tab moves between parameters), live update while playing, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
-- **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes) and genre grooves (house, boom bap, bossa nova, jungle)
+- **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes), genre grooves (house, boom bap, bossa nova, jungle) and recorded samples from Dirt-Samples
 
 ```javascript
 // Pattern fundamentals
@@ -103,6 +105,35 @@ const result = tidal.eval('sound("bd sn")\n\nsound("hh*4").gain(0.5)');
 ```
 
 ## Usage Examples
+
+### Samples
+
+TidalJS synthesises its default sounds. Load recorded samples to use real ones: a loaded bank replaces the synth of the same name, and `n` (or `"bd:3"`) picks the file.
+
+```javascript
+// The Dirt-Samples library (the samples TidalCycles ships with), from GitHub
+samples("github:tidalcycles/dirt-samples")
+
+sound("bd*2 [~ bd] sn:3 hh*4").n("<0 1>")
+
+// A breakbeat in 32 slices: n picks the slice, speed -1 plays backwards
+sound("amencutup*16").n("0 .. 15").sometimesBy(0.2, x => x.speed(-1))
+
+// Your own files: a strudel.json manifest URL, or banks and a base URL
+samples({ kick: ["kick1.wav", "kick2.wav"] }, "https://example.com/samples/")
+```
+
+A manifest is a JSON object of bank names and file lists, with an optional `_base` URL (the format Strudel uses). `samples()` returns a promise; in the editor the code runs again once the samples have loaded. Files are loaded and decoded the first time they are needed.
+
+### Patterned arguments
+
+The numeric arguments of `fast`, `slow`, `density`, `hurry`, `ply`, `iter`, `linger`, `rot`, `late`, `early`, `off`, `every`, `degradeBy`, `chop`, `striate`, `segment` and `swing` can be patterns:
+
+```javascript
+sound("bd sn hh cp").fast("<1 2 [1 4]>")   // a different speed each cycle
+sound("bd*4").ply("1 2")                   // first half single, second half doubled
+sound("bd sn").every("<2 3>", x => x.rev())
+```
 
 ### Basic patterns
 
@@ -213,6 +244,11 @@ sound("saw*8").note("c2").lpf("300 600 1200 2400")
 | `density(n)` | Same as `fast()` | `.density(1.5)` |
 | `rev()` | Reverse each cycle | `.rev()` |
 | `late(n)` / `early(n)` | Shift in time by n cycles (Tidal's `~>` and `<~`) | `.late(0.25)` |
+| `ply(n)` | Repeat each event n times within its span | `.ply(2)` |
+| `iter(n)` / `iterBack(n)` | Start each cycle one nth further into the pattern | `.iter(4)` |
+| `linger(x)` | Repeat the first part of each cycle (negative: the end) | `.linger(0.25)` |
+| `rot(n)` | Shift values n steps along the events, keeping the rhythm | `.rot(1)` |
+| `off(t, f)` | Play f(pattern), t cycles later, on top | `.off(0.125, x => x.up(12))` |
 | `every(n, f)` | Apply f on cycles 0, n, 2n... | `.every(4, x => x.fast(2))` |
 | `whenmod(n, m, f)` | Apply f when cycle mod n >= m | `.whenmod(8, 6, x => x.rev())` |
 | `sometimes(f)` | Apply f to 50% of events | `.sometimes(x => x.rev())` |
@@ -254,6 +290,10 @@ sound("saw*8").note("c2").lpf("300 600 1200 2400")
 | `append(p)` | Play p in the next cycle | `sound("bd").append("sn")` |
 | `overlay(p)` | Play p at the same time | `sound("bd ~").overlay("~ sn")` |
 | `superimpose(f)` | Play the pattern and f(pattern) | `.superimpose(x => x.up(12))` |
+| `jux(f)` / `juxBy(x, f)` | The pattern on the left, f(pattern) on the right | `.jux(x => x.rev())` |
+| `euclid(k, n, r)` / `euclidInv(k, n, r)` | Play on (or off) k of n evenly spread steps | `.euclid(3, 8)` |
+| `euclidFull(k, n, other, r)` | This pattern on the hits, `other` on the rests (also a global function) | `.euclidFull(3, 8, sound("hh"))` |
+| `nTake(name, list)` | Each played event takes the next value of the list as `n` | `.nTake("a", [0, 2, 4])` |
 | `struct(s)` | Take the rhythm from s | `sound("bd sn").struct("x x ~ x")` |
 
 ### Rearranging
@@ -383,6 +423,7 @@ sound("bd!3 sn")          // Repeat a step ("bd !" also works)
 sound("bd@3 sn")          // Longer step ("bd _ _ sn" also works)
 sound("[bd | sn | cp]")   // Random choice per cycle
 sound("bd . hh hh")       // Group steps
+sound("arpy*8").note("0 .. 7") // Range: the steps 0 1 2 3 4 5 6 7 (also "7 .. 0", "0..7")
 sound("bd:3")             // Sound variation, same as .n(3)
 sound("arpy").note("c'maj e'min7'i") // Chords: 'i inverts, 'o opens, '5 sets the note count
 ```
@@ -421,7 +462,7 @@ npm run build      # type-check and build into dist/
 npm run lint       # SibuJS lint rules
 ```
 
-Pushing to `main` runs the tests, builds the editor and publishes `dist/` to GitHub Pages (`.github/workflows/pages.yml`).
+Every push and pull request runs the engine tests, the type-check and build, and the SibuJS lint on Node.js 22 and 24 (`.github/workflows/ci.yml`). Pushing to `main` also builds the editor and publishes `dist/` to GitHub Pages (`.github/workflows/pages.yml`).
 
 ### Project layout
 
