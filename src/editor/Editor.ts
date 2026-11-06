@@ -1,7 +1,7 @@
 /**
  * The code editor: a textarea under a syntax-highlighted copy of its text,
- * with problem markers, line numbers, autocomplete, parameter help, parameter
- * tab stops and hover help.
+ * with problem markers, line numbers, autocomplete, parameter tab stops and
+ * hover help.
  *
  * The text lives in the textarea, outside SibuJS, so it is an external()
  * source: the text layers track it and every edit invalidates it. Popups,
@@ -9,7 +9,7 @@
  */
 import { b, batch, code, div, each, effect, external, mark, nextTick, pre, signal, span, textarea } from "sibujs";
 import { DOCS, GLOBAL_DOCS, MINI_DOCS, SCALE_DOCS, SOUND_DOCS, type Doc } from "../data/docs.ts";
-import { GLOBAL_SIGNATURES, METHOD_SIGNATURES, paramsOf, signatureLabel, type Param } from "../data/signatures.ts";
+import { GLOBAL_SIGNATURES, METHOD_SIGNATURES, paramsOf, signatureLabel } from "../data/signatures.ts";
 import type { Snippet } from "../data/snippets.ts";
 import { TidalJS, type EvalResult } from "../engine.ts";
 import {
@@ -26,7 +26,7 @@ export interface EditorOptions {
 
 export interface Editor {
   view: HTMLElement;
-  /** Floating elements (suggestions, parameter help, hover help) to place at the page root. */
+  /** Floating elements (suggestions, hover help) to place at the page root. */
   popups: HTMLElement[];
   getValue(): string;
   setValue(text: string): void;
@@ -52,13 +52,6 @@ interface Completion {
   from: number;
 }
 
-interface SignatureHelp {
-  call: Call;
-  params: Param[];
-  active: number;
-  summary: string;
-}
-
 interface HoverHelp {
   key: string;
   start: number;
@@ -73,8 +66,6 @@ interface Position {
   top: number;
   left: number;
 }
-
-const NAV_KEYS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
 
 /** Extended help: what it does, an example, a tip and related names. */
 function DocView(doc: Doc, cls: string): HTMLElement {
@@ -99,8 +90,6 @@ export function createEditor(options: EditorOptions): Editor {
   const [ac, setAc] = signal<Completion | null>(null);
   const [acIndex, setAcIndex] = signal(0);
   const [acPos, setAcPos] = signal<Position>({ top: 0, left: 0 });
-  const [sig, setSig] = signal<SignatureHelp | null>(null);
-  const [sigPos, setSigPos] = signal<Position>({ top: 0, left: 0 });
   const [hover, setHover] = signal<HoverHelp | null>(null);
   const [hoverPos, setHoverPos] = signal<Position>({ top: 0, left: 0 });
 
@@ -134,13 +123,7 @@ export function createEditor(options: EditorOptions): Editor {
     on: {
       input: (e) => onInput(e as InputEvent),
       keydown: onKeydown,
-      keyup: (e) => {
-        if (NAV_KEYS.includes(e.key)) updateSignature();
-      },
-      click: () => updateSignature(),
-      focus: () => updateSignature(),
       blur: () => {
-        closeSignature();
         setTimeout(closeAutocomplete, 100);
       },
       mousedown: () => {
@@ -152,7 +135,6 @@ export function createEditor(options: EditorOptions): Editor {
       scroll: () => {
         syncScroll();
         closeAutocomplete();
-        closeSignature();
         hideHover();
       },
     },
@@ -206,41 +188,7 @@ export function createEditor(options: EditorOptions): Editor {
         },
         { key: (row) => row.key },
       )]),
-      () => {
-        const state = ac();
-        const item = state?.items[acIndex()];
-        return item?.doc ? DocView(item.doc, "ac-doc") : "";
-      },
       div("ac-footer", ["Enter or Tab to insert, Esc to close"]),
-    ],
-  );
-
-  const sigEl = div(
-    {
-      id: "sighelp",
-      class: "sighelp",
-      role: "tooltip",
-      "aria-live": "polite",
-      hidden: () => !sig(),
-      style: { top: () => sigPos().top + "px", left: () => sigPos().left + "px" },
-    },
-    [
-      () => {
-        const state = sig();
-        if (!state) return "";
-        const { call, params, active, summary } = state;
-        const line: (string | HTMLElement)[] = [span("sig-name", [(call.method ? "." : "") + call.name]), "("];
-        params.forEach((p, i) => {
-          if (i > 0) line.push(", ");
-          line.push(i === active ? span("sig-active", [p.name]) : p.name);
-        });
-        line.push(")");
-        return div([
-          div("sig-line", line),
-          active >= 0 ? div("sig-param", [b(params[active].name.replace("?", "")), ": " + params[active].desc]) : "",
-          div("sig-desc", [summary]),
-        ]);
-      },
     ],
   );
 
@@ -343,7 +291,6 @@ export function createEditor(options: EditorOptions): Editor {
       const at = text.indexOf(snippet.s);
       if (at >= 0) ta.setSelectionRange(start + at, start + at + snippet.s.length);
     }
-    updateSignature();
   }
 
   // ---------- Parameter tab stops ----------
@@ -420,7 +367,6 @@ export function createEditor(options: EditorOptions): Editor {
       end--;
     }
     ta.setSelectionRange(start, end);
-    updateSignature();
   }
 
   function startTabStops(open: number): boolean {
@@ -452,7 +398,6 @@ export function createEditor(options: EditorOptions): Editor {
       const after = (outer ? outer.close : info.close) + 1;
       ta.setSelectionRange(after, after);
       tabStop = null;
-      updateSignature();
     } else {
       selectStop(stops[Math.max(0, next)]);
     }
@@ -587,7 +532,6 @@ export function createEditor(options: EditorOptions): Editor {
     if (top + height > window.innerHeight - 8) top = Math.max(8, y - height - 2);
     const left = Math.max(8, Math.min(x - 8, window.innerWidth - width - 8));
     setAcPos({ top, left });
-    positionSignature();
   }
 
   function moveSelection(delta: number) {
@@ -625,7 +569,6 @@ export function createEditor(options: EditorOptions): Editor {
     ta.setSelectionRange(from + caret, from + caret);
     // Tab leaves the parentheses once the arguments are typed.
     if (item.kind === "fn") tabStop = { open: from + item.name.length };
-    updateSignature();
   }
 
   function closeAutocomplete() {
@@ -685,39 +628,6 @@ export function createEditor(options: EditorOptions): Editor {
   }
 
   const signatureOf = (call: Call) => (call.method ? METHOD_SIGNATURES[call.name] : GLOBAL_SIGNATURES[call.name]);
-
-  function updateSignature() {
-    const call = callAt(ta.selectionStart);
-    const signature = call ? signatureOf(call) : undefined;
-    if (!call || !signature) return closeSignature();
-    const params = paramsOf(signature);
-    // Extra arguments (e.g. stack(a, b, c)) stay on the last parameter.
-    const active = params.length ? Math.min(call.arg, params.length - 1) : -1;
-    setSig({ call, params, active, summary: signature[0] });
-    afterRender(positionSignature);
-  }
-
-  function positionSignature() {
-    const state = sig();
-    if (!state) return;
-    const caret = caretCoords(ta.selectionStart);
-    const anchor = caretCoords(state.call.open);
-    const height = sigEl.offsetHeight;
-    const width = sigEl.offsetWidth;
-    // Above the current line; below it if there is no room, unless the
-    // suggestion list already uses that space.
-    let top = caret.y - height - 4;
-    if (top < 8) {
-      if (ac()) return closeSignature();
-      top = caret.y + caret.lineHeight + 4;
-    }
-    const left = Math.max(8, Math.min(anchor.y === caret.y ? anchor.x - 8 : caret.x - 8, window.innerWidth - width - 8));
-    setSigPos({ top, left });
-  }
-
-  function closeSignature() {
-    if (sig() !== null) setSig(null);
-  }
 
   // ---------- Hover help ----------
   //
@@ -986,7 +896,6 @@ export function createEditor(options: EditorOptions): Editor {
       else if (ac() && type.startsWith("delete")) updateAutocomplete();
       else closeAutocomplete();
     }
-    updateSignature();
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -1024,13 +933,11 @@ export function createEditor(options: EditorOptions): Editor {
     if (e.key === "Escape") {
       // Let it through: the page stops the music.
       tabStop = null;
-      closeSignature();
     }
   }
 
   window.addEventListener("resize", () => {
     closeAutocomplete();
-    closeSignature();
     hideHover();
   });
 
@@ -1039,7 +946,7 @@ export function createEditor(options: EditorOptions): Editor {
 
   return {
     view,
-    popups: [acEl, sigEl, hoverEl],
+    popups: [acEl, hoverEl],
     getValue: () => ta.value,
     setValue(text) {
       ta.value = text;

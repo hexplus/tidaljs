@@ -1,7 +1,7 @@
 /**
  * Extended help for everything in TidalJS: what it does and how it relates
  * to TidalCycles, an example, a tip and related names. Shown by the hover
- * help, the autocomplete details and the insert palette.
+ * help and the insert palette.
  *
  * Time in Tidal is measured in cycles: a pattern describes one cycle (a bar,
  * usually) and repeats it. Every function here changes what happens inside

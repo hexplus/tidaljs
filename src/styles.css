@@ -522,7 +522,7 @@ kbd {
 .sig-param b { font-family: var(--mono); font-weight: 600; color: #e8b764; }
 .sig-desc { margin-top: 3px; color: var(--muted); font-size: 0.75rem; }
 
-/* Extended help in the hover help and under the suggestions */
+/* Extended help in the hover help */
 .hoverhelp { max-width: min(480px, calc(100vw - 16px)); }
 .doc { font-size: 0.78rem; line-height: 1.5; }
 .hover-doc { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
@@ -544,13 +544,6 @@ kbd {
 .doc-see { margin-top: 5px; color: var(--muted); font-size: 0.72rem; }
 .doc code { font-family: var(--mono); color: var(--accent); }
 .doc-example code { color: inherit; }
-.ac-doc {
-    margin: 4px 0 0;
-    padding: 6px 8px 2px;
-    border-top: 1px solid var(--border);
-    white-space: normal;
-}
-.ac-doc .doc-example { font-size: 0.72rem; }
 
 /* Insert palette */
 .palette { padding: 10px 12px; }

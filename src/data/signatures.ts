@@ -1,5 +1,5 @@
 /**
- * Parameters of every function, used by the parameter help, the hover help
+ * Parameters of every function, used by the hover help
  * and the autocomplete labels. A "?" marks an optional parameter.
  */
 
