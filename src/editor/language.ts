@@ -3,6 +3,7 @@
  * problem-marker rendering and the texts of the hover help. No DOM here.
  */
 import { GLOBAL_SIGNATURES, METHOD_SIGNATURES, type Signature } from "../data/signatures.ts";
+import { DOCS, GLOBAL_DOCS, SCALE_DOCS, SOUND_DOCS, type Doc } from "../data/docs.ts";
 import { SNIPPETS } from "../data/snippets.ts";
 import { TidalJS, patternMethods } from "../engine.ts";
 
@@ -14,6 +15,8 @@ export interface CompletionItem {
   kind: CompletionKind;
   sig?: Signature;
   desc: string;
+  /** Extended help, shown under the suggestions. */
+  doc?: Doc;
 }
 
 export interface Range {
@@ -71,7 +74,7 @@ export const GLOBALS: CompletionItem[] = ([
   ["const", "kw"], ["let", "kw"],
 ] as [string, CompletionKind][]).map(([name, kind]) => {
   const sig = GLOBAL_SIGNATURES[name];
-  return { name, kind, sig, desc: DESCRIPTIONS[name] || (sig ? sig[0] : "") };
+  return { name, kind, sig, desc: DESCRIPTIONS[name] || (sig ? sig[0] : ""), doc: GLOBAL_DOCS[name] ?? DOCS[name] };
 });
 
 const HIDDEN_METHODS = new Set(["constructor", "withValue"]);
@@ -83,13 +86,13 @@ export const METHODS: CompletionItem[] = patternMethods()
   .map(({ name, length }) => {
     const sig = METHOD_SIGNATURES[name];
     const takesArgs = sig ? sig.length > 1 : length > 0 || WITH_ARGUMENTS.has(name);
-    return { name, kind: takesArgs ? "fn" : "call", sig, desc: DESCRIPTIONS[name] || (sig ? sig[0] : "") };
+    return { name, kind: takesArgs ? "fn" : "call", sig, desc: DESCRIPTIONS[name] || (sig ? sig[0] : ""), doc: DOCS[name] };
   });
 
 export type StringContext = "sound" | "scale" | "chord" | "arp" | "vowel";
 
-const words = (names: string[], desc: string | ((name: string) => string)): CompletionItem[] =>
-  names.map((name) => ({ name, kind: "word", desc: typeof desc === "function" ? desc(name) : desc }));
+const words = (names: string[], desc: string | ((name: string) => string), doc?: (name: string) => Doc | undefined): CompletionItem[] =>
+  names.map((name) => ({ name, kind: "word", desc: typeof desc === "function" ? desc(name) : desc, doc: doc?.(name) }));
 
 /** Loaded sample banks (name -> number of files), for completion and hover help. */
 export const sampleBanks = new Map<string, number>();
@@ -106,12 +109,12 @@ export const STRING_SOURCES: Record<StringContext, () => CompletionItem[]> = {
     const synths = TidalJS.soundNames.filter((name) => !sampleBanks.has(name));
     return [
       ...words([...sampleBanks.keys()].sort(), (n) => describeBank(sampleBanks.get(n) ?? 0)),
-      ...words(synths, (n) => SOUND_DESCRIPTIONS[n] || "Sound"),
+      ...words(synths, (n) => SOUND_DESCRIPTIONS[n] || "Sound", (n) => SOUND_DOCS[n]),
     ];
   },
-  scale: () => words(TidalJS.scaleNames, "Scale"),
+  scale: () => words(TidalJS.scaleNames, "Scale", (n) => (SCALE_DOCS[n] ? { about: SCALE_DOCS[n] } : undefined)),
   chord: () => words(TidalJS.chordNames, "Chord"),
-  arp: () => words(TidalJS.arpModes, "Arpeggio mode"),
+  arp: () => words(TidalJS.arpModes, (n) => ARP_HELP[n] || "Arpeggio mode"),
   vowel: () => words(TidalJS.vowels, "Vowel"),
 };
 

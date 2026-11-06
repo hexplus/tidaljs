@@ -10,7 +10,7 @@
     "build": "tsc --noEmit && sibujs build",
     "preview": "sibujs preview",
     "lint": "sibujs lint",
-    "test": "node test/engine.test.mjs"
+    "test": "node test/engine.test.mjs && node test/docs.test.mjs"
   },
   "dependencies": {
     "sibujs": "^4.14.1"

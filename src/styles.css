@@ -468,8 +468,9 @@ kbd {
     z-index: 20;
     min-width: 240px;
     max-width: 460px;
-    max-height: 232px;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    max-height: 420px;
     padding: 4px;
     background: #1b2028;
     border: 1px solid #333a46;
@@ -478,6 +479,7 @@ kbd {
     font-size: 0.8rem;
 }
 .autocomplete[hidden] { display: none; }
+.ac-list { max-height: 216px; overflow-y: auto; flex: none; }
 .ac-item {
     display: flex;
     align-items: baseline;
@@ -519,6 +521,36 @@ kbd {
 .sig-param { margin-top: 4px; color: var(--text); }
 .sig-param b { font-family: var(--mono); font-weight: 600; color: #e8b764; }
 .sig-desc { margin-top: 3px; color: var(--muted); font-size: 0.75rem; }
+
+/* Extended help in the hover help and under the suggestions */
+.hoverhelp { max-width: min(480px, calc(100vw - 16px)); }
+.doc { font-size: 0.78rem; line-height: 1.5; }
+.hover-doc { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+.doc-about { color: var(--text); }
+.doc-example {
+    margin-top: 6px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: #b8e0cf;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.doc-tip { margin-top: 6px; color: var(--warn); font-size: 0.74rem; }
+.doc-tip::before { content: "Tip: "; font-weight: 700; }
+.doc-see { margin-top: 5px; color: var(--muted); font-size: 0.72rem; }
+.doc code { font-family: var(--mono); color: var(--accent); }
+.doc-example code { color: inherit; }
+.ac-doc {
+    margin: 4px 0 0;
+    padding: 6px 8px 2px;
+    border-top: 1px solid var(--border);
+    white-space: normal;
+}
+.ac-doc .doc-example { font-size: 0.72rem; }
 
 /* Insert palette */
 .palette { padding: 10px 12px; }

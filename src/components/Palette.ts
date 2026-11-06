@@ -1,4 +1,5 @@
 import { button, code, div, each, effect, label, option, select, signal, span } from "sibujs";
+import { docForLabel, docText } from "../data/docs.ts";
 import { SNIPPETS, type Snippet } from "../data/snippets.ts";
 import type { Session } from "../session.ts";
 
@@ -16,11 +17,12 @@ export function Palette(session: Session) {
         () => SNIPPETS[category()].map((snippet, i) => ({ snippet, key: category() + ":" + i })),
         (row) => {
           const { snippet } = row();
+          const doc = docForLabel(snippet.l);
           return button(
             {
               class: "chip",
               type: "button",
-              title: snippet.t,
+              title: doc ? snippet.t + "\n\n" + docText(doc) : snippet.t,
               "aria-label": snippet.l + ": " + snippet.t,
               on: {
                 // Keep the editor's cursor and focus when clicking with a mouse.

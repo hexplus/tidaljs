@@ -8,6 +8,7 @@
  * problem markers and the flash are signals.
  */
 import { b, batch, code, div, each, effect, external, mark, nextTick, pre, signal, span, textarea } from "sibujs";
+import { DOCS, GLOBAL_DOCS, MINI_DOCS, SCALE_DOCS, SOUND_DOCS, type Doc } from "../data/docs.ts";
 import { GLOBAL_SIGNATURES, METHOD_SIGNATURES, paramsOf, signatureLabel, type Param } from "../data/signatures.ts";
 import type { Snippet } from "../data/snippets.ts";
 import { TidalJS, type EvalResult } from "../engine.ts";
@@ -64,6 +65,8 @@ interface HoverHelp {
   title: string;
   lines: [string, string][];
   summary: string;
+  /** Extended help. */
+  doc?: Doc;
 }
 
 interface Position {
@@ -72,6 +75,18 @@ interface Position {
 }
 
 const NAV_KEYS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
+
+/** Extended help: what it does, an example, a tip and related names. */
+function DocView(doc: Doc, cls: string): HTMLElement {
+  return div({ class: "doc " + cls }, [
+    div("doc-about", [doc.about]),
+    doc.example ? pre({ class: "doc-example" }, [code(doc.example)]) : "",
+    doc.tip ? div("doc-tip", [doc.tip]) : "",
+    doc.see && doc.see.length
+      ? div("doc-see", ["See also ", ...doc.see.flatMap((name, i) => (i ? [", ", code(name)] : [code(name)]))])
+      : "",
+  ]);
+}
 
 export function createEditor(options: EditorOptions): Editor {
   const onChange = options.onChange ?? (() => {});
@@ -162,7 +177,7 @@ export function createEditor(options: EditorOptions): Editor {
       style: { top: () => acPos().top + "px", left: () => acPos().left + "px" },
     },
     [
-      each(
+      div({ class: "ac-list" }, [each(
         () => {
           const state = ac();
           if (!state) return [];
@@ -190,7 +205,12 @@ export function createEditor(options: EditorOptions): Editor {
           );
         },
         { key: (row) => row.key },
-      ),
+      )]),
+      () => {
+        const state = ac();
+        const item = state?.items[acIndex()];
+        return item?.doc ? DocView(item.doc, "ac-doc") : "";
+      },
       div("ac-footer", ["Enter or Tab to insert, Esc to close"]),
     ],
   );
@@ -239,7 +259,7 @@ export function createEditor(options: EditorOptions): Editor {
         return div([
           div("sig-line", [span("sig-name", [state.title])]),
           ...state.lines.map(([term, text]) => div("sig-param", [b(term.replace("?", "")), ": " + text])),
-          state.summary ? div("sig-desc", [state.summary]) : "",
+          state.doc ? DocView(state.doc, "hover-doc") : state.summary ? div("sig-desc", [state.summary]) : "",
         ]);
       },
     ],
@@ -784,53 +804,87 @@ export function createEditor(options: EditorOptions): Editor {
       && !(ch === ":" && context === "scale") && !(ch === "'" && context === "chord");
     if (isSymbol) {
       const [title, desc] = MINI_HELP[ch];
-      return { key: "sym:" + offset, start: offset, title, lines: [], summary: desc };
+      return { key: "sym:" + offset, start: offset, title, lines: [], summary: desc, doc: MINI_DOCS[title] };
     }
 
     const allowed = context === "scale" ? /[\w#.\-:]/ : context === "chord" ? /[\w#.\-']/ : /[\w#.-]/;
     const { start, word } = wordAround(line, col, allowed);
     if (!word) return null;
     const at = lineStart + start;
-    const help = (lines: [string, string][], summary: string): HoverHelp => ({
-      key: "word:" + at + ":" + word, start: at, title: word, lines, summary,
+    const help = (lines: [string, string][], summary: string, doc?: Doc): HoverHelp => ({
+      key: "word:" + at + ":" + word, start: at, title: word, lines, summary, doc,
     });
+
+    // A range: "0 .. 7".
+    if (word === "..") return help([], "Range", MINI_DOCS[".."]);
 
     // A number right after a modifier: "*2", "?0.3", "@3".
     const before = line[start - 1];
     if (/^-?\d+(\.\d+)?$/.test(word) && before && "*/!@?%:".includes(before) && MINI_HELP[before]) {
-      return { ...help([], MINI_HELP[before][1].replace(/\bn\b/, word)), title: before + word };
+      const [title] = MINI_HELP[before];
+      return { ...help([], MINI_HELP[before][1].replace(/\bn\b/, word), MINI_DOCS[title]), title: before + word };
     }
 
     switch (context) {
       case "sound": {
         const files = sampleBanks.get(word);
-        if (files !== undefined) return help([], describeBank(files));
-        return help([], TidalJS.soundNames.includes(word) ? SOUND_DESCRIPTIONS[word] || "Sound" : "Unknown sound (or a sample bank not loaded yet)");
+        if (files !== undefined) {
+          return help([], describeBank(files), {
+            about: "A bank of " + files + " recorded sample" + (files === 1 ? "" : "s") + ' loaded with samples(). n picks the file, counting from 0: "' + word + ':1" or .n(1). Numbers past the end wrap around.',
+            example: 'sound("' + word + '*4").n("0 .. 3")',
+            tip: SOUND_DOCS[word] ? "It replaces the built-in synth of the same name." : undefined,
+            see: ["n", "speed", "begin", "chop"],
+          });
+        }
+        if (TidalJS.soundNames.includes(word)) return help([], SOUND_DESCRIPTIONS[word] || "Sound", SOUND_DOCS[word]);
+        return help([], "Unknown sound (or a sample bank not loaded yet)", {
+          about: "There is no synth with this name, and no loaded sample bank has it. Built-in sounds: " + TidalJS.soundNames.join(", ") + ". Load more with samples(), e.g. the Dirt-Samples library.",
+          example: 'samples("github:tidalcycles/dirt-samples")',
+        });
       }
       case "chord": {
         if (word.includes("'")) {
           const notes = TidalJS.parseChord(word);
           if (!notes) return help([], "Unknown chord");
-          return help(
-            [["notes", notes.map((n) => midiName(60 + n)).join(" ")]],
-            "Chord: root'name'modifiers (i inverts, o opens, a number sets the note count)",
-          );
+          return help([["notes", notes.map((n) => midiName(60 + n)).join(" ")]], "", {
+            about: "A chord: root'name, then optional modifiers. 'i inverts it (raises the lowest note an octave; 'ii twice), 'o opens the voicing (spreads it over two octaves) and a number sets how many notes to play, continuing the chord upwards.",
+            example: "sound(\"saw\").note(\"<c'maj e'min7'i a3'min'5>\").legato(1)",
+            tip: "Common names: maj, min, dom7, maj7, min7, dim, aug, sus2, sus4, add9. chordList() lists them all.",
+            see: ["chord", "arp", "inversion"],
+          });
         }
         const isNumber = /^-?\d+(\.\d+)?$/.test(word);
         const midi = isNumber ? 60 + parseFloat(word) : noteToMidi(word);
         if (midi === undefined) return help([], "Unknown note");
         const detail = (isNumber ? midiName(midi) + ", " : "") + "MIDI " + +midi.toFixed(2) + ", " + midiFreq(midi);
-        return help([["note", detail]], isNumber ? "Semitones from middle C" : "Note");
+        return help([["note", detail]], "", {
+          about: isNumber
+            ? "A number in a note pattern is the number of semitones from middle C (c4): 0 is c4, 12 is c5, -12 is c3, 7 is the g above middle C."
+            : "A note name: a letter from a to g, # or s for sharp, b or f for flat, and an octave number (4 when left out). c4 is middle C, a4 is 440 Hz.",
+          see: ["note", "up", "scale"],
+        });
       }
       case "scale": {
         const [root, name] = word.includes(":") ? word.split(":") : ["c", word];
         const known = TidalJS.scaleNames.includes(String(name).toLowerCase());
-        return help([], known ? "Scale " + name + " starting on " + root : "Unknown scale");
+        if (!known) return help([], "Unknown scale", { about: "Known scales: " + TidalJS.scaleNames.join(", ") + "." });
+        return help([], "", {
+          about: (SCALE_DOCS[String(name).toLowerCase()] ?? "Scale " + name + ".") + " Here it starts on " + root.toUpperCase()
+            + (word.includes(":") ? "." : '; write root:name to start on another note, e.g. "e:' + name + '".'),
+          example: 'sound("arpy*8").note(scale("' + root + ":" + name + '", "0 .. 7"))',
+          see: ["scale", "scaleList"],
+        });
       }
       case "arp":
-        return help([], ARP_HELP[word] ? "Arpeggio: " + ARP_HELP[word] : "Unknown arpeggio mode");
+        if (!ARP_HELP[word]) return help([], "Unknown arpeggio mode", { about: "Modes: " + TidalJS.arpModes.join(", ") + "." });
+        return help([], "", {
+          about: "Arpeggio mode: " + ARP_HELP[word].toLowerCase() + ". The notes of each chord play one after another within the chord's step.",
+          example: "sound(\"arpy\").note(\"<c'maj'5 a3'min7'5>\").arp(\"" + word + "\")",
+          see: ["arp", "chord"],
+        });
       case "vowel":
-        return help([], TidalJS.vowels.includes(word) ? "Formant filter for the vowel " + word : "Unknown vowel");
+        if (!TidalJS.vowels.includes(word)) return help([], "Unknown vowel", { about: "Vowels: a, e, i, o and u." });
+        return help([], "", { ...DOCS.vowel, about: 'The vowel "' + word + '". ' + DOCS.vowel.about });
       default: {
         const param = parameterAt(offset);
         return param ? help([[param.name, param.desc + " (" + param.of + ")"]], "") : null;
@@ -860,21 +914,24 @@ export function createEditor(options: EditorOptions): Editor {
       if (signature) {
         return {
           key, start: ident.start, title: "." + signatureLabel(word, signature),
-          lines: paramsOf(signature).map((p): [string, string] => [p.name, p.desc]), summary: signature[0],
+          lines: paramsOf(signature).map((p): [string, string] => [p.name, p.desc]), summary: signature[0], doc: DOCS[word],
         };
       }
-      return DESCRIPTIONS[word] ? { key, start: ident.start, title: "." + word + "()", lines: [], summary: DESCRIPTIONS[word] } : null;
+      return DESCRIPTIONS[word] || DOCS[word]
+        ? { key, start: ident.start, title: "." + word + "()", lines: [], summary: DESCRIPTIONS[word] ?? "", doc: DOCS[word] }
+        : null;
     }
-    if (KEYWORD_HELP[word]) return { key, start: ident.start, title: word, lines: [], summary: KEYWORD_HELP[word] };
+    if (KEYWORD_HELP[word]) return { key, start: ident.start, title: word, lines: [], summary: KEYWORD_HELP[word], doc: DOCS[word] };
     const signature = GLOBAL_SIGNATURES[word];
     if (signature) {
       return {
         key, start: ident.start, title: signatureLabel(word, signature),
         lines: paramsOf(signature).map((p): [string, string] => [p.name, p.desc]), summary: signature[0],
+        doc: GLOBAL_DOCS[word] ?? DOCS[word],
       };
     }
     const global = GLOBALS.find((g) => g.name === word);
-    return global && global.desc ? { key, start: ident.start, title: word, lines: [], summary: global.desc } : null;
+    return global && global.desc ? { key, start: ident.start, title: word, lines: [], summary: global.desc, doc: global.doc } : null;
   }
 
   function showHoverAt(clientX: number, clientY: number) {

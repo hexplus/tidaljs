@@ -29,7 +29,7 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 - **Harmony**: notes, scales, chords, arpeggios, inversions
 - **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, with `range`, `segment`, `smooth`
 - **Output**: synthesised sounds, Web MIDI, OSC over WebSocket, audio recording, JSON and MIDI file export
-- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete with parameter help, hover help that explains the code under the pointer, an insert palette for every function (Tab moves between parameters), live update while playing, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
+- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete with parameter help, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the same help appears under the suggestions and on the palette buttons), an insert palette for every function (Tab moves between parameters), live update while playing, errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
 - **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes), genre grooves (house, boom bap, bossa nova, jungle) and recorded samples from Dirt-Samples
 
 ```javascript
@@ -457,12 +457,12 @@ git clone https://github.com/hexplus/tidaljs.git
 cd tidaljs
 npm install
 npm run dev        # editor with hot reload
-npm test           # engine tests (tidal.js)
+npm test           # engine tests (tidal.js) and help checks (every example runs)
 npm run build      # type-check and build into dist/
 npm run lint       # SibuJS lint rules
 ```
 
-Every push and pull request runs the engine tests, the type-check and build, and the SibuJS lint on Node.js 22 and 24 (`.github/workflows/ci.yml`). Pushing to `main` also builds the editor and publishes `dist/` to GitHub Pages (`.github/workflows/pages.yml`).
+Every push and pull request runs the engine tests, the help checks, the type-check and build, and the SibuJS lint on Node.js 22 and 24 (`.github/workflows/ci.yml`). Pushing to `main` also builds the editor and publishes `dist/` to GitHub Pages (`.github/workflows/pages.yml`).
 
 ### Project layout
 
@@ -475,8 +475,9 @@ Every push and pull request runs the engine tests, the type-check and build, and
 | `src/engine.ts` | Loads `tidal.js` and types the parts of it the app uses. |
 | `src/components/` | Top bar, insert palette, cycle view, status line, sidebar (examples and reference). |
 | `src/editor/` | The code editor: highlighting, problem markers, autocomplete, parameter help, tab stops, hover help. |
-| `src/data/` | Examples, insert-palette snippets, function signatures and the Reference content. |
+| `src/data/` | Examples, insert-palette snippets, function signatures, the extended help (`docs.ts`) and the Reference content. |
 | `test/engine.test.mjs` | Engine tests, run in Node with a fake audio context. |
+| `test/docs.test.mjs` | Checks the help in `src/data/docs.ts`: everything has a doc, and every example runs. |
 
 ### Areas for contribution
 
