@@ -1,0 +1,336 @@
+/**
+ * Engine tests for tidal.js: patterns, mini-notation, transformations,
+ * controls, harmony, signals, code evaluation, error locations and the
+ * scheduler. Runs in Node with a fake audio context: npm test
+ */
+import assert from 'node:assert';
+import fs from 'node:fs';
+import vm from 'node:vm';
+
+// tidal.js is a classic script that defines globalThis.TidalJS.
+vm.runInThisContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), { filename: 'tidal.js' });
+const { TidalJS } = globalThis;
+
+// Failing evaluations log on purpose; keep the output to the result.
+console.error = () => {};
+console.warn = () => {};
+
+// Minimal fake audio context so eval()/_start() work without audio.
+const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1, setValueAtTime() {}, linearRampToValueAtTime() {}, cancelScheduledValues() {} } });
+const t = new TidalJS();
+t.audioContext = { currentTime: 0, state: 'running', createGain: node, resume() {} };
+t.masterGain = node();
+t.setupGlobalFunctions();
+t._startTimer = () => {};
+t._stopTimer = () => {};
+
+const fmt = (evs) => evs
+    .slice()
+    .sort((a, b) => (Math.abs(a.begin - b.begin) > 1e-9 ? a.begin - b.begin : String(a.value.s).localeCompare(String(b.value.s))))
+    .map((e) => `${e.value.s ?? ''}${e.value.note !== undefined ? '/' + e.value.note : ''}@${+e.begin.toFixed(4)}`)
+    .join(' ');
+const q = (p, b = 0, e = 1) => fmt(p.query(b, e));
+let passed = 0;
+const eq = (a, b, msg) => { assert.strictEqual(a, b, msg); passed++; };
+
+// Mini-notation
+eq(q(sound('bd sn')), 'bd@0 sn@0.5');
+eq(q(sound('bd ~ sn ~')), 'bd@0 sn@0.5');
+eq(q(sound('bd*2 sn')), 'bd@0 bd@0.25 sn@0.5');
+eq(q(sound(['bd', 'sn', '~', 'hh'])), 'bd@0 sn@0.25 hh@0.75');
+
+// fast repeats the pattern (bug before: compressed into first half)
+eq(q(sound('bd sn').fast(2)), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+eq(q(sound('bd sn').density(2)), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+eq(q(sound('bd sn').slow(2), 0, 2), 'bd@0 sn@1');
+eq(q(sound('bd sn hh').rev()), 'hh@0 sn@0.3333 bd@0.6667');
+eq(q(sound('bd sn').rev(), 3, 4), 'sn@3 bd@3.5');
+eq(q(sound('bd').slow(2).rev(), 0, 4), 'bd@1 bd@3');
+
+// every: cycle 0, 4, 8...
+const ev = sound('bd sn').every(4, (x) => x.fast(2));
+eq(q(ev, 0, 1), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+eq(q(ev, 1, 2), 'bd@1 sn@1.5');
+eq(q(ev, 4, 5), 'bd@4 sn@4.25 bd@4.5 sn@4.75');
+// two every() calls no longer overwrite each other
+const ev2 = sound('bd sn').every(2, (x) => x.gain(0.5)).every(3, (x) => x.rev());
+eq(q(ev2, 0, 1), 'sn@0 bd@0.5'); // cycle 0: both apply
+eq(ev2.query(0, 1)[0].value.gain, 0.5);
+eq(q(ev2, 3, 4), 'sn@3 bd@3.5');
+eq(ev2.query(3, 4)[0].value.gain, undefined);
+
+// whenmod: Tidal semantics (cycle mod n >= offset)
+const wm = sound('bd sn').whenmod(4, 2, (x) => x.rev());
+eq(q(wm, 1, 2), 'bd@1 sn@1.5');
+eq(q(wm, 2, 3), 'sn@2 bd@2.5');
+eq(q(wm, 3, 4), 'sn@3 bd@3.5');
+
+// sometimes: roughly half, deterministic per event
+const st = sound('hh*16').sometimes((x) => x.gain(0.1));
+let low = 0;
+for (let c = 0; c < 50; c++) low += st.query(c, c + 1).filter((e) => e.value.gain === 0.1).length;
+assert(low > 300 && low < 500, `sometimes ratio ${low}/800`); passed++;
+eq(JSON.stringify(st.query(7, 8)), JSON.stringify(st.query(7, 8)));
+const often = sound('hh*16').often((x) => x.gain(0.1));
+let lo2 = 0;
+for (let c = 0; c < 50; c++) lo2 += often.query(c, c + 1).filter((e) => e.value.gain === 0.1).length;
+assert(lo2 > 520 && lo2 < 680, `often ratio ${lo2}/800`); passed++;
+eq(sound('bd sn').almostNever((x) => x.fast(2)).query(0, 1).length >= 1, true);
+eq(sound('bd sn').almostAlways((x) => x).query(0, 1).length, 2);
+eq(sound('bd sn').rarely((x) => x).query(0, 1).length, 2);
+
+// Composition
+eq(q(stack([sound('bd ~'), sound('~ sn')])), 'bd@0 sn@0.5');
+eq(q(stack(sound('bd ~'), sound('~ sn'))), 'bd@0 sn@0.5'); // varargs (bug before)
+eq(q(layer([sound('bd'), sound('hh hh')])), 'bd@0 hh@0 hh@0.5');
+const c2 = cat([sound('bd sn'), sound('hh cp')]);
+eq(q(c2, 0, 1), 'bd@0 sn@0.5');
+eq(q(c2, 1, 2), 'hh@1 cp@1.5');
+eq(q(c2, 2, 3), 'bd@2 sn@2.5');
+eq(q(fastcat([sound('bd'), sound('sn')])), 'bd@0 sn@0.5');
+const ap = sound('bd').append('sn').append('cp');
+eq(q(ap, 0, 3), 'bd@0 sn@1 cp@2');
+eq(q(ap, 3, 4), 'bd@3');
+eq(q(sound('bd ~ bd ~').overlay('~ sn ~ sn')), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+const sup = sound('bd sn').superimpose((x) => x.fast(2).up(12));
+eq(sup.query(0, 1).length, 6);
+eq(sup.query(0, 1).filter((e) => e.value.up === 12).length, 4);
+eq(q(struct('x ~ x x', sound('bd sn'))), 'bd@0 sn@0.5 sn@0.75');
+eq(q(sound('bd sn').struct('t t t t')), 'bd@0 bd@0.25 sn@0.5 sn@0.75');
+eq(q(struct('1 0 1', 'hh')), 'hh@0 hh@0.6667');
+
+// Musical controls
+eq(q(sound('arpy').note('c e g c5')), 'arpy/60@0 arpy/64@0.25 arpy/67@0.5 arpy/72@0.75');
+eq(q(sound('arpy*4').note('c e')), 'arpy/60@0 arpy/60@0.25 arpy/64@0.5 arpy/64@0.75');
+eq(sound('arpy').note('eb3 f#').query(0, 1).map((e) => e.value.note).join(), '51,66');
+eq(sound('arpy').note('0 7').query(0, 1).map((e) => e.value.note).join(), '60,67');
+eq(sound('arpy').note('c e g').up('0 12 7').query(0, 1).map((e) => e.value.up).join(), '0,12,7');
+eq(sound('sine').freq('440 554 659').query(0, 1).map((e) => e.value.freq).join(), '440,554,659');
+eq(sound('arpy').midinote('60 64 67').query(0, 1).map((e) => e.value.midinote).join(), '60,64,67');
+eq(sound('bd sn').n('0 1').query(0, 1).map((e) => e.value.n).join(), '0,1');
+eq(sound('bd').up(0.5).query(0, 1)[0].value.up, 0.5);
+eq(sound('hh*4').gain('1 0.5').query(0, 1).map((e) => e.value.gain).join(), '1,1,0.5,0.5');
+
+// Effects
+const fx = sound('bd').gain(0).pan(-0.5).lpf(800).hpf(100).bpf(1000).delay(0.25).reverb(0.3).distortion(5).crush(4).vowel('a');
+eq(JSON.stringify(fx.query(0, 1)[0].value), JSON.stringify({ s: 'bd', gain: 0, pan: -0.5, lpf: 800, hpf: 100, bpf: 1000, delay: 0.25, reverb: 0.3, distortion: 5, crush: 4, vowel: 'a' }));
+// Immutability: methods never change the original
+const base = sound('bd sn');
+base.fast(2); base.gain(0.2);
+eq(q(base), 'bd@0 sn@0.5');
+eq(base.query(0, 1)[0].value.gain, undefined);
+
+// Errors are thrown with readable messages
+assert.throws(() => sound('bd').fast('x'), /fast\(\) expects a number/); passed++;
+assert.throws(() => sound('bd').every(4, 5), /every\(\) expects a function/); passed++;
+assert.throws(() => sound('bd').superimpose(() => 3), /must return a pattern/); passed++;
+
+// Statement splitting
+const split = TidalJS.splitStatements;
+eq(JSON.stringify(split('sound("bd")\n  .fast(2)\n\nsound("hh") // c\nsound("a//b"); sound("x")')),
+    JSON.stringify(['sound("bd")\n  .fast(2)', 'sound("hh")', 'sound("a//b")', 'sound("x")']));
+eq(split('stack([\n  sound("bd"),\n  sound("sn")\n])\n.fast(2)').length, 1);
+eq(split('const p = sound("bd")\np.fast(2)').length, 2);
+eq(split('sound("bd").every(4, x =>\n  x.fast(2))').length, 1);
+
+// eval
+let r = t.eval('// comment\nconst p = sound("bd sn")\np.fast(2)\nsound("hh*4").gain(0.5)\n\nsetCPS(1)');
+eq(r.success, true);
+eq(r.activePatterns, 2);
+eq(t.cps, 1);
+eq(t.isPlaying, true);
+r = t.eval('sound("bd").play()');
+eq(r.activePatterns, 1);
+r = t.eval('sound("bd").fast("x")');
+eq(r.success, false);
+eq(/fast\(\) expects a number/.test(r.error), true);
+eq(t.channels.size, 1); // previous pattern keeps playing on error
+r = t.eval('sound("bd"');
+eq(r.success, false);
+eq(t.channels.size, 1);
+r = t.eval('sound("bd zz").note("c q")');
+eq(r.success, true);
+eq(r.warnings.includes('Unknown sound "zz"'), true);
+eq(r.warnings.includes('Unknown note "q"'), true);
+r = t.eval('// nothing');
+eq(r.activePatterns, 0);
+eq(t.isPlaying, false);
+
+// Scheduler: events are scheduled once, at the right time, across ticks
+t.eval('sound("bd sn hh cp")');
+const played = [];
+t.playEvent = (v, time) => played.push([v.s, +time.toFixed(4)]);
+t.cps = 1;
+t._anchorTime = 0; t._anchorCycle = 0; t._nextCycle = 0;
+for (let ms = 0; ms <= 2000; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+eq(played.filter(([s]) => s === 'bd').length, 3); // cycles 0, 1, 2 (lookahead)
+eq(played.length, new Set(played.map(String)).size);
+eq(JSON.stringify(played.slice(0, 4)), JSON.stringify([['bd', 0], ['sn', 0.25], ['hh', 0.5], ['cp', 0.75]]));
+// Tempo change keeps continuity
+played.length = 0;
+t.setCPS(2);
+for (let ms = 2025; ms <= 3000; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+const times = played.map(([, time]) => time);
+for (let i = 1; i < times.length; i++) assert(times[i] > times[i - 1], 'monotonic');
+eq(Math.abs((times[times.length - 1] - times[times.length - 2]) - 0.125) < 1e-6, true);
+
+// Old setCPS(NaN) bug
+t.setCPS(NaN);
+eq(t.cps, 2);
+
+// ---------------- Phase 2+ ----------------
+const vals = (p, b = 0, e = 1) => p.query(b, e).slice().sort((x, y) => x.begin - y.begin || String(x.value.s ?? x.value).localeCompare(String(y.value.s ?? y.value)));
+// Mini-notation
+eq(q(sound('bd [sn sn]')), 'bd@0 sn@0.5 sn@0.75');
+eq(q(sound('[bd sn]*2')), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+const alt = sound('bd <sn cp hh>');
+eq(q(alt, 0, 3), 'bd@0 sn@0.5 bd@1 cp@1.5 bd@2 hh@2.5');
+eq(q(sound('<bd sn>/2'), 0, 4), 'bd@0 sn@2');
+eq(q(sound('[bd, hh hh]')), 'bd@0 hh@0 hh@0.5');
+eq(q(sound('bd@3 sn')), 'bd@0 sn@0.75');
+eq(q(sound('bd _ _ sn')), 'bd@0 sn@0.75');
+eq(q(sound('bd!3 sn')), 'bd@0 bd@0.25 bd@0.5 sn@0.75');
+eq(q(sound('bd ! sn')), 'bd@0 bd@0.3333 sn@0.6667');
+eq(q(sound('bd(3,8)')), 'bd@0 bd@0.375 bd@0.75');
+eq(q(sound('bd(3,8,2)')), 'bd@0.125 bd@0.5 bd@0.75');
+eq(TidalJS.bjorklund(5, 8).map((x) => (x ? 'x' : '.')).join(''), 'x.xx.xx.');
+eq(TidalJS.bjorklund(4, 12).map((x) => (x ? 'x' : '.')).join(''), 'x..x..x..x..');
+eq(q(sound('{bd sn, hh hh hh}'), 0, 1), 'bd@0 hh@0 hh@0.5 sn@0.5');
+eq(q(sound('{bd sn, hh hh hh}'), 1, 2), 'bd@1 hh@1 hh@1.5 sn@1.5');
+eq(q(sound('{bd sn hh}%4')), 'bd@0 sn@0.25 hh@0.5 bd@0.75');
+eq(q(sound('bd . hh hh')), 'bd@0 hh@0.5 hh@0.75');
+eq(JSON.stringify(sound('bd:3 sn').query(0, 1)[0].value), JSON.stringify({ s: 'bd', n: 3 }));
+let kept = 0;
+const deg = sound('hh*16?');
+for (let c = 0; c < 20; c++) kept += deg.query(c, c + 1).length;
+assert(kept > 120 && kept < 200, 'hh? keeps about half: ' + kept); passed++;
+let either = 0;
+const rnd = sound('[bd | sn]');
+for (let c = 0; c < 40; c++) either += rnd.query(c, c + 1)[0].value.s === 'bd' ? 1 : 0;
+assert(either > 8 && either < 32, '| picks randomly ' + either); passed++;
+assert.throws(() => sound('[bd sn'), /expected "\]"/); passed++;
+assert.throws(() => sound('bd )'), /unexpected/); passed++;
+
+// Chords and scales
+eq(JSON.stringify(TidalJS.parseChord("c'maj")), '[0,4,7]');
+eq(JSON.stringify(TidalJS.parseChord("e'min7")), '[4,7,11,14]');
+eq(JSON.stringify(TidalJS.parseChord("c'maj'i")), '[4,7,12]');
+eq(JSON.stringify(TidalJS.parseChord("c'maj'5")), '[0,4,7,12,16]');
+eq(JSON.stringify(TidalJS.parseChord("c'maj7'o")), '[-12,-5,4,11]');
+const chordNotes = (p) => p.query(0, 1).map((e) => e.value.note).sort((a, b) => a - b).join();
+eq(chordNotes(sound('arpy').note("c'maj")), '60,64,67');
+eq(chordNotes(sound('arpy*2').note("c'maj")), '60,60,64,64,67,67');
+eq(chordNotes(sound('arpy').note(chord("a3'min"))), '57,60,64');
+eq(q(sound('arpy').note("c'maj").arp('up')), 'arpy/60@0 arpy/64@0.3333 arpy/67@0.6667');
+eq(q(sound('arpy').note("c'maj").arp('down')), 'arpy/67@0 arpy/64@0.3333 arpy/60@0.6667');
+eq(sound('arpy').note("c'maj e'min").arp('<up updown>').query(1, 2).map((e) => e.value.note).join(), '60,64,67,64,64,67,71,67');
+eq(chordNotes(sound('arpy').note("c'maj").inversion(1)), '64,67,72');
+eq(scale('major', '0 2 4 7').query(0, 1).map((e) => e.value).join(), '0,4,7,12');
+eq(scale('e:minor', '0 1 2').query(0, 1).map((e) => e.value).join(), '4,6,7');
+eq(scale('<major minor>', '2').query(1, 2).map((e) => e.value).join(), '3');
+eq(sound('arpy*4').note(scale('major', '0 1 2 -1')).query(0, 1).map((e) => e.value.note).join(), '60,62,64,59');
+
+// Transformations
+eq(q(sound('bd sn hh cp').chunk(4, (x) => x.gain(0.5)), 1, 2), 'bd@1 sn@1.25 hh@1.5 cp@1.75');
+eq(sound('bd sn hh cp').chunk(4, (x) => x.gain(0.5)).query(1, 2).filter((e) => e.value.gain === 0.5).map((e) => e.value.s).join(), 'sn');
+eq(q(sound('bd sn').palindrome(), 0, 2), 'bd@0 sn@0.5 sn@1 bd@1.5');
+eq(q(sound('bd sn').compress(0.5, 1)), 'bd@0.5 sn@0.75');
+eq(q(sound('bd sn').compress(0.5, 1).stretch()), 'bd@0 sn@0.5');
+eq(q(sound('hh*4').swingBy(0.25, 2)), 'hh@0 hh@0.375 hh@0.5 hh@0.875');
+eq(q(sound('hh*4').swing(2)).split(' ').length, 4);
+const sc = sound('a b c d').scramble(4);
+eq(sc.query(0, 1).length, 4);
+const sh = sound('a b c d').shuffle(4);
+for (let c = 0; c < 5; c++) eq(sh.query(c, c + 1).map((e) => e.value.s).sort().join(''), 'abcd');
+eq(q(sound('a b c d').bite(4, '0 0 3 2')), 'a@0 a@0.25 d@0.5 c@0.75');
+eq(q(sound('a b c d').fitment(2, '1 0')), 'c@0 d@0.25 a@0.5 b@0.75');
+const chopped = sound('bd sn').chop(2).query(0, 1);
+eq(chopped.map((e) => `${e.value.s}${e.value.begin}-${e.value.end}@${e.begin}`).join(' '), 'bd0-0.5@0 bd0.5-1@0.25 sn0-0.5@0.5 sn0.5-1@0.75');
+eq(sound('bd').striate(2).query(0, 1).map((e) => `${e.value.begin}@${e.begin}`).join(' '), '0@0 0.5@0.5');
+let dkept = 0;
+const dg = sound('hh*16').degradeBy(0.75);
+for (let c = 0; c < 20; c++) dkept += dg.query(c, c + 1).length;
+assert(dkept > 40 && dkept < 120, 'degradeBy 0.75 keeps ~25%: ' + dkept); passed++;
+eq(sound('hh*16').degrade().query(0, 8).length + sound('hh*16').unDegradeBy(0.5).query(0, 8).length > 0, true);
+eq(q(sound('bd sn').hurry(2)), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
+eq(sound('bd sn').hurry(2).query(0, 1)[0].value.speed, 2);
+eq(q(sound('bd sn').sparsity(2), 0, 2), 'bd@0 sn@1');
+eq(sound('bd*4').within(0, 0.5, (x) => x.gain(0.2)).query(0, 1).map((e) => e.value.gain).sort().join(), '0.2,0.2,,');
+eq(sound('bd*4').within([0.5, 1], (x) => x.gain(0.2)).query(0, 1).filter((e) => e.value.gain === 0.2).length, 2);
+eq(sound('bd*4').while('1 0', (x) => x.gain(0.2)).query(0, 1).filter((e) => e.value.gain === 0.2).length, 2);
+eq(sound('bd').until(2, (x) => x.gain(0.1)).query(1, 2)[0].value.gain, 0.1);
+eq(sound('bd').until(2, (x) => x.gain(0.1)).query(2, 3)[0].value.gain, undefined);
+eq(q(sound('bd').playFor(1, 3), 0, 4), 'bd@1 bd@2');
+eq(q(sound('bd').stopFor(1, 3), 0, 4), 'bd@0 bd@3');
+eq(q(randcat([sound('a'), sound('b')]), 0, 1).length > 0, true);
+
+// Signals
+eq(sound('hh*4').gain(saw).query(0, 1).map((e) => e.value.gain).join(), '0,0.25,0.5,0.75');
+eq(sound('hh*4').lpf(saw.range(100, 500)).query(0, 1).map((e) => e.value.lpf).join(), '100,200,300,400');
+eq(sound('hh*2').lpf(saw.slow(2)).query(1, 2).map((e) => e.value.lpf).join(), '0.5,0.75');
+eq(sound('hh*4').pan(square).query(0, 1).map((e) => e.value.pan).join(), '0,0,1,1');
+eq(sound('hh*4').gain(tri).query(0, 1).map((e) => e.value.gain).join(), '0,0.5,1,0.5');
+eq(Math.round(sound('hh').gain(sine).query(0, 1)[0].value.gain * 100), 50);
+eq(sound('hh*8').n(irand(8)).query(0, 1).every((e) => Number.isInteger(e.value.n) && e.value.n >= 0 && e.value.n < 8), true);
+eq(sound('hh*8').gain(rand).query(0, 1).every((e) => e.value.gain >= 0 && e.value.gain < 1), true);
+eq(sound('hh*8').gain(perlin).query(0, 1).every((e) => e.value.gain >= 0 && e.value.gain <= 1), true);
+eq(saw.segment(4).query(0, 1).map((e) => e.value).join(), '0,0.25,0.5,0.75');
+eq(saw.range(0, 7).quantise().segment(4).query(0, 1).map((e) => e.value).join(), '0,2,4,5');
+eq(sound('hh*4').gain(fit(0, [0, 1], '0 1').smooth()).query(0, 1).map((e) => e.value.gain).join(), '0,0.5,1,0.5');
+setBus('cut', 900);
+eq(sound('hh').lpf(bus('cut')).query(0, 1)[0].value.lpf, 900);
+setBus('cut', 300);
+eq(sound('hh').lpf(bus('cut')).query(0, 1)[0].value.lpf, 300);
+
+// fit
+eq(sound(fit(1, ['bd', 'sn', 'hh'], '0 1')).query(0, 2).map((e) => e.value.s).join(), 'bd,sn,sn,hh');
+
+// Controls and aliases
+const ctl = sound('saw').cutoff(500).resonance(5).room(0.3).size(0.8).orbit(1).speed(2).begin(0.25).end(0.5).loop(2).legato(0.5).sustain(1).attack(0.1).release(0.2).nudge(0.01).vel(0.5).ccn(74).ccv(64).pgm(3).midichan(2);
+eq(JSON.stringify(ctl.query(0, 1)[0].value), JSON.stringify({ s: 'saw', lpf: 500, resonance: 5, reverb: 0.3, size: 0.8, orbit: 1, speed: 2, begin: 0.25, end: 0.5, loop: 2, legato: 0.5, sustain: 1, attack: 0.1, release: 0.2, nudge: 0.01, vel: 0.5, ccn: 74, ccv: 64, pgm: 3, midichan: 2 }));
+eq(sound('bd').midi('synth').query(0, 1)[0].value.midi, 'synth');
+eq(sound('bd').osc().query(0, 1)[0].value.osc, '/dirt/play');
+
+// MIDI file export
+const smf = t.exportPattern(sound('bd sn').note('c e'), 1, 'midi');
+eq(String.fromCharCode(...smf.slice(0, 4)), 'MThd');
+eq(String.fromCharCode(...smf.slice(14, 18)), 'MTrk');
+const json = t.exportPattern('bd sn', 2, 'json');
+eq(json.events.length, 4);
+
+// eval with new syntax
+r = t.eval('sound("bd*2 [~ sn] <hh cp>").every(3, x => x.chunk(4, y => y.hurry(2)))\n\nsound("arpy").note("<c\'maj e\'min>").arp("updown").lpf(sine.range(400, 4000).slow(8))');
+eq(r.success, true);
+eq(r.activePatterns, 2);
+
+// late / early and per-cycle structure with rest bars
+eq(q(sound('bd sn').late(0.25)), 'bd@0.25 sn@0.75');
+eq(q(sound('bd sn').early(0.25)), 'sn@0.25 bd@0.75');
+eq(q(sound('<bd sn hh>').late(1), 0, 3), 'hh@0 bd@1 sn@2');
+const rests = sound('arpy').note('<~ [a2 e3 a3 ~@3]>');
+eq(rests.query(0, 1).length, 0);
+eq(rests.query(1, 2).map((e) => e.value.note).join(), '45,52,57');
+eq(sound('hh*4').gain('1 ~').query(0, 1).length, 2);
+
+// Error locations and pending warnings
+t.eval('sound("bd")');
+let er = t.eval('sound("bd")\n\nsound("hh").fast("x")');
+eq(er.success, false);
+eq(er.location.line, 3);
+eq(JSON.stringify([er.location.start, er.location.end]), JSON.stringify([13, 34]));
+er = t.eval('sound("bd")\nsound("hh"');
+eq(er.success, false);
+eq(er.location.line, 2);
+er = t.eval('stack([\n  sound("bd"),\n  sound("[hh sn")\n])');
+eq(er.success, false);
+eq(er.location.line, 3);
+eq('stack([\n  sound("bd"),\n  sound("[hh sn")\n])'.slice(er.location.start, er.location.end), '[hh sn');
+er = t.eval('sound("bd zz")', { keepOnWarnings: true });
+eq(er.pending, true);
+eq(t.channels.size, 1); // still the earlier pattern
+er = t.eval('const p = sound("bd")\np.play()\nsound("hh")');
+eq(er.success, true);
+eq(er.activePatterns, 2);
+eq(JSON.stringify(TidalJS.splitStatementRanges('  a()\n// c\nb()\n  .c()')), JSON.stringify([{ text: 'a()', start: 2, end: 5 }, { text: 'b()\n  .c()', start: 11, end: 21 }]));
+
+console.log(`all ${passed} checks passed`);

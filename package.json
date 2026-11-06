@@ -1,0 +1,26 @@
+{
+  "name": "tidaljs",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Live coding music in the browser: a JavaScript take on TidalCycles, with a SibuJS editor.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "sibujs dev",
+    "build": "tsc --noEmit && sibujs build",
+    "preview": "sibujs preview",
+    "lint": "sibujs lint",
+    "test": "node test/engine.test.mjs"
+  },
+  "dependencies": {
+    "sibujs": "^4.14.1"
+  },
+  "devDependencies": {
+    "sibujs-cli": "^1.7.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
