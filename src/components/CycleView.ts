@@ -29,6 +29,7 @@ export function CycleView(session: Session) {
   type Drawn = { begin: number; end: number; lane: string };
   let cachedCycle: number | null = null;
   let cachedVersion = -1;
+  let cachedStreams: unknown = null;
   let cachedEvents: Drawn[] = [];
   let cachedLanes: string[] = [];
   /** Each sound keeps its colour while the music plays, whatever lanes come and go. */
@@ -36,14 +37,17 @@ export function CycleView(session: Session) {
   let font = "";
   let frame = 0;
 
-  const colourOf = (lane: string) => {
-    let c = colours.get(lane);
-    if (!c) {
-      c = LANE_COLORS[colours.size % LANE_COLORS.length];
-      colours.set(lane, c);
+  const colourOf = (lane: string) => colours.get(lane) ?? LANE_COLORS[0];
+
+  /** Gives each new sound a colour no other visible lane has (while there are enough colours). */
+  function assignColours(visible: Set<string>) {
+    for (const lane of visible) {
+      if (colours.has(lane)) continue;
+      const taken = new Set([...visible].map((l) => colours.get(l)).filter(Boolean));
+      const free = LANE_COLORS.find((c) => !taken.has(c));
+      colours.set(lane, free ?? LANE_COLORS[colours.size % LANE_COLORS.length]);
     }
-    return c;
-  };
+  }
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -61,13 +65,14 @@ export function CycleView(session: Session) {
   function query(engine: NonNullable<ReturnType<typeof session.engine>>, cycle: number) {
     const drawn: Drawn[] = [];
     const nearby = new Set<string>();
-    for (const ev of engine.queryActive(cycle - LOOKBACK, cycle + 2)) {
+    // Playback starts at cycle 0, so nothing before it ever played.
+    for (const ev of engine.queryActive(Math.max(0, cycle - LOOKBACK), cycle + 2)) {
       const lane = laneOf(ev);
       if (!lane) continue;
       if (ev.end > cycle - 1 && ev.begin < cycle + 2) nearby.add(lane);
       if (ev.end > cycle && ev.begin < cycle + 1) drawn.push({ begin: ev.begin, end: ev.end, lane });
     }
-    for (const lane of nearby) colourOf(lane);
+    assignColours(nearby);
     cachedEvents = drawn;
     // Lanes in the order the sounds first played, so they do not swap places.
     cachedLanes = [...colours.keys()].filter((lane) => nearby.has(lane));
@@ -75,6 +80,9 @@ export function CycleView(session: Session) {
 
   function draw() {
     frame = requestAnimationFrame(draw);
+    // The engine can stop on its own (stopAll() in code, a pattern error): keep the
+    // play state in sync every frame, even when there is nothing to draw on.
+    session.syncPlaying();
     if (!ctx2d) return;
     const dpr = window.devicePixelRatio || 1;
     const fullW = view.clientWidth;
@@ -89,8 +97,6 @@ export function CycleView(session: Session) {
     ctx2d.fillStyle = "#1f242d";
     for (let i = 0; i <= 4; i++) ctx2d.fillRect(Math.min(w - 1, Math.round((w * i) / 4)), 0, 1, h);
 
-    // The engine can stop on its own (stopAll() in code, a pattern error).
-    session.syncPlaying();
     const engine = session.engine();
     if (!engine || !engine.isPlaying) {
       cachedCycle = null;
@@ -102,10 +108,13 @@ export function CycleView(session: Session) {
     const pos = engine.getAudibleCyclePosition();
     const cycle = Math.floor(pos);
     const version = session.patternsChanged();
-    // Query again on a new cycle, and as soon as the code, a mute or a solo changes what plays.
-    if (cycle !== cachedCycle || version !== cachedVersion) {
+    const streams = session.streams();
+    // Query again on a new cycle, and as soon as what plays changes: the code, a mute or a
+    // solo, or a stream the engine dropped after an error.
+    if (cycle !== cachedCycle || version !== cachedVersion || streams !== cachedStreams) {
       cachedCycle = cycle;
       cachedVersion = version;
+      cachedStreams = streams;
       query(engine, cycle);
     }
     setCycleLabel("cycle " + cycle);
