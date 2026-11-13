@@ -5,6 +5,18 @@ import type { Session } from "../session.ts";
 const LABEL_W = 48;
 const LANE_COLORS = ["#4fd1a5", "#7aa2f7", "#f7768e", "#e8b764", "#c792ea", "#7dcfff", "#f29e74", "#b5e48c"];
 
+/** The panel's background, which dimmed bars are mixed towards. */
+const BACKGROUND = [0x14, 0x17, 0x1d];
+
+/** A colour mixed with the background: 1 is the colour itself, 0 the background. */
+function dim(hex: string, amount: number): string {
+  const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return "rgb(" + rgb.map((c, i) => Math.round(BACKGROUND[i] + (c - BACKGROUND[i]) * amount)).join(",") + ")";
+}
+
+/** Brightness of a bar: played or still to come in this cycle, from a heard or a muted stream. */
+const LEVELS = { upcoming: 0.35, played: 1, mutedUpcoming: 0.12, mutedPlayed: 0.25 };
+
 /**
  * Cycles looked back for events that started earlier and still sound (slow
  * patterns, long notes). Longer ones are carried over from cycle to cycle.
@@ -136,16 +148,24 @@ export function CycleView(session: Session) {
 
     const laneH = h / (cachedLanes.length || 1);
     const progress = pos - cycle;
-    for (const ev of cachedEvents) {
+    // Bars still to come in this cycle are dim and light up once the playhead reaches them.
+    // They are painted in solid, pre-mixed colours (not see-through), so notes that overlap in
+    // a lane (chords, several streams on one sound) do not stack into patches of uneven shade;
+    // the dimmest are painted first, so a played note always shows over an upcoming one.
+    const bars = cachedEvents.map((ev) => {
+      const played = ev.begin - cycle <= progress;
+      const level = ev.silent ? (played ? LEVELS.mutedPlayed : LEVELS.mutedUpcoming) : played ? LEVELS.played : LEVELS.upcoming;
+      return { ev, level };
+    });
+    bars.sort((a, b) => a.level - b.level);
+    for (const { ev, level } of bars) {
       const lane = cachedLanes.indexOf(ev.lane);
       if (lane < 0) continue;
       const from = Math.max(0, ev.begin - cycle);
       const to = Math.min(1, ev.end - cycle);
-      ctx2d.globalAlpha = (ev.begin - cycle <= progress ? 1 : 0.35) * (ev.silent ? 0.25 : 1);
-      ctx2d.fillStyle = colourOf(ev.lane);
+      ctx2d.fillStyle = dim(colourOf(ev.lane), level);
       ctx2d.fillRect(from * w + 1, lane * laneH + 2, Math.max(3, (to - from) * w - 2), Math.max(2, laneH - 4));
     }
-    ctx2d.globalAlpha = 1;
 
     // Lane labels in the left column
     if (laneH >= 9) {
