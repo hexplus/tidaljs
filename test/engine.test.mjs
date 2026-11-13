@@ -178,6 +178,12 @@ eq(Math.abs((times[times.length - 1] - times[times.length - 2]) - 0.125) < 1e-6,
 t.setCPS(NaN);
 eq(t.cps, 2);
 
+// queryActive leaves muted streams out, or marks them silent when asked
+t.eval('d1(sound("bd*2")); d2(sound("hh*4")); mute(2)');
+eq(t.queryActive(0, 1).map((e) => e.value.s).join(' '), 'bd bd');
+eq(t.queryActive(0, 1, true).filter((e) => e.silent).map((e) => e.value.s).join(' '), 'hh hh hh hh');
+t.muted.clear();
+
 // The heard position trails the clock by the output latency (the cycle view's playhead)
 eq(t.getAudibleCyclePosition(), t.getCyclePosition());
 t.audioContext.outputLatency = 0.04; t.audioContext.baseLatency = 0.01;

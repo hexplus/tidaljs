@@ -4011,13 +4011,18 @@
             }
         }
 
-        /** Events of all playing patterns in [begin, end), for visualisation. */
-        queryActive(begin, end) {
+        /**
+         * Events of all playing patterns in [begin, end), for visualisation.
+         * Muted (or not soloed) streams are left out, unless `includeSilent`:
+         * then their events come too, marked `silent: true`.
+         */
+        queryActive(begin, end, includeSilent = false) {
             const out = [];
             for (const [id, pattern] of this.channels) {
-                if (!this.isAudible(id)) continue;
+                const audible = this.isAudible(id);
+                if (!audible && !includeSilent) continue;
                 try {
-                    for (const ev of pattern.query(begin, end)) out.push(ev);
+                    for (const ev of pattern.query(begin, end)) out.push(audible ? ev : { ...ev, silent: true });
                 } catch (e) { /* reported by the scheduler */ }
             }
             return out;

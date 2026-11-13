@@ -14,6 +14,8 @@ export interface PatternEvent {
   begin: number;
   end: number;
   value: EventValue | null;
+  /** From a muted (or not soloed) stream: only with queryActive(..., true). */
+  silent?: boolean;
 }
 
 export interface EvalResult {
@@ -54,7 +56,8 @@ export interface Tidal {
   getCyclePosition(): number;
   /** The position of what is heard now: the clock minus the audio output latency. */
   getAudibleCyclePosition(): number;
-  queryActive(begin: number, end: number): PatternEvent[];
+  /** Events of the playing patterns in [begin, end); muted streams too (marked silent) when includeSilent. */
+  queryActive(begin: number, end: number, includeSilent?: boolean): PatternEvent[];
   startRecording(): boolean;
   stopRecording(filename?: string): Promise<Blob | null>;
   /** Loaded sample banks: name -> file URLs. */
