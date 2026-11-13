@@ -1,5 +1,7 @@
 import { a, button, div, effect, h1, header, input, kbd, label, output, p, path, span, svg } from "sibujs";
 import { clampTempo, parseTempo, type Session } from "../session.ts";
+import type { Library } from "./Library.ts";
+import { SketchBar } from "./SketchBar.ts";
 
 const REPOSITORY = "https://github.com/hexplus/tidaljs";
 
@@ -120,8 +122,8 @@ function TempoStepper(session: Session) {
   ]);
 }
 
-/** Brand, transport buttons, live update toggle and tempo. */
-export function TopBar(session: Session) {
+/** Brand, the open sketch, transport buttons, live update toggle and tempo. */
+export function TopBar(session: Session, library: Library, showLibrary: () => void) {
   const { recording, liveEnabled, setLiveEnabled, playing } = session;
 
   return header("topbar", [
@@ -134,6 +136,7 @@ export function TopBar(session: Session) {
         GitHubLink(),
       ]),
     ]),
+    SketchBar(library, showLibrary),
     div("transport", [
       button(
         {

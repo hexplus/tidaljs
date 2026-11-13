@@ -181,6 +181,103 @@ kbd {
     text-align: center;
 }
 
+/* The open sketch: name, Save and the Sketches menu */
+.sketchbar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sketch-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 12rem;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--text);
+}
+.sketch-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sketch-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.sketch-name.dirty .sketch-dot { background: var(--warn); }
+.sketch-name.dirty .sketch-name-text { font-style: italic; }
+#saveBtn { min-width: 5rem; justify-content: center; }
+#saveBtn.save-needed { border-color: var(--accent); color: var(--accent); }
+#saveBtn.save-needed:hover { background: #1c2a25; }
+.caret { font-size: 0.7rem; opacity: 0.7; }
+.menu-wrap { position: relative; }
+.sketch-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 50;
+    width: 250px;
+    max-width: calc(100vw - 24px);
+    padding: 6px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+}
+.sketch-menu[hidden] { display: none; }
+.menu-item {
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    font-size: 0.85rem;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.menu-item:hover:not(:disabled), .menu-item:focus-visible { background: #262c38; outline: none; }
+.menu-item:disabled { color: var(--muted); opacity: 0.6; cursor: default; }
+.menu-item.recent { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+.menu-item.recent:hover { color: var(--text); }
+.menu-item.recent.open { color: var(--accent); }
+.menu-label { padding: 4px 10px 2px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.menu-empty { padding: 4px 10px 6px; font-size: 0.8rem; color: var(--muted); }
+.menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+
+.btn.danger { background: var(--error); border-color: var(--error); color: #2b0609; }
+.btn.danger:hover { background: #ff99a2; border-color: #ff99a2; }
+
+/* Confirmation dialog (in place of the browser's confirm()) */
+dialog.confirm {
+    margin: auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    max-width: calc(100vw - 32px);
+}
+dialog.confirm::backdrop {
+    background: rgba(5, 7, 10, 0.6);
+    backdrop-filter: blur(2px);
+}
+dialog.confirm[open] { animation: confirm-in 0.14s ease-out; }
+dialog.confirm[open]::backdrop { animation: backdrop-in 0.14s ease-out; }
+.confirm-box {
+    width: 420px;
+    max-width: 100%;
+    padding: 20px 22px 18px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+.confirm-title { font-size: 1.02rem; font-weight: 700; margin-bottom: 8px; overflow-wrap: anywhere; }
+.confirm-message { color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+
+@keyframes confirm-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+}
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
 /* Layout */
 .layout {
     flex: 1;
@@ -714,6 +811,14 @@ kbd {
 .chip:hover, .chip:focus-visible { border-color: var(--accent); background: #1c2229; }
 .chip:active { background: #24302b; }
 
+/* Make room for the sketch bar before the top bar wraps. */
+@media (max-width: 1640px) {
+    .brand .brand-tagline { display: none; }
+}
+@media (max-width: 1360px) {
+    .sketch-name { max-width: 8rem; }
+}
+
 @media (max-width: 900px) {
     .palette-hint { display: none; }
     .palette-buttons { max-height: 140px; }
@@ -723,11 +828,13 @@ kbd {
     .sidebar { max-height: 75vh; }
     .topbar { padding: 10px 12px; gap: 10px; }
     .transport { margin-left: 0; width: 100%; }
+    .sketchbar { width: 100%; }
+    .sketch-name { flex: 1; max-width: none; }
     .brand .brand-tagline { display: none; }
     kbd { display: none; }
     #playBtn { min-width: 7rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .play-pulse, .badge-dot { animation: none !important; }
+    .play-pulse, .badge-dot, dialog.confirm[open], dialog.confirm[open]::backdrop { animation: none !important; }
 }

@@ -3,6 +3,7 @@ import {
   download, exportLibrary, exportSketch, fileNameFor, makeSketch, mergeImport, openStore, parseImport, titleFromCode,
   type Sketch, type StorageKind, type Store,
 } from "../library.ts";
+import { confirmDialog } from "./ConfirmDialog.ts";
 import type { Session } from "../session.ts";
 
 export type Library = ReturnType<typeof createLibrary>;
@@ -66,8 +67,17 @@ export function createLibrary(session: Session) {
     }
   }
 
-  function open(sketch: Sketch) {
-    if (dirty() && current() && current()!.id !== sketch.id && !confirm("Open \"" + sketch.title + "\"? Changes not saved in the editor will be lost.")) return;
+  /** Asks before replacing editor code that is not saved. */
+  const discardChanges = (title: string, confirmText: string) =>
+    confirmDialog({
+      title,
+      message: "The changes in the editor are not saved and will be lost. Save first if you want to keep them.",
+      confirmText,
+    });
+
+  async function open(sketch: Sketch) {
+    if (dirty() && current() && current()!.id !== sketch.id
+      && !(await discardChanges('Open "' + sketch.title + '"?', "Discard and open"))) return;
     setCurrent(sketch);
     setTitle(sketch.title);
     session.openCode(sketch.code, sketch.title, sketch.cps);
@@ -91,7 +101,13 @@ export function createLibrary(session: Session) {
   }
 
   async function remove(sketch: Sketch) {
-    if (!confirm('Delete "' + sketch.title + '"? Export it first if you want to keep a copy.')) return;
+    const sure = await confirmDialog({
+      title: 'Delete "' + sketch.title + '"?',
+      message: "It is removed from this browser for good. Export it first if you want to keep a copy.",
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (!sure) return;
     try {
       const store = await storePromise;
       await store.remove(sketch.id);
@@ -104,8 +120,8 @@ export function createLibrary(session: Session) {
   }
 
   /** Starts an empty sketch. */
-  function newSketch() {
-    if (dirty() && editor.getValue().trim() && !confirm("Start a new sketch? Changes not saved in the editor will be lost.")) return;
+  async function newSketch() {
+    if (dirty() && editor.getValue().trim() && !(await discardChanges("Start a new sketch?", "Discard and start"))) return;
     setCurrent(null);
     setTitle("");
     session.openCode("", "a new sketch");
@@ -135,7 +151,7 @@ export function createLibrary(session: Session) {
       if (file.size > 5_000_000) throw new Error("the file is larger than 5 MB");
       const result = parseImport(await file.text(), file.name);
       if (result.kind === "code") {
-        if (dirty() && editor.getValue().trim() && !confirm('Open "' + file.name + '"? Changes not saved in the editor will be lost.')) return;
+        if (dirty() && editor.getValue().trim() && !(await discardChanges('Open "' + file.name + '"?', "Discard and open"))) return;
         setCurrent(null);
         setTitle(result.title);
         session.openCode(result.code, result.title);
@@ -223,11 +239,11 @@ export function LibraryPanel(library: Library) {
         span("sketch-date", [() => (isOpen() && dirty() ? "edited" : dateText(sketch().updated))]),
       ]),
       button(
-        { class: "sketch-code", type: "button", title: "Open in the editor", on: { click: () => library.open(sketch()) } },
+        { class: "sketch-code", type: "button", title: "Open in the editor", on: { click: () => void library.open(sketch()) } },
         [() => sketch().code.split("\n").filter((l) => l.trim() && !l.trim().startsWith("//")).slice(0, 3).join("\n") || "(empty)"],
       ),
       div("sketch-actions", [
-        button({ class: "link-btn", type: "button", on: { click: () => library.open(sketch()) } }, "Open"),
+        button({ class: "link-btn", type: "button", on: { click: () => void library.open(sketch()) } }, "Open"),
         button({
           class: "link-btn",
           type: "button",
@@ -273,7 +289,7 @@ export function LibraryPanel(library: Library) {
             title: "Save as a new sketch",
             on: { click: () => void library.save(true) },
           }, "Save as new")),
-          button({ class: "btn small", type: "button", title: "Start an empty sketch", on: { click: library.newSketch } }, "New"),
+          button({ class: "btn small", type: "button", title: "Start an empty sketch", on: { click: () => void library.newSketch() } }, "New"),
         ]),
       ]),
       p({ class: "hint" }, [() => (library.kind() ? STORAGE_TEXT[library.kind()!] : "Opening the library...")]),

@@ -4,7 +4,7 @@ import { REFERENCE } from "../data/reference.ts";
 import type { Session } from "../session.ts";
 import { LibraryPanel, type Library } from "./Library.ts";
 
-type Tab = "examples" | "library" | "reference";
+export type Tab = "examples" | "library" | "reference";
 
 /** Text with `backticks` turned into <code> elements. */
 function rich(text: string): (string | HTMLElement)[] {
@@ -97,9 +97,8 @@ function Reference() {
   return children;
 }
 
-/** Examples and Reference, as tabs. */
-export function Sidebar(session: Session, library: Library) {
-  const [tab, setTab] = signal<Tab>("examples");
+/** Examples, Library and Reference, as tabs. The app owns the open tab so the top bar can show the library. */
+export function Sidebar(session: Session, library: Library, tab: () => Tab, setTab: (tab: Tab) => void) {
 
   const tabButton = (id: string, name: Tab, panel: string, text: string) =>
     button(
