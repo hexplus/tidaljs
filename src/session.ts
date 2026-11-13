@@ -98,6 +98,9 @@ export function createSession() {
 
   /** Counts edits, so views can react to the text changing (the text itself lives in the editor). */
   const [edits, setEdits] = signal(0);
+  /** Counts changes to what plays (code run, mute, solo), so the cycle view queries the patterns again. */
+  const [patternsChanged, setPatternsChanged] = signal(0);
+  const markPatternsChanged = () => setPatternsChanged((n) => n + 1);
   /** Counts examples loaded from the list, so the library knows the editor holds a new, unsaved sketch. */
   const [examplesLoaded, setExamplesLoaded] = signal(0);
 
@@ -151,6 +154,7 @@ export function createSession() {
     // Live updates keep streams whose events have not changed (and their transitions) as they are.
     const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live });
     lastRunCode = text;
+    markPatternsChanged();
     syncPlaying();
     setTempo(+engine.cps.toFixed(3));
     editor.showProblems(result, text);
@@ -196,12 +200,14 @@ export function createSession() {
   function toggleMute(name: string) {
     if (!tidal) return;
     tidal.mute(name, !tidal.muted.has(name));
+    markPatternsChanged();
     syncPlaying();
   }
 
   function toggleSolo(name: string) {
     if (!tidal) return;
     tidal.solo(name, !tidal.soloed.has(name));
+    markPatternsChanged();
     syncPlaying();
   }
 
@@ -309,6 +315,7 @@ export function createSession() {
     notify,
     edits,
     examplesLoaded,
+    patternsChanged,
     /** The engine once audio has started, for the cycle view. */
     engine: () => tidal,
   };

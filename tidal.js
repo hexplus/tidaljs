@@ -3794,6 +3794,17 @@
             return Math.max(0, this.cycleAt(this.audioContext.currentTime));
         }
 
+        /**
+         * Position in cycles of what is heard now: the clock minus the audio
+         * output latency, so a playhead lines up with the sound (0 when stopped).
+         */
+        getAudibleCyclePosition() {
+            const ctx = this.audioContext;
+            if (!this.isPlaying || !ctx) return 0;
+            const latency = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+            return Math.max(0, this.cycleAt(ctx.currentTime - latency));
+        }
+
         getCurrentCycle() {
             return Math.floor(this.getCyclePosition());
         }

@@ -52,6 +52,8 @@ export interface Tidal {
   setCPS(cps: number): number;
   stopAll(): void;
   getCyclePosition(): number;
+  /** The position of what is heard now: the clock minus the audio output latency. */
+  getAudibleCyclePosition(): number;
   queryActive(begin: number, end: number): PatternEvent[];
   startRecording(): boolean;
   stopRecording(filename?: string): Promise<Blob | null>;

@@ -5,24 +5,72 @@ import type { Session } from "../session.ts";
 const LABEL_W = 48;
 const LANE_COLORS = ["#4fd1a5", "#7aa2f7", "#f7768e", "#e8b764", "#c792ea", "#7dcfff", "#f29e74", "#b5e48c"];
 
-/** Events of the current cycle, one lane per sound, with a playhead. */
+/** Cycles looked back for events that started earlier and still sound (slow patterns, long notes). */
+const LOOKBACK = 4;
+
+/** The lane an event is drawn in: its sound, or midi / osc. Null for events nobody hears (no sound). */
+function laneOf(ev: PatternEvent): string | null {
+  const v = ev.value;
+  if (!v || typeof v !== "object") return null;
+  if (v.midi !== undefined) return "midi";
+  if (v.osc !== undefined) return "osc";
+  return typeof v.s === "string" && v.s && v.s !== "~" ? v.s : null;
+}
+
+/**
+ * Events of the current cycle, one lane per sound, with a playhead that
+ * follows what is heard (the audio output latency taken off).
+ */
 export function CycleView(session: Session) {
   const [cycleLabel, setCycleLabel] = signal("stopped");
   const view = canvas({ id: "cycleCanvas", "aria-label": "Events of the current cycle", role: "img" });
   const ctx2d = view.getContext("2d");
 
+  type Drawn = { begin: number; end: number; lane: string };
   let cachedCycle: number | null = null;
-  let cachedEvents: PatternEvent[] = [];
+  let cachedVersion = -1;
+  let cachedEvents: Drawn[] = [];
   let cachedLanes: string[] = [];
+  /** Each sound keeps its colour while the music plays, whatever lanes come and go. */
+  const colours = new Map<string, string>();
+  let font = "";
   let frame = 0;
 
-  const soundOf = (ev: PatternEvent) => String((ev.value && ev.value.s) || "?");
+  const colourOf = (lane: string) => {
+    let c = colours.get(lane);
+    if (!c) {
+      c = LANE_COLORS[colours.size % LANE_COLORS.length];
+      colours.set(lane, c);
+    }
+    return c;
+  };
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
     const rect = view.getBoundingClientRect();
     view.width = Math.max(1, Math.round(rect.width * dpr));
     view.height = Math.max(1, Math.round(rect.height * dpr));
+    font = getComputedStyle(document.documentElement).getPropertyValue("--mono");
+  }
+
+  /**
+   * Reads the events to draw for a cycle: those that start in it and those
+   * that started earlier and still sound. The lanes also count the cycles
+   * before and after, so a sound that alternates ("<bd sn>") keeps its lane.
+   */
+  function query(engine: NonNullable<ReturnType<typeof session.engine>>, cycle: number) {
+    const drawn: Drawn[] = [];
+    const nearby = new Set<string>();
+    for (const ev of engine.queryActive(cycle - LOOKBACK, cycle + 2)) {
+      const lane = laneOf(ev);
+      if (!lane) continue;
+      if (ev.end > cycle - 1 && ev.begin < cycle + 2) nearby.add(lane);
+      if (ev.end > cycle && ev.begin < cycle + 1) drawn.push({ begin: ev.begin, end: ev.end, lane });
+    }
+    for (const lane of nearby) colourOf(lane);
+    cachedEvents = drawn;
+    // Lanes in the order the sounds first played, so they do not swap places.
+    cachedLanes = [...colours.keys()].filter((lane) => nearby.has(lane));
   }
 
   function draw() {
@@ -31,6 +79,7 @@ export function CycleView(session: Session) {
     const dpr = window.devicePixelRatio || 1;
     const fullW = view.clientWidth;
     const h = view.clientHeight;
+    if (!fullW || !h) return;
     ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx2d.clearRect(0, 0, fullW, h);
     ctx2d.translate(LABEL_W, 0);
@@ -45,42 +94,41 @@ export function CycleView(session: Session) {
     const engine = session.engine();
     if (!engine || !engine.isPlaying) {
       cachedCycle = null;
+      colours.clear();
       setCycleLabel("stopped");
       return;
     }
 
-    const pos = engine.getCyclePosition();
+    const pos = engine.getAudibleCyclePosition();
     const cycle = Math.floor(pos);
-    if (cycle !== cachedCycle) {
+    const version = session.patternsChanged();
+    // Query again on a new cycle, and as soon as the code, a mute or a solo changes what plays.
+    if (cycle !== cachedCycle || version !== cachedVersion) {
       cachedCycle = cycle;
-      cachedEvents = engine.queryActive(cycle, cycle + 1);
-      cachedLanes = [];
-      for (const ev of cachedEvents) {
-        const name = soundOf(ev);
-        if (!cachedLanes.includes(name)) cachedLanes.push(name);
-      }
+      cachedVersion = version;
+      query(engine, cycle);
     }
     setCycleLabel("cycle " + cycle);
 
     const laneH = h / (cachedLanes.length || 1);
     const progress = pos - cycle;
     for (const ev of cachedEvents) {
-      const lane = Math.max(0, cachedLanes.indexOf(soundOf(ev)));
-      const x = (ev.begin - cycle) * w;
-      const width = Math.max(3, Math.min(1, ev.end - ev.begin) * w - 2);
+      const lane = cachedLanes.indexOf(ev.lane);
+      if (lane < 0) continue;
+      const from = Math.max(0, ev.begin - cycle);
+      const to = Math.min(1, ev.end - cycle);
       ctx2d.globalAlpha = ev.begin - cycle <= progress ? 1 : 0.35;
-      ctx2d.fillStyle = LANE_COLORS[lane % LANE_COLORS.length];
-      ctx2d.fillRect(x + 1, lane * laneH + 2, width, Math.max(2, laneH - 4));
+      ctx2d.fillStyle = colourOf(ev.lane);
+      ctx2d.fillRect(from * w + 1, lane * laneH + 2, Math.max(3, (to - from) * w - 2), Math.max(2, laneH - 4));
     }
     ctx2d.globalAlpha = 1;
 
     // Lane labels in the left column
     if (laneH >= 9) {
-      const mono = getComputedStyle(document.documentElement).getPropertyValue("--mono");
-      ctx2d.font = Math.min(11, Math.floor(laneH - 2)) + "px " + mono;
+      ctx2d.font = Math.min(11, Math.floor(laneH - 2)) + "px " + font;
       ctx2d.textBaseline = "middle";
       cachedLanes.forEach((name, i) => {
-        ctx2d.fillStyle = LANE_COLORS[i % LANE_COLORS.length];
+        ctx2d.fillStyle = colourOf(name);
         ctx2d.fillText(name.slice(0, 6), -LABEL_W + 2, i * laneH + laneH / 2);
       });
     }
@@ -123,13 +171,16 @@ export function CycleView(session: Session) {
     view,
   ]);
 
+  // Follow the canvas's own size (the window, the layout, being shown again), not only window resizes.
+  const observer = new ResizeObserver(resize);
+
   onMount(() => {
     resize();
-    window.addEventListener("resize", resize);
+    observer.observe(view);
     frame = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener("resize", resize);
+      observer.disconnect();
     };
   }, root);
 

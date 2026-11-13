@@ -178,6 +178,12 @@ eq(Math.abs((times[times.length - 1] - times[times.length - 2]) - 0.125) < 1e-6,
 t.setCPS(NaN);
 eq(t.cps, 2);
 
+// The heard position trails the clock by the output latency (the cycle view's playhead)
+eq(t.getAudibleCyclePosition(), t.getCyclePosition());
+t.audioContext.outputLatency = 0.04; t.audioContext.baseLatency = 0.01;
+eq(+(t.getCyclePosition() - t.getAudibleCyclePosition()).toFixed(6), +(0.05 * t.cps).toFixed(6));
+delete t.audioContext.outputLatency; delete t.audioContext.baseLatency;
+
 // ---------------- Phase 2+ ----------------
 const vals = (p, b = 0, e = 1) => p.query(b, e).slice().sort((x, y) => x.begin - y.begin || String(x.value.s ?? x.value).localeCompare(String(y.value.s ?? y.value)));
 // Mini-notation
