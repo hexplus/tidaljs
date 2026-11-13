@@ -296,6 +296,9 @@ dialog.confirm[open]::backdrop { animation: backdrop-in 0.14s ease-out; }
 }
 
 .workspace { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+/* Only the editor gives up height when space is short: the panels around it keep
+   their content's height, so the cycle view is never squeezed under the status line. */
+.workspace > .palette, .workspace > .cycle, .workspace > .status { flex: none; }
 
 /* Editor */
 .editor {
@@ -817,6 +820,11 @@ dialog.confirm[open]::backdrop { animation: backdrop-in 0.14s ease-out; }
 }
 @media (max-width: 1360px) {
     .sketch-name { max-width: 8rem; }
+}
+
+/* Short windows: the editor gives up more height so the cycle view and the status line still fit. */
+@media (max-height: 760px) and (min-width: 901px) {
+    .editor { min-height: 180px; }
 }
 
 @media (max-width: 900px) {

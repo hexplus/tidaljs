@@ -49,13 +49,15 @@ export function CycleView(session: Session) {
     }
   }
 
-  function resize() {
-    const dpr = window.devicePixelRatio || 1;
-    const rect = view.getBoundingClientRect();
-    view.width = Math.max(1, Math.round(rect.width * dpr));
-    view.height = Math.max(1, Math.round(rect.height * dpr));
+  /** Sizes the canvas's pixels to its box and the screen's pixel ratio. */
+  function resize(dpr: number, width: number, height: number) {
+    view.width = Math.max(1, Math.round(width * dpr));
+    view.height = Math.max(1, Math.round(height * dpr));
     font = getComputedStyle(document.documentElement).getPropertyValue("--mono");
   }
+
+  /** A lane's label in the left column: up to six characters, with an ellipsis when cut. */
+  const label = (name: string) => (name.length > 6 ? name.slice(0, 5) + "…" : name);
 
   /**
    * Reads the events to draw for a cycle: those that start in it and those
@@ -88,6 +90,11 @@ export function CycleView(session: Session) {
     const fullW = view.clientWidth;
     const h = view.clientHeight;
     if (!fullW || !h) return;
+    // Checked every frame, so the canvas stays sharp when its box changes, the page is
+    // zoomed or the window moves to a screen with another pixel ratio.
+    if (view.width !== Math.max(1, Math.round(fullW * dpr)) || view.height !== Math.max(1, Math.round(h * dpr))) {
+      resize(dpr, fullW, h);
+    }
     ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx2d.clearRect(0, 0, fullW, h);
     ctx2d.translate(LABEL_W, 0);
@@ -138,7 +145,7 @@ export function CycleView(session: Session) {
       ctx2d.textBaseline = "middle";
       cachedLanes.forEach((name, i) => {
         ctx2d.fillStyle = colourOf(name);
-        ctx2d.fillText(name.slice(0, 6), -LABEL_W + 2, i * laneH + laneH / 2);
+        ctx2d.fillText(label(name), -LABEL_W + 2, i * laneH + laneH / 2);
       });
     }
 
@@ -180,17 +187,9 @@ export function CycleView(session: Session) {
     view,
   ]);
 
-  // Follow the canvas's own size (the window, the layout, being shown again), not only window resizes.
-  const observer = new ResizeObserver(resize);
-
   onMount(() => {
-    resize();
-    observer.observe(view);
     frame = requestAnimationFrame(draw);
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
+    return () => cancelAnimationFrame(frame);
   }, root);
 
   return root;
