@@ -459,6 +459,7 @@ dialog.confirm[open]::backdrop { animation: backdrop-in 0.14s ease-out; }
     color: var(--muted);
     min-height: 42px;
 }
+.status[hidden] { display: none; }
 .status .dot {
     flex: none;
     width: 8px;
@@ -473,6 +474,7 @@ dialog.confirm[open]::backdrop { animation: backdrop-in 0.14s ease-out; }
 .status.error { color: var(--error); }
 .status.warn .dot { background: var(--warn); }
 .status .warnings { color: var(--warn); display: block; margin-top: 4px; }
+.status .warnings.alone { margin-top: 0; }
 
 /* Sidebar */
 .sidebar { display: flex; flex-direction: column; overflow: hidden; }

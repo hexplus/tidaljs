@@ -178,7 +178,9 @@ export function createSession() {
     } else {
       const n = result.activePatterns;
       const verb = live ? "Updated: playing " : "Playing ";
-      report(result.warnings.length ? "playing warn" : "playing", verb + n + " pattern" + (n === 1 ? "" : "s") + ".", result.warnings);
+      // With warnings, the status line shows only them: "Playing n patterns" is no news there.
+      const text = result.warnings.length ? "" : verb + n + " pattern" + (n === 1 ? "" : "s") + ".";
+      report(result.warnings.length ? "playing warn" : "playing", text, result.warnings);
     }
   }
 

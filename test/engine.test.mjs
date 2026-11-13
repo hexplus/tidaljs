@@ -182,6 +182,8 @@ eq(t.cps, 2);
 t.eval('d1(sound("bd*2")); d2(sound("hh*4")); mute(2)');
 eq(t.queryActive(0, 1).map((e) => e.value.s).join(' '), 'bd bd');
 eq(t.queryActive(0, 1, true).filter((e) => e.silent).map((e) => e.value.s).join(' '), 'hh hh hh hh');
+eq([...new Set(t.queryActive(0, 1, true).map((e) => e.stream))].join(' '), 'd1 d2');
+eq(t.queryActive(0, 1).some((e) => 'stream' in e), false);
 t.muted.clear();
 
 // The heard position trails the clock by the output latency (the cycle view's playhead)

@@ -4014,7 +4014,8 @@
         /**
          * Events of all playing patterns in [begin, end), for visualisation.
          * Muted (or not soloed) streams are left out, unless `includeSilent`:
-         * then their events come too, marked `silent: true`.
+         * then their events come too, marked `silent: true`, and every event
+         * carries the name of its stream (`stream`, null for an unnamed one).
          */
         queryActive(begin, end, includeSilent = false) {
             const out = [];
@@ -4022,7 +4023,11 @@
                 const audible = this.isAudible(id);
                 if (!audible && !includeSilent) continue;
                 try {
-                    for (const ev of pattern.query(begin, end)) out.push(audible ? ev : { ...ev, silent: true });
+                    const stream = typeof id === 'string' ? id : null;
+                    for (const ev of pattern.query(begin, end)) {
+                        if (!includeSilent) out.push(ev);
+                        else out.push(audible ? { ...ev, stream } : { ...ev, stream, silent: true });
+                    }
                 } catch (e) { /* reported by the scheduler */ }
             }
             return out;

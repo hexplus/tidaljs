@@ -16,6 +16,8 @@ export interface PatternEvent {
   value: EventValue | null;
   /** From a muted (or not soloed) stream: only with queryActive(..., true). */
   silent?: boolean;
+  /** The stream the event plays in (d1, "bass", #1...): only with queryActive(..., true). */
+  stream?: string | null;
 }
 
 export interface EvalResult {
