@@ -9,32 +9,60 @@ export interface Example {
 // Songs are public-domain pieces (classical and traditional) transcribed
 // by hand. Grooves are genre rhythms. Each one sets its own tempo.
 export const EXAMPLES: Example[] = [
-    { group: 'Songs', title: 'Ode to Joy (Beethoven, 1824)', code: `// Ode to Joy - Beethoven, Symphony No. 9 (1824). One cycle = one bar.
+    { group: 'Songs', title: 'Ode to Joy (Beethoven, 1824)', code: `// Ode to Joy - Beethoven, Symphony No. 9 (1824): the whole 16-bar theme. One cycle = one bar.
+// The tune, a bass line, and broken chords in between, as in a piano arrangement.
 setCPS(0.5)
 
-sound("tri")
-  .note("<[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [e4@3 d4 d4@4] [e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]>")
-  .legato(0.9).room(0.3)
+const tune = "<" + [
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [e4@3 d4 d4@4]",
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]",
+  "[d4 d4 e4 c4] [d4 [e4 f4] e4 c4] [d4 [e4 f4] e4 d4] [c4 d4 g3@2]",
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]"
+].join(" ") + ">"
 
-sound("saw")
-  .note("<[c3 c3] [g2 g2] [c3 c3] [g2 g2] [c3 c3] [g2 g2] [c3 e3] [g2 c3]>")
-  .lpf(700).legato(0.8).gain(0.88)` },
+// Two chords per bar, C or G, and a helper that writes one pattern per bar from them.
+const harmony = ["C C", "G G", "C C", "G G", "C C", "G G", "C C", "G C",
+                 "G C", "G C", "G C", "C G", "C C", "G G", "C C", "G C"]
+const perBar = (parts) => "<" + harmony.map((bar) => "[" + bar.split(" ").map((c) => parts[c]).join(" ") + "]").join(" ") + ">"
 
-    { group: 'Songs', title: 'Ode to Joy, club edit', code: `// Ode to Joy over a house beat: same melody, new arrangement.
+sound("tri").note(tune).legato(0.9).gain(0.86).orbit(1).room(0.3)
+sound("arpy").note(perBar({ C: "[e3 g3 c4 g3]", G: "[d3 g3 b3 g3]" })).gain(1.1).pan(-0.3)
+sound("saw").note(perBar({ C: "c3", G: "g2" })).lpf(700).legato(0.9).gain(0.86)` },
+
+    { group: 'Songs', title: 'Ode to Joy, club edit', code: `// Ode to Joy over a house beat: the whole 16-bar theme, with a breakdown in bars 9 to 12
+// where the kick drops out and a noise riser builds back to the last phrase.
 setCPS(0.55)
 
-const melody = "<[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [e4@3 d4 d4@4] [e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]>"
+const tune = "<" + [
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [e4@3 d4 d4@4]",
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]",
+  "[d4 d4 e4 c4] [d4 [e4 f4] e4 c4] [d4 [e4 f4] e4 d4] [c4 d4 g3@2]",
+  "[e4 e4 f4 g4] [g4 f4 e4 d4] [c4 c4 d4 e4] [d4@3 c4 c4@4]"
+].join(" ") + ">"
+
+// Two chords per bar, C or G, and a helper that writes one pattern per bar from them.
+const harmony = ["C C", "G G", "C C", "G G", "C C", "G G", "C C", "G C",
+                 "G C", "G C", "G C", "C G", "C C", "G G", "C C", "G C"]
+const perBar = (parts) => "<" + harmony.map((bar) => "[" + bar.split(" ").map((c) => parts[c]).join(" ") + "]").join(" ") + ">"
 
 stack([
-  sound("bd*4"),
-  sound("~ cp ~ cp").room(0.2),
-  sound("[~ hh]*4").gain(0.88),
-  sound("saw*8").note("<c2 g1 c2 g1 c2 g1 c2 [g1 c2]>")
-    .lpf(sine.range(300, 1500).slow(8)).legato(0.6).gain(0.88),
-  sound("arpy").note(melody).add(note(12)).delay(0.5).delaytime(0.375).delayfeedback(0.35).room(0.3)
+  sound("bd*4").mask("<1!8 0!4 1!4>"),
+  sound("~ cp ~ cp").orbit(2).room(0.2),
+  sound("[~ oh]*4").gain(0.9),
+  sound("hh*16").gain("[0.9 0.75]*8"),
+  sound("saw").note(perBar({ C: "[c2 c3 c2 c3]", G: "[g1 g2 g1 g2]" }))
+    .lpf(sine.range(300, 1500).slow(16)).legato(0.6).gain(0.86),
+  // Off-beat chord stabs.
+  sound("supersaw").note(perBar({ C: "[~ [e4,g4,c5] ~ [e4,g4,c5]]", G: "[~ [d4,g4,b4] ~ [d4,g4,b4]]" }))
+    .legato(0.25).lpf(2400).gain(0.92),
+  // The riser, only in the breakdown.
+  sound("noise*16").hpf(saw.range(400, 9000).slow(4)).sustain(0.05).gain(0.7).mask("<0!8 1!4 0!4>"),
+  // The tune on its own orbit, the only one with a delay.
+  sound("arpy").note(tune).add(note(12)).orbit(1).delay(0.5).delaytime(0.375).delayfeedback(0.35).room(0.3)
 ])` },
 
     { group: 'Songs', title: 'Für Elise (Beethoven, 1810)', code: `// Für Elise - Beethoven (1810), opening theme. One cycle = one bar of 3/8.
+// Both hands share one reverb, like one piano in one room.
 setCPS(0.75)
 
 sound("arpy")
@@ -43,7 +71,7 @@ sound("arpy")
 
 sound("arpy")
   .note("<~ [a2 e3 a3 ~@3] [e2 e3 g#3 ~@3] [a2 e3 a3 ~@3] ~ [a2 e3 a3 ~@3] [e2 e3 g#3 ~@3] [a2 e3 a3 ~@3]>")
-  .gain(0.91)` },
+  .gain(0.91).room(0.3)` },
 
     { group: 'Songs', title: 'Prelude in C (Bach, 1722)', code: `// Prelude in C major, BWV 846 - J. S. Bach (1722), first eight bars. One cycle = one bar.
 setCPS(0.3)
@@ -75,24 +103,37 @@ sound("saw").note(bass).lpf(500).legato(1).gain(0.91)
 sound("tri").note(chords).legato(1).gain(0.67)
 sound("tri").note(violin).legato(1).gain(0.84).pan(-0.4)
 sound("tri").note(violin).late(1).legato(1).gain(0.8).pan(0.4)
-sound("arpy").note(violin).late(2).add(note(12)).gain(0.74).room(0.4)` },
+// The third voice, an octave up, in a hall of its own (orbit 1).
+sound("arpy").note(violin).late(2).add(note(12)).gain(1.15).orbit(1).room(0.4)` },
 
     { group: 'Songs', title: 'In the Hall of the Mountain King (Grieg, 1875)', code: `// In the Hall of the Mountain King - Edvard Grieg (1875). One cycle = one bar.
-// Raise the tempo while it plays for Grieg's accelerando.
+// As in Grieg's score the theme keeps repeating, louder each time, and more
+// instruments join: an octave up from bar 5, two octaves up from bar 9, and the
+// timpani double their beat from bar 13. Raise the tempo while it plays for his accelerando.
 setCPS(0.45)
 
-sound("arpy")
-  .note("<[b3 c#4 d4 e4 f#4 d4 f#4@2] [e#4 c#4 e#4@2 e4 c4 e4@2] [b3 c#4 d4 e4 f#4 d4 f#4 b4] [a4 f#4 d4 f#4 a4@4]>")
+const theme = "<[b3 c#4 d4 e4 f#4 d4 f#4@2] [e#4 c#4 e#4@2 e4 c4 e4@2] [b3 c#4 d4 e4 f#4 d4 f#4 b4] [a4 f#4 d4 f#4 a4@4]>"
+// A crescendo over the 16 bars.
+const swell = saw.slow(16).range(0.95, 1.12)
 
+sound("arpy").note(theme).gain(swell)
+sound("tri").note(theme).add(note(12)).legato(0.7).gain(swell).pan(-0.3).mask("<0!4 1!12>")
+sound("square").note(theme).add(note(24)).lpf(3000).legato(0.5).gain(0.62).pan(0.3).mask("<0!8 1!8>")
 sound("saw").note("<b1 [c#2 c2] b1 [d2 f#1]>").lpf(400).legato(1).gain(0.88)
-sound("bd ~ bd ~").gain(0.95)` },
+sound("bd ~ bd ~").fast("<1!12 2!4>").gain(0.95)` },
 
     { group: 'Songs', title: 'Greensleeves (traditional)', code: `// Greensleeves - traditional English (16th century). One cycle = one bar of 3/4.
+// The tune, a lute playing each chord in quarter notes, and the bass.
 setCPS(0.53)
 
 sound("tri")
   .note("<[c5@4 d5@2] [e5@3 f5 e5@2] [d5@4 b4@2] [g4@3 a4 b4@2] [c5@4 a4@2] [a4@3 g#4 a4@2] [b4@4 g#4@2] [e4@4 a4@2] [c5@4 d5@2] [e5@3 f5 e5@2] [d5@4 b4@2] [g4@3 a4 b4@2] [c5@3 b4 a4@2] [g#4@3 f#4 g#4@2] a4 [~@4 a4@2]>")
-  .legato(1).attack(0.03).gain(0.88).room(0.4)
+  .legato(1).attack(0.03).gain(0.88).orbit(1).room(0.4)
+
+// Am C G Em Am E E Am, then Am C G Em Am E Am Am.
+sound("arpy")
+  .note("<a3'min c4'maj g3'maj e3'min a3'min e3'maj e3'maj a3'min a3'min c4'maj g3'maj e3'min a3'min e3'maj a3'min a3'min>")
+  .arp("up").gain(1.1).pan(-0.3)
 
 sound("saw")
   .note("<a2 c3 g2 e2 a2 e2 e2 a2 a2 c3 g2 e2 a2 e2 a2 a2>")
@@ -131,38 +172,48 @@ sound("square")
   .lpf(1800).legato(1).gain(0.77)
   .room(0.8).size(1)` },
 
-    { group: 'Christmas', title: 'Jingle Bells (Pierpont, 1857)', code: `// Jingle Bells - James Lord Pierpont (1857), the chorus. One cycle = one bar.
+    { group: 'Christmas', title: 'Jingle Bells (Pierpont, 1857)', code: `// Jingle Bells - James Lord Pierpont (1857): the verse, then the chorus. One cycle = one bar.
 setCPS(0.6)
 
-const chorus = "<[e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [e4@2 d4@2 d4@2 e4@2] [d4 g4] [e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [g4 g4 f4 d4] c4>"
+const verse = "[g3 e4 d4 c4] [g3@6 g3 g3] [g3 e4 d4 c4] a3 [a3 f4 e4 d4] b3 [g4 g4 f4 d4] e4 " +
+  "[g3 e4 d4 c4] g3 [g3 e4 d4 c4] [a3@3 a3] [a3 f4 e4 d4] [g4 g4 g4 g4] [a4 g4 f4 d4] [c4@2 g4@2]"
+const chorus = "[e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [e4@2 d4@2 d4@2 e4@2] [d4 g4] " +
+  "[e4 e4 e4@2] [e4 e4 e4@2] [e4@2 g4@2 c4@3 d4] e4 [f4@2 f4@2 f4@3 f4] [f4@2 e4@2 e4@2 e4 e4] [g4 g4 f4 d4] c4"
+const tune = "<" + verse + " " + chorus + ">"
+
+// Oom-pah: the bass note, then the fifth. Verse: C C C F F G G C C C C F F G G C; then the chorus.
+const bass = "<[c3 g2]!3 [f2 c3]!2 [g2 d3]!2 [c3 g2]!4 [f2 c3]!2 [g2 d3]!2 [c3 g2] " +
+  "[c3 g2]!4 [f2 c3] [c3 g2] [d3 a2] [g2 d3] [c3 g2]!4 [f2 c3] [c3 g2] [g2 d3] [c3 c3]>"
 
 stack([
-  sound("arpy").note(chorus).add(note(12)).room(0.3),
-  sound("tri").note(chorus).legato(0.8).gain(0.8),
-  // Oom-pah: the bass note, then the chord.
-  sound("saw").note("<[c3 g2]!4 [f2 c3] [c3 g2] [d3 a2] [g2 d3] [c3 g2]!4 [f2 c3] [c3 g2] [g2 d3] [c3 c3]>")
-    .lpf(600).legato(0.7).gain(0.88),
-  // Sleigh bells
-  sound("hh*8").gain("0.84 0.71").hpf(6000).pan(perlin.range(-0.5, 0.5)),
+  sound("arpy").note(tune).add(note(12)).orbit(1).room(0.3),
+  sound("tri").note(tune).legato(0.8).gain(0.8),
+  sound("saw").note(bass).lpf(600).legato(0.7).gain(0.88),
+  // Sleigh bells: quiet in the verse, shaking in the chorus.
+  sound("hh*8").gain("<0.92!16 [1.05 0.95]!16>").hpf(6000).pan(perlin.range(-0.5, 0.5)),
   sound("bd ~ bd ~").gain(0.91)
 ])` },
 
     { group: 'Christmas', title: 'Silent Night (Gruber, 1818)', code: `// Silent Night - Franz Xaver Gruber (1818). One cycle = one bar of 6/8.
+// The tune, a guitar breaking each chord into six eighths, and a soft bass.
 setCPS(0.42)
 
 sound("tri")
   .note("<[g4@3 a4 g4@2] e4 [g4@3 a4 g4@2] e4 [d5@4 d5@2] b4 [c5@4 c5@2] g4 [a4@4 a4@2] [c5@3 b4 a4@2] [g4@3 a4 g4@2] e4 [a4@4 a4@2] [c5@3 b4 a4@2] [g4@3 a4 g4@2] e4 [d5@4 d5@2] [f5@3 d5 b4@2] c5 e5 [c5@3 g4 e4@2] [g4@3 f4 d4@2] c4 ~>")
-  .legato(1).attack(0.04).gain(0.88).room(0.5).size(0.8)
+  .legato(1).attack(0.04).gain(0.88).orbit(1).room(0.5).size(0.8)
 
-// The guitar: each chord broken into six eighth notes, rising over two octaves.
 const chords = { C: "c3'maj'6", F: "f2'maj'6", G: "g2'dom7'6" }
-const harmony = "C C C C G G C C F F C C F F C C G G C C C G C C"
+const roots = { C: "c2", F: "f2", G: "g2" }
+const harmony = "C C C C G G C C F F C C F F C C G G C C C G C C".split(" ")
 
 sound("arpy")
-  .note("<" + harmony.split(" ").map(c => chords[c]).join(" ") + ">")
-  .arp("up").gain(0.82).room(0.4)` },
+  .note("<" + harmony.map(c => chords[c]).join(" ") + ">")
+  .arp("up").gain(1.05).orbit(2).room(0.4)
+
+sound("sine").note("<" + harmony.map(c => roots[c]).join(" ") + ">").legato(1).gain(0.72)` },
 
     { group: 'Christmas', title: 'Deck the Halls (traditional)', code: `// Deck the Halls - traditional Welsh carol (16th century). One cycle = one bar.
+// The tune, the bass, after-beat chords, and a light drum kit.
 setCPS(0.55)
 
 const line = "[g4@3 f4 e4@2 d4@2] [c4@2 d4@2 e4@2 c4@2] [d4 e4 f4 d4 e4@3 d4] [c4@2 b3@2 c4@4]"
@@ -171,11 +222,13 @@ const last = "[g4@3 f4 e4@2 d4@2] [c4@2 d4@2 e4@2 c4@2] [a4 a4 a4 a4 g4@3 f4] [e
 
 stack([
   sound("square").note("<" + [line, line, middle, last].join(" ") + ">")
-    .lpf(2400).legato(0.9).gain(0.77).room(0.3),
+    .lpf(2400).legato(0.9).gain(0.77).orbit(1).room(0.3),
   sound("saw").note("<c3 c3 g2 [g2 c3] c3 c3 g2 [g2 c3] g2 c3 [a2 d3] [d3 g2] c3 c3 [f2 g2] [g2 c3]>")
     .lpf(500).legato(1).gain(0.86),
   sound("tri").note("<c4'maj!2 g3'dom7 c4'maj!3 g3'dom7 c4'maj g3'maj c4'maj d4'maj g3'maj c4'maj!2 f3'maj c4'maj>")
-    .struct("~ x ~ x").legato(0.5).gain(0.67)
+    .struct("~ x ~ x").legato(0.5).gain(0.7),
+  // Drums from the second verse on.
+  sound("bd ~ bd ~, ~ hh ~ hh, [~ hh]*4").gain(0.92).mask("<0!4 1!12>")
 ])` },
 
     { group: 'Christmas', title: 'We Wish You a Merry Christmas (traditional)', code: `// We Wish You a Merry Christmas - traditional English carol. One cycle = one bar of 3/4.
@@ -184,13 +237,13 @@ setCPS(0.45)
 stack([
   sound("arpy")
     .note("<[g4@2 g4 a4 g4 f#4] [e4@2 e4@2 e4@2] [a4@2 a4 b4 a4 g4] [f#4@2 d4@2 d4@2] [b4@2 b4 c5 b4 a4] [g4@2 e4@2 d4 d4] [e4@2 a4@2 f#4@2] [g4@4 d4@2] [g4@2 g4@2 g4@2] [f#4@4 f#4@2] [g4@2 f#4@2 e4@2] [d4@4 a4@2] [b4@2 a4 a4 g4 g4] [d5@2 d4@2 d4 d4] [e4@2 a4@2 f#4@2] [g4@4 d4@2]>")
-    .add(note(12)).room(0.3),
+    .add(note(12)).gain(1.08).orbit(1).room(0.3),
   // Waltz: bass on beat one, chord on two and three.
   sound("saw").note("<g2 c3 a2 d3 b2 [c3 d3] [c3 d3] g2 g2 d3 e3 d3 g2 d3 [c3 d3] g2>")
     .struct("x ~ ~").lpf(500).legato(1).gain(0.88),
   sound("tri").note("<g3'maj c4'maj a3'min d4'dom7 b3'min [c4'maj d4'maj] [c4'maj d4'maj] g3'maj g3'maj d4'maj e4'min d4'maj g3'maj d4'maj [c4'maj d4'maj] g3'maj>")
     .struct("~ x x").legato(0.6).gain(0.67),
-  sound("~ hh hh").gain(0.74).hpf(7000)
+  sound("~ hh hh").gain(1.05).hpf(7000)
 ])` },
 
     { group: 'Christmas', title: 'Good King Wenceslas (traditional)', code: `// Good King Wenceslas - melody from Piae Cantiones (1582). One cycle = one bar.
@@ -201,13 +254,14 @@ const tune = "<" + [verse, verse,
   "[d5 c5 b4 a4] [b4 a4 g4@2] [e4 d4 e4 f#4] [g4@2 g4@2]",
   "[d4 d4 e4 f#4] [g4 g4 a4@2] [d5 c5 b4 a4] [g4@2 c5@2] g4"].join(" ") + ">"
 
-sound("tri").note(tune).legato(0.9).gain(0.86).room(0.4)
-sound("tri").note(tune).add(note(-12)).lpf(1200).legato(0.9).gain(0.74)
+// The tune and its lower octave share one reverb (orbit 1); the bells ring in another (orbit 2).
+sound("tri").note(tune).legato(0.9).gain(0.86).orbit(1).room(0.4)
+sound("tri").note(tune).add(note(-12)).lpf(1200).legato(0.9).gain(0.74).orbit(1).room(0.4)
 sound("saw")
   .note("<g2 [g2 d3] [c3 d3] g2 g2 [g2 d3] [c3 d3] g2 [b2 d3] [e3 d3] [c3 d3] g2 [b2 d3] [e3 d3] [g2 d3] [e3 c3] g2>")
   .lpf(450).legato(1).gain(0.86)
 // Church bells
-sound("<cy ~ ~ ~>").speed(0.5).gain(0.74).room(0.6)` },
+sound("<cy ~ ~ ~>").speed(0.5).gain(0.95).orbit(2).room(0.6)` },
 
     { group: 'Christmas', title: 'Carol of the Bells (Leontovych, 1916)', code: `// Shchedryk - Mykola Leontovych (1916), known in English as Carol of the Bells.
 // Its four-note bell figure in G minor never stops; voices join it every four bars
@@ -217,57 +271,70 @@ setCPS(0.6)
 const bell = "[bb4@2 a4 bb4 g4@2]"
 
 stack([
-  sound("arpy").note(bell).gain(0.91),
+  sound("arpy").note(bell).gain(1.05),
   sound("tri").note("<~!4 [d5@2 c5 d5 bb4@2]!12>").legato(0.9).gain(0.8).pan(-0.4),
   sound("tri").note("<~!8 [g5@2 f5 g5 d5@2]!8>").legato(0.9).gain(0.74).pan(0.4),
-  sound("sine").note("<~!12 [d6 c6 bb5 a5 g5 f#5]!4>").gain(0.71).delay(0.5).delaytime(0.25).room(0.5),
+  // The high voice echoes on its own orbit.
+  sound("sine").note("<~!12 [d6 c6 bb5 a5 g5 f#5]!4>").gain(0.75).orbit(1).delay(0.5).delaytime(0.25).room(0.5),
   sound("saw").note("<g2 g2 f2 f2 eb2 eb2 d2 d2>").lpf(400).legato(1).gain(0.84)
 ])` },
 
-    { group: 'Grooves', title: 'House', code: `// House: four-on-the-floor kick, offbeat open hats and a filtered bassline. 128 bpm.
+    { group: 'Grooves', title: 'House', code: `// House: four-on-the-floor kick, offbeat open hats, organ-style stabs and a filtered
+// bassline over C Am F G. The kick drops out every eighth bar. 128 bpm.
 setCPS(0.533)
 
 stack([
-  sound("bd*4"),
-  sound("~ cp ~ cp").room(0.2),
-  sound("[~ oh]*4").gain(0.84),
-  sound("hh*16").gain(0.67).degradeBy(0.3),
+  sound("bd*4").mask("<1!7 0>"),
+  sound("~ cp ~ cp").orbit(1).room(0.2),
+  sound("[~ oh]*4").gain(0.9),
+  sound("hh*16").gain("[0.9 0.75]*8").degradeBy(0.3),
   sound("saw*8").note("<[c2 c3]*4 [a1 a2]*4 [f1 f2]*4 [g1 g2]*4>")
     .lpf(sine.range(300, 2400).slow(16)).resonance(0.1)
-    .legato(0.5).gain(0.84)
+    .legato(0.5).gain(0.84),
+  sound("supersaw").note("<c4'maj a3'min f3'maj g3'maj>").struct("~ ~ x ~ ~ x ~ ~")
+    .legato(0.5).lpf(2600).gain(0.95)
 ])` },
 
-    { group: 'Grooves', title: 'Boom bap', code: `// Boom bap: a laid-back hip-hop beat with swung hats and jazzy chords. 90 bpm.
+    { group: 'Grooves', title: 'Boom bap', code: `// Boom bap: a laid-back hip-hop beat with swung hats, jazzy chords, a bass that
+// follows the kick, ghost snares and vinyl crackle. 90 bpm.
 setCPS(0.375)
 
 stack([
   sound("bd ~ ~ ~ ~ ~ ~ bd ~ ~ bd ~ ~ ~ ~ ~"),
-  sound("~ sn ~ sn").room(0.15),
-  sound("hh*8").swing(4).gain(0.82),
+  sound("~ sn ~ sn").orbit(1).room(0.15),
+  sound("~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ sn").gain(0.75),
+  sound("hh*8").swing(4).gain("0.92 0.8"),
   sound("tri").struct("x ~ ~ x ~ ~ x ~").note("<a3'min7 d3'min7 g3'dom7 c4'maj7>")
-    .legato(0.6).lpf(1600).gain(0.77)
+    .legato(0.6).lpf(1600).gain(0.77),
+  sound("sine").struct("x ~ ~ ~ ~ ~ ~ x ~ ~ x ~ ~ ~ ~ ~").note("<a1 d2 g1 c2>").legato(1.5).gain(0.9),
+  sound("superstatic").legato(1).voice(0.2).hpf(3000).gain(0.6)
 ])` },
 
-    { group: 'Grooves', title: 'Bossa nova', code: `// Bossa nova: the bossa clave over a ii-V-I in C.
+    { group: 'Grooves', title: 'Bossa nova', code: `// Bossa nova: the bossa clave over a ii-V-I in C, with a shaker, piano comping
+// and a bass on the root and the fifth.
 setCPS(0.55)
 
 stack([
   sound("bd ~ ~ bd bd ~ ~ bd"),
-  sound("cp ~ ~ cp ~ ~ cp ~ ~ ~ cp ~ ~ cp ~ ~").gain(0.8).hpf(1500),
-  sound("hh*8").gain(0.74),
-  sound("tri").struct("x ~ ~ x ~ ~ x ~ ~ ~ x ~ ~ x ~ ~").note("<d3'm7 g3'dom7 c3'maj7 c3'maj7>")
-    .legato(0.4).gain(0.74).room(0.3),
-  sound("sine").note("<[d2 a1] [g1 d2] [c2 g1] [c2 g1]>").legato(0.9).gain(0.91)
+  sound("cp ~ ~ cp ~ ~ cp ~ ~ ~ cp ~ ~ cp ~ ~").gain(0.95).hpf(1500),
+  sound("hh*16").gain("[0.85 0.7 0.75 0.7]*4").hpf(7000),
+  sound("superpiano").struct("x ~ ~ x ~ ~ x ~ ~ ~ x ~ ~ x ~ ~").note("<d3'm7 g3'dom7 c3'maj7 c3'maj7>")
+    .voice(0.4).legato(0.4).gain(0.8).orbit(1).room(0.3),
+  sound("sine").note("<[d2 a1] [g1 d2] [c2 g1] [c2 g1]>").legato(0.9).gain(0.82)
 ])` },
 
-    { group: 'Grooves', title: 'Jungle', code: `// Jungle: a chopped-up breakbeat over a rolling sub bass. 170 bpm.
+    { group: 'Grooves', title: 'Jungle', code: `// Jungle: a chopped-up breakbeat over a rolling sub bass, a growling reese an octave up
+// and a pad far away. 170 bpm.
 setCPS(0.71)
 
 stack([
   sound("<[bd ~ bd ~ sn ~ ~ sn ~ sn bd bd sn ~ ~ sn] [bd ~ bd ~ sn ~ ~ sn ~ sn bd ~ sn ~ [sn sn] sn]>")
-    .chunk(4, x => x.hurry(2)),
-  sound("hh*8").gain(0.77).pan(sine.range(-0.5, 0.5)),
-  sound("sine").note("<e1 e1 g1 [d1 a0]>").legato(1).gain(0.97)
+    .chunk(4, x => x.hurry(2)).sometimesBy(0.1, x => x.ply(2)).gain(0.88),
+  sound("hh*8").gain(0.85).pan(sine.range(-0.5, 0.5)),
+  sound("sine").note("<e1 e1 g1 [d1 a0]>").legato(1).gain(0.88),
+  sound("superreese").note("<e2 e2 g2 [d2 a1]>").legato(1).lpf(sine.range(300, 900).slow(8)).gain(0.72),
+  sound("superpwm").note("<e3'min7'5 c3'maj7'5>/2").legato(1).rate(0.3).lpf(1600)
+    .gain(0.62).orbit(1).room(0.6).size(0.9)
 ])` },
 
     { group: 'Samples', title: 'Dirt-Samples drum kit', code: `// Recorded samples from the Dirt-Samples library, loaded from GitHub the first time.
@@ -276,7 +343,7 @@ samples("github:tidalcycles/dirt-samples")
 
 stack([
   sound("bd*2 [~ bd] ~ bd"),
-  sound("~ sn:3 ~ sn:3").room(0.2),
+  sound("~ sn:3 ~ sn:3").orbit(1).room(0.2),
   sound("hh*8").n("0 .. 7").gain(0.88),
   sound("jvbass*4").n("<0 2>").note("c e g e").legato(1)
 ])` },
@@ -304,7 +371,7 @@ stack([
 samples("github:felixroos/dough-samples/piano.json")
 setCPS(0.35)
 sound("piano").note("<[c3,e4,g4,b4] [a2,c4,e4,g4] [f2,a3,c4,e4] [g2,b3,d4,f4]>").legato(1).room(0.4)
-sound("piano*8").note(scale("c:major", "<[0 2 4 7] [5 4 2 0]>*2").add(14)).gain(0.88)` },
+sound("piano*8").note(scale("c:major", "<[0 2 4 7] [5 4 2 0]>*2").add(14)).gain(0.88).room(0.4)` },
 
     { group: 'Pattern fundamentals', title: 'sound() and n()', code: 'sound("bd*2 [sn cp] bd [sn sn:2]").n("<0 1 2>")' },
     { group: 'Pattern fundamentals', title: 'note()', code: '// The first bar of Ode to Joy\nsound("arpy").note("e4 e4 f4 g4")' },
@@ -333,7 +400,7 @@ sound("piano*8").note(scale("c:major", "<[0 2 4 7] [5 4 2 0]>*2").add(14)).gain(
     { group: 'Effects', title: 'bpf()', code: 'sound("arpy*4").bpf(1000)' },
     { group: 'Effects', title: 'delay()', code: '// delay is the echo level, delaytime the time between echoes (seconds)\nsound("cp ~ ~ ~").delay(0.6).delaytime(0.25).delayfeedback(0.5)' },
     { group: 'Effects', title: 'reverb()', code: 'sound("sn ~ arpy ~").note("c e").reverb(0.6)' },
-    { group: 'Effects', title: 'distortion()', code: 'sound("bd sn bd sn").distortion(5)' },
+    { group: 'Effects', title: 'distortion()', code: '// Distortion makes the sound louder too, so it is turned down a little\nsound("bd sn bd sn").distortion(5).gain(0.85)' },
     { group: 'Effects', title: 'crush()', code: 'sound("arpy*4").note("c e g b").crush(4)' },
     { group: 'Effects', title: 'vowel()', code: 'sound("saw").note("c3 e3 g3").vowel("<a e i o u>")' },
 
@@ -349,7 +416,7 @@ sound("piano*8").note(scale("c:major", "<[0 2 4 7] [5 4 2 0]>*2").add(14)).gain(
     { group: 'Composition', title: 'nTake()', code: '// Each played snare takes the next variation from the list\nsound("~ sn ~ sn*2").nTake("snares", [0, 1, 2, 3, 2])' },
 
     { group: 'Mini-notation', title: 'Subdivision and alternation', code: 'sound("bd [~ bd] <sn cp> [hh hh hh]")' },
-    { group: 'Mini-notation', title: 'Euclidean rhythms', code: '// (3,8) is the Cuban tresillo, (5,8) the cinquillo\nstack([\n  sound("bd(3,8)"),\n  sound("hh(5,8,2)").gain(0.84),\n  sound("cp(2,5)").delay(0.5).delaytime(0.25)\n])' },
+    { group: 'Mini-notation', title: 'Euclidean rhythms', code: '// (3,8) is the Cuban tresillo, (5,8) the cinquillo\nstack([\n  sound("bd(3,8)"),\n  sound("hh(5,8,2)").gain(0.84),\n  sound("cp(2,5)").orbit(1).delay(0.5).delaytime(0.25)\n])' },
     { group: 'Mini-notation', title: 'Polymeter', code: 'sound("{bd sn hh, cp hh oh hh cp}")' },
     { group: 'Mini-notation', title: 'Probability and repeats', code: 'sound("bd!2 sn? [hh hh?0.3]!2 cp:1")' },
     { group: 'Mini-notation', title: 'Random choice', code: 'sound("bd [sn | cp | oh] bd [hh | ~]")' },
@@ -393,8 +460,8 @@ d2(sound("bd*2 [~ bd] sn ~").set(gain(0.97)))` },
 
     { group: 'Tidal style', title: 'Strummed chords', code: `setCPS(0.5)
 sound("tri").note("<c'maj'5 a3'min7'5 f3'maj'5 g3'dom7'5>")
-  .rolledBy("<0.25 0.5 -0.25 0.125>").legato(1).room(0.4)
-sound("sine").note("<c2 a1 f1 g1>").legato(1)` },
+  .rolledBy("<0.25 0.5 -0.25 0.125>").legato(1).gain(0.72).orbit(1).room(0.4)
+sound("sine").note("<c2 a1 f1 g1>").legato(1).gain(0.86)` },
 
     { group: 'Tidal style', title: 'Breakbeat with splice()', code: `// splice fits each slice of the break to its step, at any tempo.
 samples("github:tidalcycles/dirt-samples")
@@ -410,10 +477,10 @@ sound("~ hh*2").set(cut(1)).gain(0.88)` },
 ])` },
 
     { group: 'Tidal style', title: 'New effects', code: `stack([
-  sound("bd*4").shape(0.6),
-  sound("saw*8").note("<c2 a1>").djf(sine.slow(8)).legato(0.8),
+  sound("bd*4").shape(0.6).gain(0.85),
+  sound("saw*8").note("<c2 a1>").djf(sine.slow(8)).legato(0.8).gain(0.85),
   sound("tri").note("<c'maj7 a3'min7>").legato(1).tremolorate(6).tremolodepth(0.6).gain(0.84),
-  sound("square*4").note("g4 e4").phaserrate(0.5).phaserdepth(0.8).ring(0.5).ringf(220).gain(0.74)
+  sound("square*4").note("g4 e4").phaserrate(0.5).phaserdepth(0.8).ring(0.5).ringf(220).gain(0.84)
 ])` },
 
     { group: 'Tidal style', title: 'Markov chains and binary rhythms', code: `stack([
@@ -424,7 +491,7 @@ sound("~ hh*2").set(cut(1)).gain(0.88)` },
     { group: 'Streams', title: 'Streams with mute and solo', code: `// Each d1... is a stream: above the cycle view, M mutes it and S solos it.
 setCPS(0.55)
 d1(sound("bd*2 [~ bd] ~ bd"))
-d2(sound("~ sn ~ sn").room(0.2))
+d2(sound("~ sn ~ sn").orbit(1).room(0.2))
 d3(sound("hh*8").gain("0.88 0.74"))
 d4(sound("saw*8").note("<c2 c2 a1 f1>").lpf(900).legato(0.6).gain(0.88))` },
 
@@ -436,14 +503,14 @@ xfadeIn(2, 8, sound("arpy*8").note("<c e g b>").gain(0.91))` },
     { group: 'Streams', title: 'Anticipate the drop', code: `// Play it, then change "bd sn" to "bd*2 [sn cp]" and play again:
 // the old beat echoes faster and faster for 4 cycles before the new one drops.
 d1(sound("hh*8").gain(0.84))
-anticipateIn(2, 4, sound("bd sn").room(0.2))` },
+anticipateIn(2, 4, sound("bd sn").orbit(1).room(0.2))` },
 
     { group: 'Streams', title: 'Song structure with ur()', code: `setCPS(0.55)
 // Eight cycles of structure; "verse:double" plays the verse with an effect.
 ur(8, "intro verse [verse, hats] verse:double", {
-  intro: sound("bd ~ ~ ~").room(0.4),
+  intro: sound("bd ~ ~ ~").orbit(1).room(0.4),
   verse: sound("bd*2 [~ bd] sn ~"),
-  hats: sound("hh*8").gain(0.84)
+  hats: sound("hh*8").gain(0.95)
 }, { double: x => x.fast(2) })` },
 
     { group: 'Streams', title: 'Stepwise: stepcat and pace', code: `// stepcat gives every step the same length: 2 + 3 + 4 steps in one cycle.
@@ -486,7 +553,7 @@ stack([
 
   // A polymeter: at 16 steps per cycle the 3-, 5- and 7-step loops drift apart
   // and only line up again after 105 steps.
-  sound("{superhat superhat ~, ~ ~ superclap ~ ~, oh ~ ~ ~ ~ hh ~}%16").gain(0.82),
+  sound("{superhat superhat ~, ~ ~ superclap ~ ~, oh ~ ~ ~ ~ hh ~}%16").gain(0.9),
 
   // stepcat shares the cycle by steps: 3 + 5 = 8 even eighths.
   // steptake then keeps 8, 6, 4 or 7 of them, stretched over the bar.
@@ -614,7 +681,7 @@ stack([
   sound("superhoover").note("<g3 ~ bb3 ~ c4 ~ [d4 c4] ~>").legato(2).gain(0.82),
 
   // Euclidean off-beat hats: 5 of 8, the rotation changing each bar.
-  sound("superhat(5,8,<0 2 3>)").decay(0.05).gain(0.8)
+  sound("superhat(5,8,<0 2 3>)").decay(0.08).gain(0.95)
 ])` },
 
     { group: 'Advanced', title: 'Song structure with ur, layer and fix', code: `// A whole arrangement in 16 cycles: ur picks which part plays when, and
@@ -623,7 +690,7 @@ stack([
 setCPS(124 / 60 / 4)
 
 const drums = sound("superkick [~ superkick] superkick ~, ~ superclap, superhat*8")
-  .fix(x => x.decay("0.05 0.2"), { s: "superhat" })
+  .fix(x => x.decay("0.08 0.2").gain(1.1), { s: "superhat" })
 
 const bass = sound("superreese").note("<c2 [c2 eb2] f1 [g1 bb1]>").struct("x(3,8,<0 2>)")
   .legato(0.7).lpf(800).gain(1.05)
