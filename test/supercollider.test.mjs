@@ -187,10 +187,10 @@ Ppar([
 // Rests, random values.
 {
   const { js, events } = play('Pbind(\\note, Pseq([0, \\rest, 3, 5], inf), \\dur, 0.5, \\amp, Pwhite(0.05, 0.2), \\pan, Prand([-1, 0, 1], inf)).play;', 4);
-  ok(js.includes('rand.range(0.2, 0.8)') && js.includes('choose([-1, 0, 1])'), 'random patterns become TidalJS random signals');
+  ok(js.includes('rand.range(0.06, 0.24)') && js.includes('choose([-1, 0, 1])'), 'random patterns become TidalJS random signals');
   eq(events.map((e) => e.time), [0, 1, 1.5, 2, 3, 3.5]);
   eq(events.map((e) => e.note), [60, 63, 65, 60, 63, 65]);
-  ok(events.every((e) => e.amp >= 0.2 && e.amp <= 0.8 && [-1, 0, 1].includes(e.pan)), 'random values in range');
+  ok(events.every((e) => e.amp >= 0.06 && e.amp <= 0.24 && [-1, 0, 1].includes(e.pan)), 'random values in range');
 }
 
 // Sections: Pseq of finite Pbinds.
@@ -279,6 +279,23 @@ Pbind(\instrument, \acid, \midinote, Pseq([36, 48], inf), \dur, 0.25).play;`, 1)
   const { js, parts } = play('SynthDef(\\a, { Out.ar(0, SinOsc.ar(440) * 0.1) }).add;', 1);
   eq(parts, 0);
   ok(js.includes('Nothing in the file plays'), 'a file that plays nothing says so');
+}
+
+// Multichannel expansion and an LFO on the pitch: two channels, each a sine swept from 100 Hz to 2 kHz
+// (1 and 3 times a second), at 0.2, until stopped.
+{
+  const { js, events } = play('{ SinOsc.ar(SinOsc.kr([1, 3]).exprange(100, 2e3), 0, 0.2) }.play', 4);
+  ok(js.includes('sound("sine")') && js.includes('layer(['), 'two different channels are two layers of a sine');
+  eq(events.length, 2);
+  const [left, right] = events.sort((a, b) => a.pan - b.pan);
+  eq([left.pan, left.vib, right.pan, right.vib], [-1, 1, 1, 3]);
+  for (const e of events) {
+    near(e.freq, Math.sqrt(100 * 2000), 'the sweep is centred on the geometric mean');
+    near(e.vibmod, 12 * Math.log2(20) / 2, 'and goes half the range in semitones each way');
+    near(e.amp, 0.2 * 0.4 / 0.45, 'the level is 0.2, as in SuperCollider');
+    eq(e.legato, 1);
+    near(e.length, 4, 'a note as long as the cycle');
+  }
 }
 
 // The README's example converts to the code the README shows.

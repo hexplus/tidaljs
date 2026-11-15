@@ -313,7 +313,7 @@ export function LibraryPanel(library: Library) {
           button({ class: "btn small", type: "button", title: "Download the editor's code as a .js file", on: { click: library.exportCurrent } }, "Export sketch"),
           button({ class: "btn small", type: "button", title: "Download every saved sketch as one .json file", on: { click: library.exportAll } }, "Export all"),
           button({ class: "btn small", type: "button", title: "Open a .js or .txt file, or add the sketches of a .json library", on: { click: () => library.chooseFile() } }, "Import"),
-          button({ class: "btn small", type: "button", title: "Convert a SuperCollider file (.scd) to TidalJS code", on: { click: library.chooseSuperCollider } }, "Import .scd"),
+          button({ class: "btn small", type: "button", title: "Convert a SuperCollider file (.scd) to TidalJS code (alpha: not everything converts yet)", on: { click: library.chooseSuperCollider } }, "Import .scd (alpha)"),
         ]),
         p({ class: "hint" }, "Import a .js file to open it, a library .json to add its sketches, or a SuperCollider .scd file to convert it. You can also drop a file here."),
       ]),

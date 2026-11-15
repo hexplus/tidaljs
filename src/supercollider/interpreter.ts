@@ -1027,6 +1027,17 @@ export class Interpreter implements Host {
     // A UGen: Saw.ar(...), LPF.ar(...)
     if (["ar", "kr", "ir", "new"].includes(method) && (UGEN_INPUTS[name] || this.graph)) {
       const names = UGEN_INPUTS[name] ?? [];
+      // Multichannel expansion: an array input makes one UGen per element, as in SuperCollider.
+      const arrayInputs = new Set(["inArray", "channelsArray", "specificationsArrayRef", "array", "envelope"]);
+      const expandable = (v: Value, key: string) => Array.isArray(v) && !arrayInputs.has(key);
+      const width = Math.max(0, ...args.map((a, i) => (expandable(a, names[i] ?? "in" + i) ? (a as Value[]).length : 0)),
+        ...Object.entries(kwargs).map(([k, v]) => (expandable(v, k) ? (v as Value[]).length : 0)));
+      if (width > 0) {
+        const pick = (v: Value, key: string, i: number) => (expandable(v, key) ? (v as Value[])[i % (v as Value[]).length] : v);
+        return Array.from({ length: width }, (_, i) => this.classSend(name, method,
+          args.map((a, k) => pick(a, names[k] ?? "in" + k, i)),
+          Object.fromEntries(Object.entries(kwargs).map(([k, v]) => [k, pick(v, k, i)])), line));
+      }
       const inputs: Record<string, Value> = {};
       args.forEach((a, i) => { inputs[names[i] ?? "in" + i] = a; });
       for (const [k, v] of Object.entries(kwargs)) inputs[k] = v;
@@ -1234,6 +1245,7 @@ export class Interpreter implements Host {
     const ev = synth.args.copy();
     ev.set("instrument", new Sym(synth.name));
     ev.set("__synth", true);
+    if (!this.routine) ev.set("__top", true);
     this.recordEvent(ev, line);
   }
 

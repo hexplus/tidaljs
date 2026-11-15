@@ -113,7 +113,7 @@ const result = tidal.eval('sound("bd sn")\n\nsound("hh*4").gain(0.84)');
 
 ### Importing SuperCollider code
 
-The editor converts a [SuperCollider](https://github.com/supercollider/supercollider) file (`.scd`) into TidalJS code. Use **Sketches → Import SuperCollider (.scd)…**, the **Import .scd** button in the Library tab, or drop the file on the Library tab. The converted code opens in the editor, ready to play and edit.
+The editor converts a [SuperCollider](https://github.com/supercollider/supercollider) file (`.scd`) into TidalJS code. This is an alpha: common code converts, but not everything does yet. Use **Sketches → Import SuperCollider (.scd) (alpha)…**, the **Import .scd (alpha)** button in the Library tab, or drop the file on the Library tab. The converted code opens in the editor, ready to play and edit.
 
 The importer parses the file and runs it far enough to know what it plays, then writes each part as a TidalJS pattern:
 
@@ -121,7 +121,7 @@ The importer parses the file and runs it far enough to know what it plays, then 
 - **Value patterns**: `Pseq`, `Pser`, `Pn`, `Pdup`/`Pstutter`, `Pkey`, `Pfunc`, `Pfuncn`, `Pseries`, `Pgeom`, `Pslide`, `Place`, `Ppatlace`, `Pswitch`, `Pif`, `Pseg`, `Pfin`, `Pfindur`, `Psync`, `Pbjorklund`, `Prout`, and arithmetic on patterns. `Pwhite`, `Pexprand`, `Prand`, `Pxrand` and `Pwrand` become TidalJS random signals (`rand.range`, `rand.rangex`, `irand`, `choose`, `wchoose`).
 - **Events**: rests (`\rest`, `Rest()`), `dur`, `legato`, `sustain`, `stretch`, `amp`/`db`, `pan`, `lag`, `timingOffset`, chords (arrays), and SuperCollider's pitch model (`degree`, `scale`, `root`, `octave`, the transpositions, `note`, `midinote`, `freq`). `Pbind(\type, \dirt, ...)` events keep their SuperDirt controls.
 - **Tempo**: `TempoClock(...)`, `TempoClock.default.tempo = ...` and `.play(clock)`. One cycle is the loop most parts share (4 beats when it fits), and `setTempo` or `setCPS` keeps the tempo exact.
-- **SynthDefs**: TidalJS's ports (`superhoover`, `supergabber`) are used when the name matches; other SynthDefs become the closest TidalJS synth (by name, such as kick or hat, or by their oscillators: detuned saws are a `supersaw`). The filters, peak equaliser, reverb, distortion and pan after the oscillators become effects (`lpf`, `resonance`, `hpf`, `bpf`, `peak`, `freeverb`, `shape`, `pan`), with their envelopes (`lpenv`, `peakenv`...); `Env.perc`, `Env.adsr`, `Env.asr` and `Env.linen` become `attack`, `hold`, `decay`, `sustainlevel` and `release`; pitch envelopes become `penv` or `pitchenv`. An argument that drives one of them becomes that control, so `\cutoff` in a Pbind becomes `.lpf()`.
+- **SynthDefs**: TidalJS's ports (`superhoover`, `supergabber`) are used when the name matches; other SynthDefs become the closest TidalJS synth (by name, such as kick or hat, or by their oscillators: detuned saws are a `supersaw`). The filters, peak equaliser, reverb, distortion and pan after the oscillators become effects (`lpf`, `resonance`, `hpf`, `bpf`, `peak`, `freeverb`, `shape`, `pan`), with their envelopes (`lpenv`, `peakenv`...); `Env.perc`, `Env.adsr`, `Env.asr` and `Env.linen` become `attack`, `hold`, `decay`, `sustainlevel` and `release`; pitch envelopes become `penv` or `pitchenv`, and an LFO sweeping the pitch (`SinOsc.kr(1).exprange(100, 2e3)`) becomes a vibrato (`vib`, `vibmod`). An argument that drives one of them becomes that control, so `\cutoff` in a Pbind becomes `.lpf()`. Array arguments expand into channels as in SuperCollider: two channels that differ play as two layers, panned left and right. Levels follow SuperCollider's (`amp` and the gains in the SynthDef), and a synth that nothing stops (`{ ... }.play`) is a note as long as each cycle.
 
 Each part loops over its shortest period: its rhythm is a `struct` with weighted steps (`"x@4 x@3 x"`), and each control a mini-notation sequence over its own period. Notes on what could not be converted exactly are written at the top of the code. The test suite converts a gabber track (two SynthDefs and a Ppar of two Pbinds on a TempoClock) and checks that all 336 events of the first minute play at the same times with the same parameters as in SuperCollider.
 
@@ -147,7 +147,7 @@ setOutput(1, false) // as SuperCollider: no master volume and no limiter
 // \pluck (played at line 7): saw, the closest TidalJS synth; its RLPF and Pan2 become effects.
 const pluck = sound("saw")
   .struct("x*4").note("c4 e4 g4 c5").lpf("800 2400 800 2400").pan(0)
-  .resonance(0.174293).attack(0.01).hold(0).release(0.5)
+  .resonance(0.174293).attack(0.01).hold(0).release(0.5).amp(0.266667)
   .fast(4)
 
 // \kick (played at line 8): no SynthDef for it in the file, so the TidalJS synth superkick plays it.

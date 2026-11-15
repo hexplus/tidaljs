@@ -6659,7 +6659,7 @@
                 const wobble = ctx.createOscillator();
                 const depth = ctx.createGain();
                 wobble.frequency.value = clamp(v.vib, 0, 100);
-                depth.gain.value = (isNum(v.vibmod) ? clamp(v.vibmod, 0, 24) : 0.5) * 100;
+                depth.gain.value = (isNum(v.vibmod) ? clamp(v.vibmod, 0, 48) : 0.5) * 100;
                 wobble.connect(depth);
                 for (const param of params) depth.connect(param);
                 wobble.start(time);

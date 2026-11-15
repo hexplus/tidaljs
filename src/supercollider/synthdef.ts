@@ -35,6 +35,10 @@ export interface SynthInfo {
   ampScale: number;
   /** Arguments the analysis could not map. */
   unmapped: Set<string>;
+  /** Two output channels that differ (SinOsc.ar([1, 3])): their controls, left and right. */
+  channels: Fixed[][] | null;
+  /** No envelope ends the sound: it plays until it is freed. */
+  endless: boolean;
   summary: string;
   notes: string[];
 }
@@ -63,6 +67,17 @@ const OSC_SOUND: Record<string, string> = {
 };
 
 const DRIVE = new Set(["tanh", "distort", "softclip", "atan", "clip2"]);
+
+/** The peak level of TidalJS's synths at amp 0.4 (tidal.js SAMPLE_DEFS), to match SuperCollider's levels. */
+export const SOUND_LEVEL: Record<string, number> = {
+  bd: 0.95, sn: 0.6, hh: 0.35, cp: 0.55, oh: 0.3, ch: 0.35, cy: 0.25, arpy: 0.35, sine: 0.45, saw: 0.3, square: 0.25,
+  tri: 0.45, noise: 0.25, pink: 0.35, supersaw: 0.3, supersquare: 0.22, superpwm: 0.35, superreese: 0.35, superzow: 0.3,
+  superchip: 0.3, superfm: 0.4, superstatic: 0.6, superpiano: 0.45, supergong: 0.35, superkick: 0.9, super808: 0.9,
+  superhat: 0.3, supersnare: 0.55, superclap: 0.6,
+};
+
+/** Low-frequency oscillators that can move a pitch (a vibrato). */
+const LFO = new Set(["SinOsc", "FSinOsc", "LFTri", "LFSaw", "LFPar", "LFCub", "LFPulse", "LFNoise0", "LFNoise1", "LFNoise2", "Saw", "Pulse"]);
 
 /** a * control + b, when the expression is that. */
 interface Linear { ctrl: GNode; a: number; b: number }
@@ -128,23 +143,51 @@ const numOr = (v: Value, d: number) => (typeof v === "number" ? v : d);
 const fmt = (n: number) => (Number.isInteger(n) ? String(n) : String(Number(n.toPrecision(6))));
 
 export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo {
-  const info: SynthInfo = {
-    sound: "saw", port: false, fixed: [], roles: new Map(), defaults: new Map(), ampScale: 4,
-    unmapped: new Set(), summary: "", notes: [],
-  };
   const port = PORTS.find(([re]) => re.test(def.name));
-  if (port) {
-    info.sound = port[1];
-    info.port = true;
-    info.ampScale = 1;
-  }
   const graph = interp.graphOf(def);
   if (!graph) {
+    const info = emptyInfo(port);
     info.sound = port ? port[1] : soundByName(def.name) ?? "saw";
     info.summary = "its SynthDef could not be read, so it plays " + info.sound;
     return info;
   }
+  const out = graph.output;
+  // Multichannel output: each channel is analysed; when they differ, both are written.
+  const stereo = Array.isArray(out) && out.length >= 2 && !port;
+  const left = analyseChannel(def, graph, stereo ? (out as Value[])[0] : out, port);
+  if (stereo) {
+    const right = analyseChannel(def, graph, (out as Value[])[1], port);
+    if (left.sound !== right.sound || JSON.stringify(left.fixed) !== JSON.stringify(right.fixed)) {
+      left.channels = [left.fixed, right.fixed];
+      left.fixed = [];
+      left.summary += "; its two channels differ, so it plays twice, panned left and right";
+    } else {
+      // The same signal on both channels: TidalJS's centre pan is 3 dB down, so it is made up.
+      left.ampScale *= Math.SQRT2;
+    }
+    if ((out as Value[]).length > 2) left.notes.push("\\" + def.name + " has more than two channels: the first two are used");
+  }
+  // The level when the events do not set amp.
+  if (!left.port) {
+    const ampDefault = left.roles.has("amp") ? numOr(first(left.defaults.get("amp") ?? 1), 1) : 1;
+    const amp = round(ampDefault * left.ampScale);
+    const where = left.channels ? left.channels : [left.fixed];
+    for (const list of where) list.push(left.roles.has("amp") ? { control: "amp", value: amp, arg: "amp" } : { control: "amp", value: amp });
+  }
+  return left;
+}
+
+function emptyInfo(port: [RegExp, string] | undefined): SynthInfo {
+  return {
+    sound: port ? port[1] : "saw", port: !!port, fixed: [], roles: new Map(), defaults: new Map(), ampScale: 1,
+    unmapped: new Set(), summary: "", notes: [], channels: null, endless: false,
+  };
+}
+
+function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<string, GNode> }, output: Value, port: [RegExp, string] | undefined): SynthInfo {
+  const info = emptyInfo(port);
   for (const [name, c] of graph.controls) info.defaults.set(name, c.inputs.default ?? 0);
+  let gain = 1;
 
   const role = (ctrlValue: Value, control: string, fn: (x: number) => number = (x) => x, js: (x: string) => string = (x) => x): boolean => {
     const l = linear(ctrlValue);
@@ -175,7 +218,7 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
   };
 
   // Walk from the output back through the effects to the oscillators.
-  let node: Value = first(graph.output);
+  let node: Value = first(output);
   const effects: string[] = [];
   let ampEnv: { env: EnvSpec; node: GNode } | null = null;
   for (let guard = 0; guard < 200; guard++) {
@@ -190,9 +233,14 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
       if (env) {
         if (!ampEnv) ampEnv = env;
         else if (!info.port) info.notes.push("\\" + def.name + " has two amplitude envelopes: the last one is used");
+      } else if (typeof mod === "number") {
+        gain *= mod;
       } else if (linear(mod)) {
         const l = linear(mod) as Linear;
-        if (/^(amp|vol|volume|level|gain)$/.test(l.ctrl.name)) role(mod, "amp");
+        if (/^(amp|vol|volume|level|gain)$/.test(l.ctrl.name)) {
+          role(l.ctrl, "amp");
+          gain *= l.a;
+        }
       }
       node = sig;
       continue;
@@ -282,7 +330,7 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
       if (v.kind === "ugen" && OSC_SOUND[v.name] && v.rate !== "kr") {
         oscs.set(v.name, (oscs.get(v.name) ?? 0) + 1);
         if (Array.isArray(v.inputs.freq)) detuned = true;
-        if ((v.name === "SinOsc" || v.name === "Pulse") && containsOsc(v.inputs.freq ?? v.inputs.width)) modulated = true;
+        if ((v.name === "SinOsc" || v.name === "Pulse") && containsOsc(v.name === "Pulse" ? v.inputs.width : v.inputs.freq)) modulated = true;
       }
       Object.values(v.inputs).forEach(visit);
     } else if (v instanceof EnvSpec) {
@@ -293,10 +341,15 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
   if (!info.port) info.sound = soundByName(def.name) ?? soundByOscillators(oscs, detuned, modulated);
 
   // The pitch: how the freq argument reaches the oscillators.
-  if (!info.port || /gabber/i.test(def.name)) pitch(graph.output);
+  if (!info.port || /gabber/i.test(def.name)) pitch(output);
 
-  // The amplitude envelope.
+  // The amplitude envelope; without one that ends, the synth plays until it is freed.
   if (ampEnv && !info.port) envelope(ampEnv);
+  const done = (e: { node: GNode } | null) => e !== null && numOr(first(e.node.inputs.doneAction ?? 0), 0) >= 2;
+  info.endless = !info.port && !done(ampEnv) && !hasDoneAction(output);
+
+  // SuperCollider's level, as TidalJS's amp for this synth.
+  if (!info.port) info.ampScale = (gain * 0.4) / (SOUND_LEVEL[info.sound] ?? 0.35);
 
   // Arguments nothing uses as a TidalJS control.
   for (const name of graph.controls.keys()) {
@@ -332,9 +385,18 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
   function pitch(out: Value) {
     const oscFreq = findOscFreq(out);
     if (!oscFreq) {
-      // No freq argument: an oscillator at a fixed frequency plays that pitch.
-      const fixedFreq = findConstFreq(out);
-      if (fixedFreq !== null && !info.port) fix("freq", round(fixedFreq));
+      // No freq argument: an oscillator at a fixed frequency, or one an LFO moves.
+      const osc = findOsc(out);
+      const f = osc ? first(osc.inputs.freq ?? osc.inputs.carfreq ?? null) : null;
+      if (info.port) return;
+      if (typeof f === "number") { fix("freq", round(f)); return; }
+      const lfo = lfoSweep(f);
+      if (lfo) {
+        fix("freq", round(lfo.center));
+        fix("vib", round(lfo.rate));
+        fix("vibmod", round(lfo.depth));
+        if (lfo.note) info.notes.push(lfo.note);
+      }
       return;
     }
     const f = first(oscFreq);
@@ -342,6 +404,15 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
     const [base, mult] = linear(f.inputs.a) ? [f.inputs.a, f.inputs.b] : linear(f.inputs.b) ? [f.inputs.b, f.inputs.a] : [null, null];
     if (base === null) return;
     const m = first(mult);
+    // freq * lfo.exprange(a, b), freq * (lfo * k).midiratio: a vibrato around the note.
+    const ratio = lfoSweep(m) ?? lfoMidiratio(m);
+    if (ratio && !info.port) {
+      fix("vib", round(ratio.rate));
+      fix("vibmod", round(ratio.depth));
+      if (Math.abs(ratio.center - 1) > 1e-6) info.notes.push("\\" + def.name + " moves its pitch around " + fmt(12 * Math.log2(ratio.center)) + " semitones from the note: the vibrato is centred on the note");
+      if (ratio.note) info.notes.push(ratio.note);
+      return;
+    }
     if (m instanceof GNode && m.kind === "unop" && m.name === "midiratio") {
       // freq * (Env(...) * depth).midiratio
       const { env, depth, ctrl } = scaledEnv(m.inputs.a);
@@ -414,6 +485,84 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
       }
     }
   }
+}
+
+/** An oscillator's frequency swept by an LFO: its centre (geometric), rate and depth in semitones each way. */
+function lfoSweep(v: Value): { center: number; rate: number; depth: number; note?: string } | null {
+  v = first(v);
+  if (!(v instanceof GNode)) return null;
+  const lfoOf = (x: Value): { rate: number; shape: string } | null => {
+    x = first(x);
+    if (x instanceof GNode && x.kind === "ugen" && LFO.has(x.name)) {
+      const rate = first(x.inputs.freq ?? null);
+      if (typeof rate === "number" && rate < 50) return { rate, shape: x.name };
+    }
+    return null;
+  };
+  let lo: number | null = null;
+  let hi: number | null = null;
+  let lfo: { rate: number; shape: string } | null = null;
+  let linearSweep = false;
+  if (v.kind === "unop" && (v.name === "exprange" || v.name === "range")) {
+    lfo = lfoOf(v.inputs.a);
+    lo = numOr(first(v.inputs.lo), NaN);
+    hi = numOr(first(v.inputs.hi), NaN);
+    linearSweep = v.name === "range";
+  } else if (v.kind === "binop" && v.name === "+") {
+    // centre + lfo * depth (SinOsc.kr(rate, 0, depth, centre))
+    for (const [c, rest] of [[v.inputs.a, v.inputs.b], [v.inputs.b, v.inputs.a]] as [Value, Value][]) {
+      const r = first(rest);
+      if (typeof c !== "number" || !(r instanceof GNode) || r.kind !== "binop" || r.name !== "*") continue;
+      const k = typeof r.inputs.b === "number" ? r.inputs.b : typeof r.inputs.a === "number" ? r.inputs.a : null;
+      const l = lfoOf(typeof r.inputs.b === "number" ? r.inputs.a : r.inputs.b);
+      if (k !== null && l) { lfo = l; lo = c - Math.abs(k); hi = c + Math.abs(k); linearSweep = true; }
+    }
+  }
+  if (!lfo || lo === null || hi === null || !(lo > 0) || !(hi > lo)) return null;
+  const notes: string[] = [];
+  if (lfo.shape !== "SinOsc" && lfo.shape !== "FSinOsc") notes.push("a " + lfo.shape + " moving the pitch becomes a sine vibrato");
+  if (linearSweep) notes.push("a pitch sweep that is linear in Hz becomes a vibrato in semitones (the same range, a slightly different curve)");
+  return { center: Math.sqrt(lo * hi), rate: lfo.rate, depth: (12 * Math.log2(hi / lo)) / 2, note: notes.join("; ") || undefined };
+}
+
+/** (lfo * k).midiratio: a vibrato of k semitones. */
+function lfoMidiratio(v: Value): { center: number; rate: number; depth: number; note?: string } | null {
+  if (!(v instanceof GNode) || v.kind !== "unop" || v.name !== "midiratio") return null;
+  const x = first(v.inputs.a);
+  if (!(x instanceof GNode) || x.kind !== "binop" || x.name !== "*") return null;
+  const k = typeof x.inputs.b === "number" ? x.inputs.b : typeof x.inputs.a === "number" ? x.inputs.a : null;
+  const l = first(typeof x.inputs.b === "number" ? x.inputs.a : x.inputs.b);
+  if (k === null || !(l instanceof GNode) || l.kind !== "ugen" || !LFO.has(l.name)) return null;
+  const rate = first(l.inputs.freq ?? null);
+  if (typeof rate !== "number") return null;
+  return { center: 1, rate, depth: Math.abs(k) };
+}
+
+/** The first audio-rate oscillator of a signal. */
+function findOsc(v: Value, seen = new Set<unknown>()): GNode | null {
+  if (v === null || typeof v !== "object" || seen.has(v)) return null;
+  seen.add(v);
+  if (Array.isArray(v)) {
+    for (const x of v) { const r = findOsc(x, seen); if (r) return r; }
+    return null;
+  }
+  if (v instanceof GNode) {
+    if (v.kind === "ugen" && OSC_SOUND[v.name] && v.rate !== "kr") return v;
+    for (const x of Object.values(v.inputs)) { const r = findOsc(x, seen); if (r) return r; }
+  }
+  return null;
+}
+
+/** Does any envelope, Line or XLine free the synth (doneAction 2 or more)? */
+function hasDoneAction(v: Value, seen = new Set<unknown>()): boolean {
+  if (v === null || typeof v !== "object" || seen.has(v)) return false;
+  seen.add(v);
+  if (Array.isArray(v)) return v.some((x) => hasDoneAction(x, seen));
+  if (v instanceof GNode) {
+    if ((v.kind === "env" || v.name === "EnvGen" || v.name === "Line" || v.name === "XLine") && numOr(first(v.inputs.doneAction ?? 0), 0) >= 2) return true;
+    return Object.values(v.inputs).some((x) => hasDoneAction(x, seen));
+  }
+  return false;
 }
 
 function scaledEnv(v: Value): { env: { env: EnvSpec; node: GNode } | null; depth: number; ctrl: { name: string; value: Value } | null } {
@@ -506,23 +655,6 @@ function findOscFreq(v: Value, seen = new Set<unknown>()): Value | null {
   return null;
 }
 
-function findConstFreq(v: Value, seen = new Set<unknown>()): number | null {
-  if (v === null || typeof v !== "object" || seen.has(v)) return null;
-  seen.add(v);
-  if (Array.isArray(v)) {
-    for (const x of v) { const r = findConstFreq(x, seen); if (r !== null) return r; }
-    return null;
-  }
-  if (v instanceof GNode) {
-    if (v.kind === "ugen" && OSC_SOUND[v.name] && v.rate !== "kr") {
-      const f = first(v.inputs.freq ?? null);
-      if (typeof f === "number") return f;
-    }
-    for (const x of Object.values(v.inputs)) { const r = findConstFreq(x, seen); if (r !== null) return r; }
-  }
-  return null;
-}
-
 function mentionsControl(v: Value, name: string, seen = new Set<unknown>()): boolean {
   if (v === null || typeof v !== "object" || seen.has(v)) return false;
   seen.add(v);
@@ -539,7 +671,7 @@ function containsOsc(v: Value | undefined, seen = new Set<unknown>()): boolean {
   seen.add(v);
   if (Array.isArray(v)) return v.some((x) => containsOsc(x, seen));
   if (v instanceof GNode) {
-    if (v.kind === "ugen" && (OSC_SOUND[v.name] || v.name.startsWith("LFNoise"))) return true;
+    if (v.kind === "ugen" && OSC_SOUND[v.name] && v.rate !== "kr") return true;
     return Object.values(v.inputs).some((x) => containsOsc(x, seen));
   }
   return false;

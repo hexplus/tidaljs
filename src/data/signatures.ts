@@ -314,7 +314,7 @@ const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
     pcurve: ['Curve of the pitch envelope', '0 straight, negative fast at first'],
     vib: ['Vibrato speed', 'Hz, e.g. 5'],
     vibrato: ['Same as vib', 'Hz'],
-    vibmod: ['Vibrato depth', 'semitones each way, default 0.5'],
+    vibmod: ['Vibrato depth', 'semitones each way, default 0.5, up to 48'],
     portamento: ['Glide from the previous note', 'seconds, e.g. 0.1'],
     glide: ['Same as portamento', 'seconds'],
     peak: ['Peak equaliser', 'centre in Hz, e.g. 1000'],

@@ -54,7 +54,7 @@ export function SketchBar(library: Library, showLibrary: () => void) {
     item("Export sketch (.js)", "Download the editor's code as a .js file", library.exportCurrent),
     item("Export all (.json)", "Download every saved sketch as one .json file", library.exportAll),
     item("Import file…", "Open a .js or .txt file, or add the sketches of a .json library", () => library.chooseFile()),
-    item("Import SuperCollider (.scd)…", "Convert a SuperCollider file to TidalJS code: SynthDefs, Pbinds, Ppar, Pdef, routines, tempo", library.chooseSuperCollider),
+    item("Import SuperCollider (.scd) (alpha)…", "Convert a SuperCollider file to TidalJS code (alpha: not everything converts yet): SynthDefs, Pbinds, Ppar, Pdef, routines, tempo", library.chooseSuperCollider),
   ]);
 
   const root = div({ class: "sketchbar", role: "group", "aria-label": "Sketch" }, [

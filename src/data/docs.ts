@@ -838,7 +838,7 @@ Object.assign(DOCS, {
     pcurve: D('The curve of the pitch envelope, as in SuperCollider: 0 is a straight line, negative values move fast at first (like a drum), positive slow at first.', 'sound("sine*4").note("c3").legato(1).penv(24).pdecay(0.2).pcurve("<0 -6>")', undefined, ['penv']),
     vib: D('Vibrato: the pitch wobbles this many times a second, vibmod semitones each way (0.5 by default).', 'sound("tri").note("c4 e4").legato(1).vib(5).vibmod(0.3)', undefined, ['vibmod']),
     vibrato: D('The same as vib().', undefined, undefined, ['vib']),
-    vibmod: D('The depth of the vibrato in semitones each way. Has an effect together with vib().', 'sound("saw").note("c3").legato(1).vib(6).vibmod("<0.2 1>")', undefined, ['vib']),
+    vibmod: D('The depth of the vibrato in semitones each way (up to 48, four octaves: a slow vib with a large vibmod is a siren-like sweep). Has an effect together with vib().', 'sound("saw").note("c3").legato(1).vib(6).vibmod("<0.2 1>")', undefined, ['vib']),
     portamento: D('Glides into each note from the previous note of the same sound (in the same orbit), over this many seconds.', 'sound("supersaw*4").note("c3 c4 g3 eb4").legato(1).portamento(0.08)', 'Notes keep their own voices, so long overlapping notes play together while the new one glides.', ['pitchenv']),
     glide: D('The same as portamento().', undefined, undefined, ['portamento']),
 

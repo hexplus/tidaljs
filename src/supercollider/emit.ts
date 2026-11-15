@@ -8,7 +8,7 @@
 import { CONTROL_NAMES } from "../data/signatures.ts";
 import { describeText, degreeToKey, gcd, SCALES, type Interpreter, type PlayRecord } from "./interpreter.ts";
 import { advanceOf, DONE, ownDelta, Stream } from "./patterns.ts";
-import { analyseSynthDef, soundByName, TIDAL_SOUNDS, type SynthInfo } from "./synthdef.ts";
+import { analyseSynthDef, soundByName, TIDAL_SOUNDS, type Fixed, type SynthInfo } from "./synthdef.ts";
 import { RandToken, RestV, SCEvent, ScaleV, Sym, isPattern, type Value } from "./values.ts";
 
 /** How far the program is played to find its loops, in beats. */
@@ -34,6 +34,8 @@ interface Part {
   events: SimEvent[];
   /** The time the stream ended (finite patterns), or null. */
   end: number | null;
+  /** One synth that plays until it is stopped. */
+  drone: boolean;
 }
 
 const CONTROLS = new Set(CONTROL_NAMES);
@@ -90,17 +92,6 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     list.push(e);
     bySrc.set(e.src, list);
   }
-  const parts: Part[] = [];
-  for (const [src, list] of bySrc) {
-    list.sort((a, b) => a.t - b.t);
-    const instruments = new Set(list.map((e) => e.instrument));
-    const instrument = instruments.size === 1 ? list[0].instrument : "";
-    parts.push({ name: src, line: list[0].line, instrument, events: list, end: anyInfinite ? null : finiteEnd });
-  }
-  if (!anyInfinite && finiteEnd !== null && parts.length) {
-    note("In SuperCollider this plays once (" + fmt(finiteEnd) + (finiteEnd === 1 ? " beat" : " beats") + "); in TidalJS it loops.");
-  }
-
   // Synths.
   const synthCache = new Map<string, SynthInfo | null>();
   const synthFor = (name: string): SynthInfo | null => {
@@ -111,8 +102,29 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     return synthCache.get(name) ?? null;
   };
 
+  // A synth started once that nothing ends ({ ... }.play, Synth(\default)) plays until it is stopped.
+  const isDrone = (list: SimEvent[]) => list.length === 1 && list[0].ev.get("__top") === true
+    && (list[0].instrument === "default" || synthFor(list[0].instrument)?.endless === true);
+
+  const parts: Part[] = [];
+  let finiteParts = 0;
+  for (const [src, list] of bySrc) {
+    list.sort((a, b) => a.t - b.t);
+    const instruments = new Set(list.map((e) => e.instrument));
+    const instrument = instruments.size === 1 ? list[0].instrument : "";
+    const drone = isDrone(list);
+    if (!drone) finiteParts++;
+    parts.push({ name: src, line: list[0].line, instrument, events: list, end: anyInfinite ? null : finiteEnd, drone });
+  }
+  if (!anyInfinite && finiteEnd !== null && finiteParts > 0) {
+    note("In SuperCollider this plays once (" + fmt(finiteEnd) + (finiteEnd === 1 ? " beat" : " beats") + "); in TidalJS it loops.");
+  }
+  if (parts.some((p) => p.drone)) {
+    note("A synth that nothing stops plays until you stop it in SuperCollider; here its note restarts every cycle.");
+  }
+
   // Write each part.
-  const written = parts.map((part) => writePart(part, synthFor, note));
+  const written = parts.map((part) => writePart(part, synthFor, note, tempo));
   const valid = written.filter((w): w is WrittenPart => w !== null);
 
   // Beats per cycle: the period most parts share (4, a bar, when it fits).
@@ -256,9 +268,15 @@ interface Step {
   event: SimEvent | null;
 }
 
-function writePart(part: Part, synthFor: (name: string) => SynthInfo | null, note: (s: string) => void): WrittenPart | null {
-  const evs = part.events;
+function writePart(part: Part, synthFor: (name: string) => SynthInfo | null, note: (s: string) => void, tempo: number): WrittenPart | null {
+  let evs = part.events;
   if (evs.length === 0) return null;
+  if (part.drone) {
+    // One long note per loop, as long as the loop; LFOs line up again where it restarts.
+    const length = droneBeats(synthFor(part.instrument), tempo);
+    evs = [{ ...evs[0], t: 0, delta: length, sustain: length }];
+    part = { ...part, events: evs, end: length };
+  }
   const varying = part.instrument === "";
   const instruments = [...new Set(evs.map((e) => e.instrument))];
   const infos = new Map(instruments.map((i) => [i, synthFor(i)]));
@@ -271,10 +289,11 @@ function writePart(part: Part, synthFor: (name: string) => SynthInfo | null, not
   };
   const mainInfo = varying ? null : infos.get(part.instrument) ?? null;
   const comment: string[] = [];
-  const label = varying ? "part" : part.instrument;
+  const label = varying ? "part" : /^anonymous/.test(part.instrument) ? "synth" : part.instrument;
   if (!varying) {
     const inst = part.instrument;
-    if (mainInfo) comment.push("\\" + inst + " (played at line " + part.line + "): " + mainInfo.summary + ".");
+    if (mainInfo && /^anonymous/.test(inst)) comment.push("The function played at line " + part.line + ": " + mainInfo.summary + ".");
+    else if (mainInfo) comment.push("\\" + inst + " (played at line " + part.line + "): " + mainInfo.summary + ".");
     else if (inst === "default") {
       comment.push("SuperCollider's \\default synth (played at line " + part.line + "): a saw with a low-pass filter here.");
     } else if (TIDAL_SOUNDS.has(inst)) comment.push("\\" + inst + " (played at line " + part.line + ").");
@@ -353,18 +372,40 @@ function writePart(part: Part, synthFor: (name: string) => SynthInfo | null, not
     if (written !== null) lines.push("." + key + "(" + written + ")");
   }
 
-  // The SynthDef's effects.
+  // A drone holds for the whole loop (TidalJS's synths fade out on their own without a length).
+  if (part.drone && !keys.includes("legato")) lines.push(".legato(1)");
+  // Where the note restarts, the old one fades out as the new one fades in (Function.play fades in over 0.02 s too).
+  const fixedControls = new Set([...(mainInfo?.fixed ?? []), ...(mainInfo?.channels?.flat() ?? [])].map((f) => f.control));
+  if (part.drone && !fixedControls.has("attack")) lines.push(".attack(0.02)");
+  if (part.drone && !fixedControls.has("release")) lines.push(".release(0.02)");
+
+  // The SynthDef's effects; with two different channels, what they share, then each one.
+  let channelFns: string[] | null = null;
   if (mainInfo) {
     const fromEvents = new Set(keys);
-    const done = new Set<string>();
-    for (const f of mainInfo.fixed) {
-      if (fromEvents.has(f.control) || done.has(f.control)) continue;
-      if (f.arg && evs.some((e) => e.ev.has(f.arg as string))) continue;
-      done.add(f.control);
-      lines.push("." + f.control + "(" + literal(f.value) + ")");
+    const keep = (list: Fixed[]) => {
+      const done = new Set<string>();
+      return list.filter((f) => {
+        if (fromEvents.has(f.control) || done.has(f.control)) return false;
+        if (f.arg && evs.some((e) => e.ev.has(f.arg as string))) return false;
+        done.add(f.control);
+        return true;
+      });
+    };
+    const same = (a: Fixed, b: Fixed) => a.control === b.control && JSON.stringify(a.value) === JSON.stringify(b.value);
+    if (mainInfo.channels) {
+      const [l, r] = mainInfo.channels.map(keep);
+      const shared = l.filter((f) => r.some((g) => same(f, g)));
+      for (const f of shared) lines.push("." + f.control + "(" + literal(f.value) + ")");
+      channelFns = [[l, "-1"], [r, "1"]].map(([list, pan]) => "x => x" + (list as Fixed[]).filter((f) => !shared.some((g) => same(f, g)))
+        .map((f) => "." + f.control + "(" + literal(f.value) + ")").join("") + ".pan(" + pan + ")");
+    } else {
+      for (const f of keep(mainInfo.fixed)) lines.push("." + f.control + "(" + literal(f.value) + ")");
     }
   } else if (!varying && part.instrument === "default") {
     if (!keys.includes("lpf")) lines.push(".lpf(4000)");
+    // SuperCollider's default synth: three VarSaws at 0.3 times amp (0.1 by default).
+    if (!keys.includes("amp")) lines.push(".amp(0.12)");
   }
 
   // Group the controls: up to four per line.
@@ -378,7 +419,22 @@ function writePart(part: Part, synthFor: (name: string) => SynthInfo | null, not
     } else cur += l;
   }
   if (cur) body.push(cur);
+  if (channelFns) {
+    // layer applies each function to the pattern: the left channel and the right one.
+    return { label, comment, body: "layer([\n  " + channelFns.join(",\n  ") + "\n], " + body.join("\n  ") + ")", period };
+  }
   return { label, comment, body: body.join("\n  "), period };
+}
+
+/** A drone's loop, in beats: 4 or more, so that its LFOs (vib) complete whole cycles. */
+function droneBeats(info: SynthInfo | null, tempo: number): number {
+  const lists = info?.channels ?? [info?.fixed ?? []];
+  const rates = lists.flat().filter((f) => f.control === "vib" && typeof f.value === "number").map((f) => f.value as number);
+  for (let beats = 4; beats <= 64; beats += 4) {
+    const seconds = beats / tempo;
+    if (rates.every((r) => Math.abs(r * seconds - Math.round(r * seconds)) < 1e-6)) return beats;
+  }
+  return 4;
 }
 
 const GAP = Symbol("gap") as unknown as Value;
@@ -410,7 +466,7 @@ function controlsOf(e: SimEvent, info: SynthInfo | null, note: (s: string) => vo
   if (amp === undefined && typeof db === "number") amp = Math.pow(10, db / 20);
   if (amp === undefined && db instanceof RandToken) amp = db.map((x) => Math.pow(10, x / 20), "10 ** (x / 20)");
   if (amp !== undefined && amp !== null) {
-    const factor = dirt ? 1 : info ? info.ampScale : TIDAL_SOUNDS.has(e.instrument) ? 1 : 4;
+    const factor = dirt ? 1 : info ? info.ampScale : TIDAL_SOUNDS.has(e.instrument) ? 1 : e.instrument === "default" ? 1.2 : 4;
     out.set("amp", scaleCell(amp, factor));
   }
   const pan = ev.get("pan");
