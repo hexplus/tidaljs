@@ -8,6 +8,8 @@
  * cycles, which cycles something happens in, or what each event sounds like.
  */
 
+import { CONTROL_NAMES } from './signatures.ts';
+
 export interface Doc {
     /** What it does, in a few sentences. */
     about: string;
@@ -21,7 +23,7 @@ export interface Doc {
 
 const D = (about: string, example?: string, tip?: string, see?: string[]): Doc => ({ about, example, tip, see });
 
-const FN_ARG = 'The function receives the pattern and returns a changed one, e.g. x => x.fast(2) or x => x.speed(2).gain(0.8).';
+const FN_ARG = 'The function receives the pattern and returns a changed one, e.g. x => x.fast(2) or x => x.speed(2).gain(0.95).';
 
 /** Functions, methods, controls and signals, by name. */
 export const DOCS: Record<string, Doc> = {
@@ -35,11 +37,11 @@ export const DOCS: Record<string, Doc> = {
     s: D('Short name for sound(), as in TidalCycles: d1 $ s "bd sn".', 's("bd sn")', undefined, ['sound']),
     stack: D(
         'Plays several patterns at the same time, all sharing the same cycle. This is how you build a full groove: drums, bass and chords each in their own pattern, stacked into one.',
-        'stack([\n  sound("bd*4"),\n  sound("~ cp"),\n  sound("hh*8").gain(0.5)\n])',
+        'stack([\n  sound("bd*4"),\n  sound("~ cp"),\n  sound("hh*8").gain(0.84)\n])',
         'Effects after stack([...]) apply to every layer: stack([...]).room(0.3).',
         ['layer', 'overlay', 'superimpose'],
     ),
-    layer: D('The same as stack(): plays every pattern at the same time.', 'layer([sound("bd*2"), sound("hh*4")])', undefined, ['stack']),
+    layer: D('Tidal\'s layer: applies each function of a list to the pattern and plays the results together, as layer([f, g], p) = stack([f(p), g(p)]). Given patterns instead, it stacks them like stack().', 'layer([x => x, x => x.fast(2).speed(2)], sound("bd sn"))', undefined, ['stack', 'superimpose']),
     cat: D(
         'Concatenates patterns, one whole cycle each: the first pattern plays in cycle 0, the second in cycle 1, and so on, then it starts again. Tidal calls this cat (or slowcat).',
         'cat([sound("bd sn"), sound("hh*4"), sound("cp ~ cp")])',
@@ -68,7 +70,7 @@ export const DOCS: Record<string, Doc> = {
     ),
     euclidFull: D(
         'Plays one pattern on the hits of a Euclidean rhythm and another on the steps it leaves empty, so every step plays something. As a global it takes both patterns; as a method, the pattern it is called on plays the hits.',
-        'euclidFull(3, 8, sound("bd"), sound("hh"))\nsound("bd").euclidFull(3, 8, sound("hh").gain(0.5))',
+        'euclidFull(3, 8, sound("bd"), sound("hh"))\nsound("bd").euclidFull(3, 8, sound("hh").gain(0.84))',
         undefined,
         ['euclid', 'euclidInv'],
     ),
@@ -117,24 +119,19 @@ export const DOCS: Record<string, Doc> = {
         ['fast', 'speed'],
     ),
     rev: D('Reverses each cycle: the last event of the cycle plays first. The cycles themselves keep their order.', 'sound("arpy*4").note("c e g b").rev()', undefined, ['palindrome', 'iterBack']),
-    ply: D(
-        'Repeats each event n times within its own span, so "bd sn" with ply(2) becomes "[bd bd] [sn sn]". The factor can be a pattern.',
-        'sound("bd ~ sn hh").ply("<1 2 3>")',
-        undefined,
-        ['fast', 'chop'],
-    ),
+    ply: D('Repeats each event n times within its own span, as Tidal\'s ply: n can be a fraction (2.5 makes two and a half) or a pattern.', 'sound("bd sn").ply("<1 2 2.5>")', undefined, ['plyWith', 'stutter']),
     iter: D(
-        'Divides the cycle into n parts and starts each cycle one part further in: with iter(4), "a b c d" plays as "a b c d", then "b c d a", "c d a b", "d a b c".',
-        'sound("arpy*4").note("c e g b").iter(4)',
+        'Tidal\'s iter: plays the pattern n times, each time starting one nth further into it, one per cycle (a b c d, then b c d a...). A pattern that changes each cycle is heard n times per change.',
+        'sound("bd hh sn cp").iter(4)',
         undefined,
-        ['iterBack', 'rot', 'chunk'],
+        ['iterBack', 'rot'],
     ),
-    iterBack: D('Like iter(), but moving backwards: "a b c d", then "d a b c", "c d a b"...', 'sound("bd hh sn cp").iterBack(4)', undefined, ['iter']),
+    iterBack: D('Tidal\'s iter\': like iter(), moving backwards (a b c d, then d a b c...).', 'sound("bd hh sn cp").iterBack(4)', undefined, ['iter']),
     linger: D(
-        'Repeats the first part of each cycle to fill the cycle: linger(0.25) plays the first quarter four times. A negative fraction repeats the end of the cycle instead. Great for stutters and build-ups.',
-        'sound("bd [~ bd] sn hh*2").linger("<1 0.5 0.25>")',
+        'Tidal\'s linger: zooms into the first part of each cycle (linger(0.25): the first quarter) and plays it faster to fill the cycle; a negative value takes the end, reversed. Patterns that change each cycle take that part from the following cycles.',
+        'sound("bd sn hh cp arpy*2 ~ cp").linger("<0.25 0.5 1>")',
         undefined,
-        ['ply', 'chop', 'iter'],
+        ['zoom', 'trunc'],
     ),
     rot: D(
         'Keeps the rhythm but shifts the values along the events of each cycle: with rot(1), every event takes the value of the next one. The structure stays, the order of sounds or notes rotates.',
@@ -144,7 +141,7 @@ export const DOCS: Record<string, Doc> = {
     ),
     late: D(
         'Shifts the pattern later in time by a number of cycles: late(0.25) moves everything a quarter of a cycle later. Events that move past the end of the cycle appear at the start of the next one.',
-        'sound("bd sn").superimpose(x => x.late(0.125).gain(0.5))',
+        'sound("bd sn").superimpose(x => x.late(0.125).gain(0.84))',
         'Tidal writes this as 0.25 ~> pattern.',
         ['early', 'off', 'nudge'],
     ),
@@ -157,16 +154,11 @@ export const DOCS: Record<string, Doc> = {
         ['stretch', 'within', 'fast'],
     ),
     stretch: D('Zooms each cycle so its events fill the whole cycle, removing silence at the start and the end.', 'sound("~ ~ bd sn").stretch()', undefined, ['compress']),
-    swingBy: D(
-        'Adds swing: the cycle is divided into n slices and the second half of each slice is delayed by x (a fraction of the slice). swingBy(1/3, 4) delays every other eighth note.',
-        'sound("hh*8").swingBy(1/3, 4)',
-        undefined,
-        ['swing'],
-    ),
+    swingBy: D('Swing, as Tidal\'s swingBy x n = inside n (within (0.5, 1) (x ~>)): in each 1/n of a cycle, the second half plays x of a slice later.', 'sound("hh*8").swingBy(1/3, 4)', undefined, ['swing', 'inside']),
     swing: D('Swing with a fixed amount of one third: swing(4) is swingBy(1/3, 4). The number of slices can be a pattern.', 'sound("hh*8").swing(4).overlay("bd ~ sn ~")', undefined, ['swingBy']),
     off: D(
         'Plays a copy of the pattern, shifted later by a time and changed by a function, on top of the original. A classic Tidal way to make echoes and counter-melodies.',
-        'sound("arpy*4").note("c e g b").off(0.125, x => x.up(12).gain(0.5))',
+        'sound("arpy*4").note("c e g b").off(0.125, x => x.add(note(12)).gain(0.84))',
         FN_ARG,
         ['superimpose', 'late', 'jux'],
     ),
@@ -197,14 +189,14 @@ export const DOCS: Record<string, Doc> = {
         ['whenmod', 'while', 'compress'],
     ),
     chunk: D(
-        'Divides the cycle into n parts and applies the function to one part per cycle, in turn: part 0 in cycle 0, part 1 in cycle 1, and so on.',
-        'sound("bd sn hh cp").chunk(4, x => x.hurry(2))',
+        'Tidal\'s chunk: divides cycles into n parts and applies the function to one part per cycle, in turn. A negative n goes backwards, from the last part (Tidal deprecated its chunk\' for this).',
+        'sound("bd sn hh cp").chunk("<4 -4>", x => x.hurry(2))',
         FN_ARG,
-        ['within', 'iter', 'every'],
+        ['within', 'iter'],
     ),
     while: D(
         'Applies a function wherever a boolean pattern is true: "1 0" changes the first half of each cycle and leaves the second.',
-        'sound("hh*8").while("1 0 0 1", x => x.gain(0.3))',
+        'sound("hh*8").while("1 0 0 1", x => x.gain(0.74))',
         FN_ARG,
         ['within', 'struct'],
     ),
@@ -214,12 +206,12 @@ export const DOCS: Record<string, Doc> = {
 
     // ---------------- Randomness ----------------
     sometimesBy: D(
-        'Applies a function to each event with a probability between 0 and 1. The randomness depends on the time of the event, so it repeats the same way every time you play.',
+        'Applies a function to events at random, each with the given probability (a number or a pattern), as Tidal\'s sometimesBy: the events are picked first, then the function changes them, so it may change their rhythm. It uses the same random numbers as degradeBy.',
         'sound("hh*8").sometimesBy(0.3, x => x.speed(2))',
         FN_ARG,
-        ['sometimes', 'often', 'rarely', 'degradeBy'],
+        ['sometimes', 'sometimesByAfter', 'degradeBy'],
     ),
-    sometimes: D('Applies a function to about half of the events, chosen at random.', 'sound("hh*8").sometimes(x => x.gain(0.3))', FN_ARG, ['sometimesBy', 'often', 'rarely']),
+    sometimes: D('Applies a function to about half of the events, chosen at random.', 'sound("hh*8").sometimes(x => x.gain(0.74))', FN_ARG, ['sometimesBy', 'often', 'rarely']),
     often: D('Applies a function to about 75% of the events.', 'sound("hh*8").often(x => x.lpf(2000))', FN_ARG, ['sometimes', 'almostAlways']),
     rarely: D('Applies a function to about 25% of the events.', 'sound("bd*8").rarely(x => x.speed(2))', FN_ARG, ['sometimes', 'almostNever']),
     almostAlways: D('Applies a function to about 90% of the events.', 'sound("hh*8").almostAlways(x => x.lpf(900))', FN_ARG, ['often']),
@@ -239,14 +231,9 @@ export const DOCS: Record<string, Doc> = {
     ),
     scramble: D('Divides each cycle into n parts and plays n parts chosen at random, so some parts can repeat and others be skipped.', 'sound("bd sn hh cp").scramble(4)', undefined, ['shuffle', 'bite']),
     shuffle: D('Divides each cycle into n parts and plays all of them in a random order, each once.', 'sound("bd sn hh cp").shuffle(4)', undefined, ['scramble', 'bite']),
-    choose: D(
-        'Picks one value at random from a list when the code runs. Every time you press Play (or the code updates) the pick can change; it does not change from cycle to cycle.',
-        'sound(choose(["bd*2 sn", "bd sn*2"]))',
-        'For random choices that change per cycle, use "[a | b]" in mini-notation or randcat().',
-        ['wchoose', 'cycleChoose', 'randcat'],
-    ),
-    wchoose: D('Picks a value at random with weights, when the code runs: [["bd", 3], ["sn", 1]] picks bd three times as often as sn.', 'sound(wchoose([["bd*4", 3], ["bd*8", 1]]))', undefined, ['choose']),
-    cycleChoose: D('Picks a value from a list by the current cycle number when the code runs, so re-running it later gives the next value.', 'sound("saw").vowel(cycleChoose(["a", "e", "i"]))', undefined, ['choose']),
+    choose: D('A random value from the list at every event, as Tidal\'s choose (a signal: chooseBy(rand, list)).', 'sound("arpy*8").n(choose([0, 2, 4, 7]))', 'segment it to choose on its own rhythm: choose(["bd", "sn"]).segment(4).', ['chooseBy', 'wchoose', 'cycleChoose']),
+    wchoose: D('A random value from the list at every event, with weights: [["bd", 3], ["sn", 1]] picks bd three times as often (Tidal\'s wchoose).', 'sound(wchoose([["bd", 3], ["sn", 1]]).segment(8))', undefined, ['choose', 'wchooseBy']),
+    cycleChoose: D('One random value from the list per cycle (Tidal\'s cycleChoose = segment 1 . choose).', 'sound("saw").note("c3").vowel(cycleChoose(["a", "e", "i"]))', undefined, ['choose']),
 
     // ---------------- Rearranging ----------------
     bite: D(
@@ -257,22 +244,17 @@ export const DOCS: Record<string, Doc> = {
     ),
     fitment: D('The same as bite().', 'sound("bd sn hh cp").fitment(4, "0 0 2 1")', undefined, ['bite']),
     chop: D(
-        'Cuts each sound into n equal parts that play one after the other in the event\'s time. On a long sample, each part starts further into the recording, which gives granular, glitchy textures.',
-        'sound("breaks125").chop(16).linger("<1 0.25>")',
-        'Works best with recorded samples (see samples()). The number of parts can be a pattern.',
-        ['striate', 'begin', 'linger'],
-    ),
-    striate: D(
-        'Plays the pattern n times per cycle; each time, every sound plays a different slice of itself. Unlike chop(), the slices of different sounds are interleaved.',
-        'sound("bd sn").striate(4)',
+        'Cuts each event into n parts, each playing the next slice of the sound (Tidal\'s chop): an event with begin and end is sliced within them. Events longer than a cycle are cut too.',
+        'sound("breaks125").loopAt(2).chop(16)',
         undefined,
-        ['chop'],
+        ['striate', 'slice', 'begin'],
     ),
+    striate: D('Plays the pattern n times per cycle, each time the next slice of every sound (within its own begin and end), interlacing the slices: Tidal\'s striate.', 'sound("breaks125 arpy").striate(4)', undefined, ['chop', 'striateBy']),
 
     // ---------------- Composition ----------------
     superimpose: D(
         'Plays the pattern and a changed copy of it at the same time. Good for octave doubling, echoes or thickening a part.',
-        'sound("arpy*4").note("c e g b").superimpose(x => x.up(12).gain(0.5))',
+        'sound("arpy*4").note("c e g b").superimpose(x => x.add(note(12)).gain(0.84))',
         FN_ARG,
         ['off', 'jux', 'stack'],
     ),
@@ -286,10 +268,10 @@ export const DOCS: Record<string, Doc> = {
     ),
     juxBy: D('Like jux(), but panned only part of the way: 0 keeps both in the centre, 1 is fully left and right.', 'sound("hh*8").juxBy(0.5, x => x.fast(2))', FN_ARG, ['jux']),
     euclid: D(
-        'Plays the pattern on k hits spread as evenly as possible over n steps: a Euclidean rhythm. Many traditional rhythms are Euclidean: (3,8) is the tresillo, (5,8) the cinquillo. The rotation shifts the hits along the steps.',
-        'sound("bd").euclid(3, 8)\nsound("cp").euclid(2, 8, 2)',
-        'In mini-notation write "bd(3,8)" or "bd(3,8,2)".',
-        ['euclidInv', 'euclidFull', 'struct'],
+        'A Euclidean rhythm: k hits spread as evenly as possible over n steps, rotated by the third number; each hit plays a whole cycle of the pattern squeezed into its step, as Tidal\'s euclid.',
+        'sound("bd").euclid(3, 8)',
+        'euclid(5, 8) and euclid(7, 16) are classic grooves. k and n can be patterns.',
+        ['euclidInv', 'euclidFull', 'necklace'],
     ),
     euclidInv: D('Plays on the steps a Euclidean rhythm leaves empty, the negative of euclid().', 'sound("hh").euclidInv(3, 8)', undefined, ['euclid', 'euclidFull']),
     nTake: D(
@@ -314,12 +296,12 @@ export const DOCS: Record<string, Doc> = {
     ),
     cosine: D('A sine wave shifted by a quarter cycle: it starts at its peak (1) and falls. Use it with sine for two values moving out of step.', 'sound("hh*8").pan(cosine.range(-1, 1))', undefined, ['sine']),
     saw: D('A ramp that rises from 0 to 1 over each cycle, then jumps back. Good for sweeps that start over every cycle.', 'sound("arpy*8").speed(saw.range(1, 2))', 'Inside a sound string, saw is a sawtooth synth instead.', ['isaw', 'sine']),
-    isaw: D('A ramp that falls from 1 to 0 over each cycle: the inverse of saw.', 'sound("hh*16").gain(isaw.range(0.2, 1))', undefined, ['saw']),
+    isaw: D('A ramp that falls from 1 to 0 over each cycle: the inverse of saw.', 'sound("hh*16").gain(isaw.range(0.67, 1))', undefined, ['saw']),
     tri: D('A triangle wave: rises from 0 to 1 in the first half of the cycle and falls back in the second.', 'sound("saw*8").lpf(tri.range(400, 2400))', 'Inside a sound string, tri is a triangle synth instead.', ['sine', 'saw']),
     square: D('A square wave: 0 for the first half of the cycle and 1 for the second.', 'sound("hh*8").pan(square.range(-0.7, 0.7))', 'Inside a sound string, square is a square-wave synth instead.', ['tri']),
     rand: D(
         'A random value from 0 to 1, different at every moment but the same each time that moment is played. Use it to vary controls.',
-        'sound("hh*16").gain(rand.range(0.3, 1))',
+        'sound("hh*16").gain(rand.range(0.74, 1))',
         undefined,
         ['irand', 'perlin', 'degradeBy'],
     ),
@@ -331,7 +313,7 @@ export const DOCS: Record<string, Doc> = {
         undefined,
         ['segment', 'quantise'],
     ),
-    quantise: D('Rounds numeric values to the nearest whole number, e.g. to turn a signal into notes.', 'sound("arpy*8").note(sine.range(0, 12).segment(8).quantise())', undefined, ['range', 'smooth']),
+    quantise: D('Rounds numbers to steps of 1/n (whole numbers by default), as Tidal\'s quantise; halves go to the even neighbour, as Haskell\'s round.', 'sound("arpy*8").note(sine.range(0, 12).segment(8).quantise())', undefined, ['range', 'qfloor']),
     quantize: D('The same as quantise().', undefined, undefined, ['quantise']),
     smooth: D('Turns a stepped numeric pattern into a continuous one that glides between the values. Useful for slides of filters or volumes.', 'sound("saw*16").lpf(rand.range(300, 3000).segment(2).smooth())', undefined, ['range']),
     bus: D(
@@ -349,13 +331,8 @@ export const DOCS: Record<string, Doc> = {
         'Chords: root\'name\'modifiers, e.g. "e\'min7\'i" for the first inversion of E minor seventh.',
         ['n', 'up', 'scale', 'chord', 'midinote'],
     ),
-    n: D(
-        'Chooses the variation of a sound: for a sample bank, the file number (counting from 0); for synth drums, a slightly different version. bd:3 in a sound string is the same as .n(3).',
-        'sound("hh*8").n("0 .. 7")',
-        'In Tidal, n is also used for notes on synths; here use note() for pitch.',
-        ['note', 'sound', 'nTake'],
-    ),
-    up: D('Transposes by a number of semitones: 12 is an octave up, -7 a fifth down. Works on notes and on samples.', 'sound("arpy").note("c e g").up("<0 5 7>")', undefined, ['note', 'speed']),
+    n: D('For banks of samples and drums (bd, sn, hh...), picks one: n(3) is the fourth. For synths (sine, saw, the super... synths), n is the note in semitones from middle C, as in SuperDirt (where the note is note, else n).', 'sound("superpiano*4").n("0 4 7 12")', undefined, ['note', 'sound']),
+    up: D('Tidal\'s up: the same as note(). To transpose notes, add to them: .add(note(12)) is an octave up.', 'sound("arpy").up("0 4 7")', 'In Tidal, up = note, so .note("c e").up(12) replaces the notes; use .add(note(12)) to transpose.', ['note', 'add']),
     freq: D('Sets the pitch directly as a frequency in Hz. 440 is the A above middle C.', 'sound("sine").freq("220 330 440 660")', undefined, ['note', 'midinote']),
     midinote: D('Sets the pitch as a MIDI note number: 60 is middle C, 69 is A440, one step per semitone.', 'sound("saw").midinote("48 55 60 63")', undefined, ['note', 'freq']),
     scale: D(
@@ -364,7 +341,6 @@ export const DOCS: Record<string, Doc> = {
         'Hover a scale name to see its notes. scaleList() returns all the names.',
         ['note', 'chord', 'arp', 'scaleList'],
     ),
-    scaleP: D('The same as scale().', undefined, undefined, ['scale']),
     scaleList: D('Returns the names of every scale scale() knows: major, minor, the church modes, pentatonics, blues and many more.', 'scaleList()', undefined, ['scale']),
     chord: D(
         'A pattern of chords written as root\'name, e.g. "c\'maj e\'min7". Each chord plays all its notes at once. Add \'i to invert, \'o to open the voicing, or a number for the note count.',
@@ -374,10 +350,10 @@ export const DOCS: Record<string, Doc> = {
     ),
     chordList: D('Returns the names of every chord: major, minor, maj7, dom7, min7, dim, aug, sus2, sus4 and more.', 'chordList()', undefined, ['chord']),
     arp: D(
-        'Arpeggiates chords: plays their notes one after another inside the chord\'s step instead of all at once. Modes: up, down, updown, downup, up&down, down&up, converge, diverge, disconverge, pinkyup and thumbup. The mode can be a pattern.',
-        'sound("arpy").note("<c\'maj\'5 a3\'min7\'5>").arp("<up updown>")',
-        'As a global, arp(mode, chords) takes the chords as a second argument.',
-        ['chord', 'arpeggiate', 'inversion'],
+        'Plays the notes of each chord one after another, in the order of the chord (as Tidal: it does not sort them). Modes: up, down, updown, downup, up&down, down&up, converge, diverge, disconverge, pinkyup, pinkyupdown, thumbup, thumbupdown. The mode can be a pattern.',
+        'sound("arpy").note("<c\'maj e\'min>").arp("<up updown converge>")',
+        undefined,
+        ['chord', 'rolled'],
     ),
     arpeggiate: D('The same as arp().', undefined, undefined, ['arp']),
     inversion: D('Inverts chords: raises the lowest note of each chord by an octave, n times. Smooths the movement between chords.', 'sound("tri").note("<c\'maj f\'maj g\'maj>").inversion(1).legato(1)', undefined, ['chord', 'arp']),
@@ -389,7 +365,7 @@ export const DOCS: Record<string, Doc> = {
     ),
 
     // ---------------- Effects ----------------
-    gain: D('Sets the volume: 1 is normal, 0 is silent and up to 2 is louder. Patterns of gain make accents.', 'sound("hh*8").gain("1 0.5 0.8 0.5")', undefined, ['pan', 'velocity']),
+    gain: D('The volume, as in SuperDirt: the sound is multiplied by gain to the power of 4, so 1 is normal, 0.8 about 4 dB quieter, 0.5 a sixteenth (-24 dB) and up to 2 louder. Patterns of gain make accents.', 'sound("hh*8").gain("1 0.8 0.9 0.8")', 'The curve makes small changes count: 0.9 is already -2 dB. amp() is linear.', ['amp', 'pan', 'velocity']),
     pan: D('Sets the stereo position: -1 is fully left, 0 the centre and 1 fully right.', 'sound("hh*8").pan(sine.range(-1, 1))', 'TidalCycles uses 0 to 1 for pan; here it is -1 to 1.', ['jux', 'juxBy']),
     lpf: D(
         'A low-pass filter: lets frequencies below the cutoff (in Hz) through and removes the ones above, making the sound darker. Sweep it with a signal for the classic filter sweep.',
@@ -402,16 +378,11 @@ export const DOCS: Record<string, Doc> = {
     hcutoff: D('The same as hpf(): high-pass filter cutoff in Hz.', 'sound("hh*4").hcutoff(3000)', undefined, ['hpf']),
     bpf: D('A band-pass filter: keeps only the frequencies around a centre (in Hz). Gives a telephone or radio sound.', 'sound("arpy*4").bpf("<500 1000 2000>")', undefined, ['bandf', 'lpf', 'hpf']),
     bandf: D('The same as bpf(): band-pass filter centre in Hz.', 'sound("saw*4").bandf(1200)', undefined, ['bpf']),
-    resonance: D('The resonance (Q) of the low-pass filter: higher values emphasise the frequencies at the cutoff for a squelchy, acid sound. Try 5 to 20.', 'sound("saw*16").lpf(sine.range(300, 2000)).resonance(12)', undefined, ['lpf']),
-    delay: D(
-        'An echo, as in Tidal: delay is how loud the echoes are (0 to 1), delaytime the time between them in seconds (default 0.25) and delayfeedback how much each echo repeats (default 0.5). Each orbit has its own delay lines.',
-        'sound("cp ~ ~ ~").delay(0.6).delaytime(0.375).delayfeedback(0.5)',
-        'With .lock(1), delaytime is in cycles instead, so the echoes follow the tempo.',
-        ['delaytime', 'delayfeedback', 'reverb', 'off'],
-    ),
-    reverb: D('Sends the sound to a reverb, from 0 (dry) to 1. Use size() for the size of the room.', 'sound("sn ~ arpy ~").note("c e").reverb(0.6).size(0.9)', undefined, ['room', 'size', 'orbit']),
-    room: D('The same as reverb(): the amount of reverb, 0 to 1, as in TidalCycles.', 'sound("cp*2").room(0.4)', undefined, ['reverb', 'size']),
-    size: D('The size of the reverb room, 0 to 1: larger rooms ring longer. Has an effect only together with room() or reverb().', 'sound("arpy").room(0.5).size(0.95)', undefined, ['room', 'reverb']),
+    resonance: D('The resonance of the low-pass filter, as in SuperDirt, from 0 (none) to 1 (a peak of 60 dB at the cutoff): the filter is RLPF with rq = resonance.linexp(0, 1, 1, 0.001). 0.2 to 0.5 gives a squelchy, acid sound.', 'sound("saw*16").lpf(sine.range(300, 2000)).resonance(0.3)', 'Below 0 (an extension) it damps the cutoff: resonance(Math.log10(1 / rq) / 3) gives SuperCollider\'s rq, e.g. -0.1 for rq 2.', ['lpf', 'hpq']),
+    delay: D('The level of the orbit\'s delay, 0 to 1, as in SuperDirt: every sound of an orbit feeds one delay, and each event sets its level (an event without delay sets 0), so put patterns with different delays on different orbits.', 'sound("cp ~ ~ ~").delay(0.6).delaytime(0.25).delayfeedback(0.5)', undefined, ['delaytime', 'delayfeedback', 'orbit']),
+    reverb: D('The amount of the orbit\'s reverb, 0 to 1, as SuperDirt\'s room: every sound of an orbit feeds one reverb, and each event that has room sets how much goes in. size() is how long it rings.', 'sound("sn ~ arpy ~").note("c e").room(0.6).size(0.9)', 'Put patterns with different reverbs on different orbits.', ['room', 'size', 'dry', 'orbit']),
+    room: D('The same as reverb(): the amount of the orbit\'s reverb, 0 to 1, as in TidalCycles.', 'sound("cp*2").room(0.4)', undefined, ['reverb', 'size']),
+    size: D('The size of the orbit\'s reverb, 0 to 1 (0.1 at first, as in SuperDirt): larger rings longer.', 'sound("arpy").room(0.5).size(0.95)', undefined, ['room', 'dry']),
     orbit: D(
         'Chooses the effect bus: sounds on the same orbit share one delay and one reverb. Put parts with different reverb sizes or delay times on different orbits so they do not affect each other.',
         'stack([sound("bd*4"), sound("cp").room(0.8).size(1).orbit(1)])',
@@ -419,7 +390,7 @@ export const DOCS: Record<string, Doc> = {
         ['delay', 'reverb'],
     ),
     distortion: D('Waveshaping distortion, from 1 (subtle) to 100 (extreme). Adds grit to kicks and basses.', 'sound("bd sn bd sn").distortion("<1 10 50>")', undefined, ['crush']),
-    crush: D('A bit crusher: reduces the resolution of the sound to n bits, from 16 (clean) to 1 (very harsh), for a lo-fi, 8-bit feel.', 'sound("arpy*4").note("c e g b").crush("<16 8 4 2>")', undefined, ['distortion']),
+    crush: D('A bit crusher, as SuperDirt\'s: rounds the sound to steps of 0.5^(crush - 1), from 16 (clean) to 1 (very harsh); fractions work.', 'sound("arpy*4").note("c e g b").crush("<16 8 4.5 2>")', undefined, ['distortion', 'coarse']),
     vowel: D('A formant filter that makes the sound say a vowel: a, e, i, o or u. Works best on bright sounds like saw.', 'sound("saw").note("c3 e3 g3").vowel("<a e i o u>")', undefined, ['bpf']),
 
     // ---------------- Sound shaping ----------------
@@ -431,7 +402,7 @@ export const DOCS: Record<string, Doc> = {
     ),
     begin: D('Starts the sound part way into it, from 0 (the start) to 1 (the end). Use it with end() to play a slice of a sample.', 'sound("breaks125").begin("0 0.25 0.5 0.75").end("0.25 0.5 0.75 1")', undefined, ['end', 'chop']),
     end: D('Stops the sound part way through, from 0 to 1: end(0.5) plays only the first half.', 'sound("cy*4").end(0.3)', undefined, ['begin']),
-    loop: D('Repeats the sound n times in a row, up to 32.', 'sound("cp").loop(3)', undefined, ['ply']),
+    loop: D('As in SuperDirt: a sample plays its begin..end part over and over, loop times in all (fractions work, 1.5 is one and a half); legato or sustain cut it shorter. Synths repeat their note.', 'sound("cp").loop(3)', undefined, ['begin', 'end']),
     legato: D(
         'How long each sound lasts relative to its step: 1 holds it for the whole step, 0.5 half, 2 overlaps the next step. For synth notes this sets the note length; for samples it cuts them off.',
         'sound("tri*4").note("c e g b").legato("<0.2 1>")',
@@ -492,7 +463,7 @@ Object.assign(DOCS, {
         ['add', 'mul'],
     ),
     add: D(
-        'Tidal\'s |+ operator: adds numbers, keeping the rhythm of this pattern. Controls add key by key: note("0 4").add(note("<0 12>")) adds an octave every other cycle. A plain number adds to note (or n). Strings join: sound("drum").add(s(":3")) is drum:3.',
+        'Tidal\'s |+ operator: adds numbers, keeping the rhythm of this pattern. Controls add key by key: note("0 4").add(note("<0 12>")) adds an octave every other cycle. A plain whole number is n and a fraction is speed, as in Tidal; strings keep the left value.',
         'sound("arpy*4").note("c e g b").add(note("<0 5 7>"))',
         'Notes add as semitones, so .add(note("12")) is an octave up.',
         ['sub', 'mul', 'set'],
@@ -525,7 +496,7 @@ Object.assign(DOCS, {
         ['sew', 'struct'],
     ),
     wedge: D('Squashes this pattern into the first part of each cycle and another into the rest: wedge(0.25, other) gives this pattern a quarter.', 'sound("bd*4").wedge(0.75, sound("hh*8"))', 'Also a global: wedge(time, a, b).', ['fastcat', 'compress']),
-    euclidOff: D('A Euclidean rhythm with a rotation, as Tidal\'s euclidOff: the same as euclid(k, n, rotation).', 'sound("bd").euclidOff(3, 8, 2)', undefined, ['euclid', 'eoff']),
+    euclidOff: D('A Euclidean rhythm rotated left by `rotation` steps (Tidal\'s euclidOff): the same as euclid(k, n, rotation).', 'sound("bd").euclidOff(3, 8, 2)', undefined, ['euclid', 'eoff']),
     eoff: D('Short for euclidOff.', 'sound("cp").eoff(3, 8, 2)', undefined, ['euclidOff']),
     euclidOffFull: D('euclidOff on the hits and another pattern on the rests.', 'sound("bd").euclidOffFull(3, 8, 2, sound("hh"))', undefined, ['euclidFull']),
     zoom: D('Zooms into part of each cycle: zoom(0.25, 0.75) plays the middle half of every cycle, stretched to fill it.', 'sound("bd*2 sn hh*4 cp").zoom(0.25, 0.75)', undefined, ['compress', 'linger']),
@@ -535,22 +506,16 @@ Object.assign(DOCS, {
     trunc: D('Plays only the first part of each cycle: trunc(0.75) cuts the last quarter off.', 'sound("bd sn hh cp").trunc("<1 0.75 0.5>")', undefined, ['linger', 'fastGap']),
     repeatCycles: D('Repeats each cycle n times before moving on to the next.', 'sound("<bd sn cp hh>*4").repeatCycles(2)', undefined, ['loopFirst', 'linger']),
     loopFirst: D('Plays the first cycle of the pattern over and over.', 'sound("<bd sn cp>*4").loopFirst()', undefined, ['repeatCycles']),
-    discretise: D('The same as segment(): samples the pattern n times per cycle.', 'sound("sine").freq(saw.range(200, 800).discretise(8))', undefined, ['segment']),
     press: D('Moves every event to the second half of its step, so the pattern plays on the off-beats.', 'sound("hh*4").press().overlay("bd*4")', undefined, ['pressBy', 'late']),
     pressBy: D('Moves every event later by a fraction of its own step (and shortens it): pressBy(0.5) is press().', 'sound("hh*4").pressBy("<0 0.25 0.5>")', undefined, ['press']),
-    plyWith: D(
-        'Repeats each event n times within its step, applying the function once more to each repeat: echoes that fade, rise or change.',
-        'sound("cp*2").plyWith(4, x => x.gain(0.6))',
-        undefined,
-        ['ply', 'echoWith'],
-    ),
-    rolled: D('Strums chords: instead of all at once, their notes start one after another, from the lowest, over the first quarter of the event.', 'sound("tri").note("<c\'maj e\'min7 f\'maj>").rolled().legato(1)', undefined, ['rolledBy', 'arp']),
-    rolledBy: D('Strums chords by an amount of the event: rolledBy(0.5) spreads the notes over half of it, a negative amount strums from the top down.', 'sound("tri").note("<c\'maj\'5 a\'min\'5>").rolledBy("<0.25 -0.5>")', undefined, ['rolled', 'arp']),
+    plyWith: D('Repeats each event n times within its span; each repeat applies fn once more (Tidal\'s plyWith). Chord notes are spread out too, and a fraction makes one more repeat (2.4 makes three).', 'sound("arpy").note("c e").plyWith(3, x => x.gain(0.8))', undefined, ['ply', 'echoWith']),
+    rolled: D('Strums chords: instead of all at once, their notes start one after another, in the chord\'s order, over the first quarter of the event.', 'sound("tri").note("<c\'maj e\'min7 f\'maj>").rolled().legato(1)', undefined, ['rolledBy', 'arp']),
+    rolledBy: D('Strums chords by an amount of the event: rolledBy(0.5) spreads the notes over half of it; a negative amount strums them in reverse order.', 'sound("tri").note("<c\'maj\'5 a\'min\'5>").rolledBy("<0.25 -0.5>")', undefined, ['rolled', 'arp']),
 
     // Conditions
     when: D('Applies a function on the cycles for which a test of the cycle number is true: when(c => c % 4 === 3, f) changes every fourth cycle.', 'sound("bd sn hh cp").when(c => c % 4 === 3, x => x.fast(2))', 'Tidal writes the test as ((elem \'4\') . show) or similar; here it is a JavaScript function.', ['ifp', 'every', 'whenmod']),
     ifp: D('Applies one function on the cycles a test accepts and another on the rest.', 'sound("bd sn hh cp").ifp(c => c % 2 === 0, x => x.rev(), x => x.fast(2))', undefined, ['when']),
-    foldEvery: D('Like every(), with several periods: foldEvery([3, 5], f) applies f on cycles divisible by 3 or by 5.', 'sound("bd sn").foldEvery([3, 5], x => x.fast(2))', undefined, ['every']),
+    foldEvery: D('Tidal\'s foldEvery: every() nested for each number, so foldEvery([3, 5], f) applies f on cycles divisible by 3 or 5, and twice on cycles divisible by both.', 'sound("bd sn").foldEvery([3, 5], x => x.fast(2))', undefined, ['every']),
     someCyclesBy: D('Applies a function to whole cycles at random, each with the given probability. sometimesBy decides per event; this decides per cycle.', 'sound("bd*8").someCyclesBy(0.3, x => x.speed(2))', undefined, ['someCycles', 'sometimesBy']),
     someCycles: D('Applies a function to about half of the cycles, chosen at random.', 'sound("hh*8").someCycles(x => x.hpf(4000))', undefined, ['someCyclesBy']),
     somecyclesBy: D('The same as someCyclesBy().', undefined, undefined, ['someCyclesBy']),
@@ -559,10 +524,9 @@ Object.assign(DOCS, {
     never: D('Never applies the function: the pattern plays unchanged. Rename it to always to switch the change on.', 'sound("bd sn").never(x => x.fast(2))', undefined, ['always']),
     inside: D('Applies a function inside each part of the cycle: inside(2, x => x.rev()) reverses each half cycle instead of the whole cycle.', 'sound("bd sn hh cp").inside(2, x => x.rev())', undefined, ['outside', 'within']),
     outside: D('Applies a function over several cycles at once: outside(2, x => x.rev()) reverses each pair of cycles.', 'sound("<[bd sn] [hh cp]>").outside(2, x => x.rev())', undefined, ['inside']),
-    chunkBack: D('Like chunk(), moving backwards through the parts: the last part first (Tidal\'s chunk\').', 'sound("bd sn hh cp").chunkBack(4, x => x.hurry(2))', undefined, ['chunk']),
     fix: D('Applies a function only to the events with the given controls: fix(x => x.fast(2), { s: "bd" }) doubles the kicks only. A list matches any of its values.', 'sound("bd sn hh cp").fix(x => x.speed(2), { s: ["sn", "cp"] })', undefined, ['unfix', 'contrast']),
-    unfix: D('Applies a function to the events without the given controls.', 'sound("bd sn hh cp").unfix(x => x.gain(0.5), { s: "bd" })', undefined, ['fix']),
-    contrast: D('Applies one function to the events with the given controls and another to the rest.', 'sound("bd sn hh cp").contrast(x => x.speed(2), x => x.gain(0.4), { s: "bd" })', undefined, ['fix']),
+    unfix: D('Applies a function to the events without the given controls.', 'sound("bd sn hh cp").unfix(x => x.gain(0.84), { s: "bd" })', undefined, ['fix']),
+    contrast: D('Applies one function to the events with the given controls and another to the rest.', 'sound("bd sn hh cp").contrast(x => x.speed(2), x => x.gain(0.8), { s: "bd" })', undefined, ['fix']),
     spread: D(
         'Applies a function with each value of a list in turn, one per cycle: spread((p, x) => p.fast(x), [1, 2, 4]) is normal speed, then double, then four times.',
         'sound("bd sn").spread((p, x) => p.fast(x), [1, 2, 4])',
@@ -590,20 +554,18 @@ Object.assign(DOCS, {
         'Echoes: count sounds in all, `time` cycles apart, each with feedback times the gain of the one before.',
         'sound("cp ~ ~ ~").echo(4, 0.2, 0.5)',
         'Unlike delay(), the echoes are events, so they follow the tempo and can be changed like any pattern.',
-        ['echoWith', 'stut', 'delay'],
+        ['echoWith', 'stutter', 'delay'],
     ),
-    echoWith: D('Echoes changed by a function: each echo is the previous one with the function applied once more, `time` cycles later.', 'sound("arpy").note("c e").echoWith(4, 1/8, x => x.up(7).gain(0.8))', undefined, ['echo', 'plyWith', 'off']),
-    stutWith: D('The same as echoWith(), with Tidal\'s older name.', undefined, undefined, ['echoWith']),
-    stut: D('Tidal\'s classic echo: count sounds, `time` cycles apart, getting quieter towards the gain given by feedback.', 'sound("bd sn").stut(3, 0.5, 1/8)', undefined, ['echo']),
+    echoWith: D('Echoes changed by a function, as Tidal\'s echoWith: each echo is the previous result shifted `time` cycles later, then changed by the function.', 'sound("arpy").note("c e").echoWith(4, 1/8, x => x.add(note(7)).gain(0.9))', undefined, ['echo', 'plyWith', 'off']),
     stutter: D('Repeats each sound n times, `time` cycles apart, at the same volume: a stutter or roll.', 'sound("sn").stutter(4, 1/16)', undefined, ['echo', 'ply']),
     ghost: D('Adds two ghost notes after each event: quieter, shorter and a little higher, like a drummer\'s ghost strokes.', 'sound("~ sn").ghost().overlay("bd*2")', undefined, ['ghostWith']),
-    ghostWith: D('Adds ghost notes changed by a function, 1.5 and 2.5 times `time` after each event.', 'sound("~ sn").ghostWith(1/8, x => x.gain(0.5).speed(2))', undefined, ['ghost', 'off']),
+    ghostWith: D('Adds ghost notes changed by a function, 1.5 and 2.5 times `time` after each event.', 'sound("~ sn").ghostWith(1/8, x => x.gain(0.84).speed(2))', undefined, ['ghost', 'off']),
 
     // Values
     rangex: D('Like range(), but exponential: better for frequencies, where each octave doubles.', 'sound("saw*8").lpf(sine.rangex(100, 5000).slow(4))', undefined, ['range']),
-    qfloor: D('Rounds numbers down to whole numbers.', 'n(sine.range(0, 8).segment(8).qfloor()).sound("arpy")', undefined, ['qceiling', 'quantise']),
-    qceiling: D('Rounds numbers up to whole numbers.', 'n(sine.range(0, 8).segment(8).qceiling()).sound("arpy")', undefined, ['qfloor', 'quantise']),
-    qround: D('Rounds numbers to the nearest whole number: the same as quantise().', undefined, undefined, ['quantise']),
+    qfloor: D('Rounds numbers down to steps of 1/n (whole numbers by default).', 'n(sine.range(0, 8).segment(8).qfloor()).sound("arpy")', undefined, ['qceiling', 'quantise']),
+    qceiling: D('Rounds numbers up to steps of 1/n (whole numbers by default).', 'n(sine.range(0, 8).segment(8).qceiling()).sound("arpy")', undefined, ['qfloor', 'quantise']),
+    qround: D('Rounds numbers to steps of 1/n: the same as quantise(n).', undefined, undefined, ['quantise']),
     toScale: D(
         'Turns numbers into notes of a scale given as semitones: with [0, 2, 4, 5, 7, 9, 11] (major), 0 1 2 is c d e and 7 is the c an octave up.',
         'note(toScale([0, 2, 4, 7, 9], "0 .. 7")).sound("arpy")',
@@ -630,13 +592,13 @@ Object.assign(DOCS, {
     ),
     smash: D('Cuts each sample into n slices with striate and plays them at several speeds, one per cycle.', 'sound("breaks125").smash(4, [2, 3, 4])', undefined, ['striate', 'spin']),
     spin: D('Plays n copies, each shifted by 1/n of a cycle and placed further across the stereo field.', 'sound("arpy*4").note("c e g b").spin(2)', undefined, ['jux', 'off']),
-    striateBy: D('Like striate(), with slices of a given length (0 to 1) that can overlap.', 'sound("breaks125").striateBy(8, 0.25)', undefined, ['striate', 'chop']),
+    striateBy: D('Like striate(), with slices of a given length (0 to 1) that can overlap, taken within each event\'s own begin and end.', 'sound("breaks125").striateBy(8, 0.25)', undefined, ['striate', 'chop']),
 
     // Triggers
     qtrigger: D('Restarts the pattern from its first cycle at the next cycle after the code runs, so a sequence starts at its beginning instead of the middle.', 'sound("<bd sn cp hh>").qtrigger()', 'Each time the code runs (Play or a live update), it restarts.', ['trigger', 'once']),
     qt: D('Short for qtrigger().', undefined, undefined, ['qtrigger']),
     trigger: D('Restarts the pattern from its beginning at the very moment the code runs, mid-cycle if need be.', 'sound("bd sn hh cp").trigger()', undefined, ['qtrigger']),
-    once: D('Plays the first cycle of the pattern once, right away, without adding it to what is playing.', 'once(sound("cp*4").speed(2))', undefined, ['qtrigger']),
+    once: D('Plays one cycle of the pattern once, right away, without adding it to what is playing: a random cycle, as Tidal\'s once. first() plays the first cycle.', 'once(sound("cp*4").speed(2))', undefined, ['first', 'qtrigger']),
 
     // Lists and generators
     markovPat: D(
@@ -661,7 +623,7 @@ Object.assign(DOCS, {
     brandBy: D('A random boolean signal, true with the given probability.', 'sound("hh*16").struct(brandBy(0.25).segment(16))', undefined, ['brand']),
     chooseBy: D('Picks from a list with a signal from 0 to 1: chooseBy(rand, list) picks at random for every event (Tidal\'s choose).', 'sound(chooseBy(rand, ["bd", "sn", "hh"]).segment(8))', undefined, ['wchooseBy', 'choose']),
     wchooseBy: D('Picks from a list with a signal, with weights: [["bd", 3], ["sn", 1]] picks bd three times as often.', 'sound(wchooseBy(rand, [["bd", 3], ["sn", 1]]).segment(8))', undefined, ['chooseBy']),
-    select: D('Switches between patterns with a number from 0 to 1: with two patterns, below 0.5 picks the first.', 'select("<0 0.5>", [sound("bd*2 sn"), sound("hh*8")])', undefined, ['squeeze', 'pickF']),
+    select: D('Switches between patterns with a number from 0 to 1, as Tidal\'s select: floor(x * (number of patterns - 1)), so with two patterns 1 picks the second.', 'select("<0 1>", [sound("bd*2 sn"), sound("hh*8")])', undefined, ['squeeze', 'pickF']),
     squeeze: D('For each step of an index pattern, squeezes a whole cycle of the pattern it picks into that step.', 'squeeze("0 [1 0]", [sound("bd sn"), sound("hh*3")])', undefined, ['select']),
 
     // Signals
@@ -677,22 +639,22 @@ Object.assign(DOCS, {
     envEqR: D('An equal-power envelope that rises over the first cycle, for crossfades.', 'sound("hh*8").gain(envEqR.slow(4))', undefined, ['envEq']),
 
     // Controls
-    delaytime: D('The time between echoes of delay(), in seconds (in cycles with lock(1)). Default 0.25.', 'sound("cp ~ ~ ~").delay(0.6).delaytime(0.125)', undefined, ['delay', 'delayfeedback', 'lock']),
+    delaytime: D('The time between echoes of the orbit\'s delay, in seconds (in cycles with lock(1)), 0 to 4; it stays as the last event set it (0 at first, as in SuperDirt).', 'sound("cp ~ ~ ~").delay(0.6).delaytime(0.125).delayfeedback(0.5)', undefined, ['delay', 'delayfeedback', 'lock']),
     delayt: D('Short for delaytime().', undefined, undefined, ['delaytime']),
-    delayfeedback: D('How much each echo of delay() repeats, 0 to 1 (kept below 0.95). Default 0.5.', 'sound("cp ~ ~ ~").delay(0.6).delayfeedback(0.8)', undefined, ['delay', 'delaytime']),
+    delayfeedback: D('How much each echo of the orbit\'s delay repeats, 0 to 1 (kept below 0.99); it stays as the last event set it (0 at first, as in SuperDirt).', 'sound("cp ~ ~ ~").delay(0.6).delaytime(0.25).delayfeedback(0.8)', undefined, ['delay', 'delaytime']),
     delayfb: D('Short for delayfeedback().', undefined, undefined, ['delayfeedback']),
     dfb: D('Short for delayfeedback().', undefined, undefined, ['delayfeedback']),
     lock: D('With lock(1), delaytime is in cycles instead of seconds, so the echoes follow the tempo.', 'sound("cp ~ ~ ~").delay(0.6).delaytime(0.1875).lock(1)', undefined, ['delaytime']),
     shape: D('Waveshaping distortion as in SuperDirt, from 0 (none) to 1 (a lot). Warmer than crush.', 'sound("bd*4").shape("<0 0.5 0.9>")', undefined, ['distort', 'distortion', 'crush']),
     distort: D('Tidal\'s distortion amount, 0 to 1 (the same effect as distortion(), which goes from 1 to 100).', 'sound("arpy*4").note("c e g b").distort(0.4)', undefined, ['distortion', 'shape']),
-    coarse: D('Lowers the sample rate of recorded samples: 1 is unchanged, 2 half, 8 an eighth, for a gritty, aliased sound.', 'sound("breaks125").chop(8).coarse("<1 4 8 16>")', 'Works on loaded samples; the built-in synths ignore it.', ['crush']),
-    cut: D('Cut groups: a new sound stops the sound still playing in the same group (and orbit), like an open hi-hat cut by a closed one.', 'sound("oh*4 [~ ch]*4").cut(1)', undefined, ['legato']),
+    coarse: D('Lowers the sample rate, as SuperDirt\'s coarse: each sample is held for coarse samples (1 is unchanged, 4 a quarter), on every sound, for a gritty, aliased sound.', 'sound("arpy*4").note("c e g b").coarse("<1 4 8 16>")', undefined, ['crush']),
+    cut: D('Cut groups, as in SuperDirt: a new sound stops the sounds still playing in the same group (and orbit), like an open hi-hat cut by a closed one. A negative group only stops the same sample.', 'sound("oh*4 [~ ch]*4").cut(1)', undefined, ['legato']),
     accelerate: D('Changes the pitch while the sound plays: 1 rises an octave by the end, -0.5 falls by half. Works on samples and pitched synths.', 'sound("sine*4").note("c3").legato(1).accelerate("<1 -0.5>")', undefined, ['speed']),
-    djf: D('A DJ filter on one knob: below 0.5 it is a low-pass that closes as it goes down, above 0.5 a high-pass that opens as it goes up; 0.5 does nothing.', 'sound("bd*4 hh*8").djf(sine.slow(8))', undefined, ['lpf', 'hpf']),
-    lpq: D('The resonance of the low-pass filter: the same as resonance().', 'sound("saw*8").lpf(800).lpq(10)', undefined, ['resonance']),
-    hpq: D('The resonance (Q) of the high-pass filter.', 'sound("saw*8").hpf(600).hpq(12)', undefined, ['hpf', 'resonance']),
+    djf: D('SuperDirt\'s DJ filter on one knob: a low-pass from 20 Hz (0) to 10 kHz (0.5) and a high-pass from 20 Hz (0.5) to 10 kHz (1), so below 0.5 it closes the top and above 0.5 it thins the bottom; 0.5 does nothing.', 'sound("bd*4 hh*8").djf(sine.slow(8))', undefined, ['lpf', 'hpf']),
+    lpq: D('The resonance of the low-pass filter: the same as resonance().', 'sound("saw*8").lpf(800).lpq(0.2)', undefined, ['resonance']),
+    hpq: D('The resonance of the high-pass filter, as SuperDirt\'s hresonance, from 0 to 1 (rq = hresonance.linexp(0, 1, 1, 0.001)).', 'sound("saw*8").hpf(600).hpq(0.3)', undefined, ['hpf', 'resonance']),
     hresonance: D('The same as hpq().', undefined, undefined, ['hpq']),
-    bpq: D('The resonance (Q) of the band-pass filter: higher values make a narrower band.', 'sound("saw*8").bpf(1200).bpq(15)', undefined, ['bpf']),
+    bpq: D('The Q of the band-pass filter, as SuperDirt\'s bandq: higher values make a narrower band, and it is boosted by bandq (10 by default) so it stays loud.', 'sound("saw*8").bpf(1200).bpq("<2 20>")', undefined, ['bpf']),
     bandq: D('The same as bpq().', undefined, undefined, ['bpq']),
     amp: D('Volume as in SuperDirt, where 0.4 is normal: amp(0.8) is twice as loud. Multiplies with gain().', 'sound("bd*4").amp("<0.4 0.8 0.2>")', undefined, ['gain']),
     octave: D('The octave of synth notes, as in SuperDirt: 5 is normal, 6 an octave up, 4 an octave down.', 'sound("tri*4").note("c e g b").octave("<5 6 4>")', undefined, ['note', 'up']),
@@ -728,7 +690,7 @@ Object.assign(DOCS, {
     p: D('Plays a pattern in a named stream, as Tidal\'s p "name" $ ... A number is the same as d1, d2...', 'p("drums", sound("bd*2 [~ bd] sn ~"))\np("bass", sound("saw*4").note("c2"))', undefined, ['d1', 'mute']),
     xfadeIn: D(
         'Crossfades a stream from its previous pattern to a new one over a number of cycles, with equal power so the volume stays even.',
-        'xfadeIn(1, 8, sound("hh*8").gain(0.7))',
+        'xfadeIn(1, 8, sound("hh*8").gain(0.91))',
         TRANSITION_TIP,
         ['xfade', 'clutchIn', 'jumpIn', 'interpolateIn'],
     ),
@@ -754,7 +716,7 @@ Object.assign(DOCS, {
     stepcat: D(
         'Joins patterns into one cycle, giving each time in proportion to its steps: "bd sn" (2 steps) and "hh hh hh" (3 steps) make 5 even steps. fastcat would give each pattern half the cycle instead.',
         'stepcat(sound("bd sn"), sound("hh hh hh"))',
-        'Patterns count their steps from the mini-notation: "bd sn hh" has 3, "bd@3 sn" 4, "<a b>" 1. .steps() tells you.',
+        'Patterns count their steps from the mini-notation: "bd sn hh" has 3, "bd@3 sn" 4, "<a b>" 2, as in Tidal 1.10. .steps() tells you.',
         ['fastcat', 'timeCat', 'expand'],
     ),
     s_cat: D('The same as stepcat().', undefined, undefined, ['stepcat']),
@@ -770,20 +732,225 @@ Object.assign(DOCS, {
 
     ur: D(
         'Tidal\'s ur: a song structure. A pattern of names, spread over a number of cycles, chooses which named pattern plays when; "name:fx" applies an effect from the last argument. The patterns keep their own rhythm.',
-        'ur(8, "intro verse [verse, hats] verse:fast", {\n  intro: sound("bd ~ ~ ~"),\n  verse: sound("bd*2 sn"),\n  hats: sound("hh*8").gain(0.5)\n}, { fast: x => x.fast(2) })',
+        'ur(8, "intro verse [verse, hats] verse:fast", {\n  intro: sound("bd ~ ~ ~"),\n  verse: sound("bd*2 sn"),\n  hats: sound("hh*8").gain(0.84)\n}, { fast: x => x.fast(2) })',
         undefined,
         ['inhabit', 'cat', 'squeeze'],
     ),
     inhabit: D('Fits named patterns into the steps of a pattern of names: each step plays a whole cycle of its pattern, squeezed.', 'inhabit({ a: sound("bd sn"), b: sound("hh*3") }, "a [b a] b")', undefined, ['squeeze', 'ur']),
     swap: D('Replaces the values of a pattern from a table; values not in it become rests.', 'sound(swap({ a: "bd", b: "sn", c: "hh" }, "a [b c] a c"))', undefined, ['fit']),
-    weave: D('Spreads a control pattern across several patterns, each offset in time, so over the given cycles each pattern gets the whole of it.', 'weave(8, pan(saw2), [sound("bd sn"), sound("hh*4"), sound("arpy*3")])', undefined, ['spin', 'set']),
-    snowball: D('Like soak, accumulating: each cycle combines the previous result with the function applied once more.', 'n("0 2").snowball(4, (a, b) => a.add(b), x => x.fast(2)).sound("arpy")', 'Add the sound after: add() joins strings, so snowballing a sound gives "arpyarpy". Also a global: snowball(depth, combine, fn, pattern).', ['soak']),
+    weave: D('Tidal\'s weave: spreads a control pattern over the given cycles across several patterns, each shifted earlier by an equal share of the cycles, so together they play the whole control at once.', 'weave(8, pan(saw2), [sound("bd sn"), sound("hh*4"), sound("arpy*3")])', undefined, ['weaveWith', 'set']),
+    snowball: D('Like soak, accumulating: each cycle combines the previous result with the function applied once more.', 'n("0 2").snowball(4, (a, b) => a.add(b), x => x.fast(2)).sound("arpy")', 'Add the sound after: snowballing works on the numbers. Also a global: snowball(depth, combine, fn, pattern).', ['soak']),
     chew: D('Like bite(), but each part also plays faster or slower to match how much it was squeezed or stretched.', 'sound("breaks125").chop(8).chew(4, "0 [1 3] <2 0>")', undefined, ['bite', 'splice']),
     arpg: D('The same as arp().', undefined, undefined, ['arp']),
 });
 
+// ---------------- Operators: where the rhythm comes from ----------------
+const OPERATOR_SYMBOLS: Record<string, [symbol: string, what: string]> = {
+    set: ['#', 'replaces the controls with those of the other pattern'],
+    keep: ['|<', 'keeps the controls of this pattern, adding only the ones it lacks'],
+    add: ['+', 'adds numbers key by key'],
+    sub: ['-', 'subtracts the other pattern\'s numbers'],
+    mul: ['*', 'multiplies by the other pattern\'s numbers'],
+    div: ['/', 'divides by the other pattern\'s numbers'],
+    mod: ['%', 'takes the remainder of dividing by the other pattern\'s numbers'],
+    pow: ['**', 'raises to the power of the other pattern\'s numbers'],
+};
+const OPERATOR_EXAMPLE: Record<string, string> = {
+    set: 'n("0 1").RIGHT_OR_BOTH(speed("1 2 3")).sound("arpy")',
+    keep: 'n("0 1").speed(2).OP(n("5 6 7").speed(1)).sound("arpy")',
+    add: 'n("0 7").OP(n("0 3 5")).sound("arpy")',
+    sub: 'n("12 7").OP(n("0 3 5")).sound("arpy")',
+    mul: 'sound("arpy*2").speed(1).OP(speed("1 2 1.5"))',
+    div: 'sound("arpy*2").speed(2).OP(speed("1 2 4"))',
+    mod: 'n("7 9").OP(n("3 4 5")).sound("arpy")',
+    pow: 'sound("arpy*2").speed(2).OP(speed("0.5 1 1.5"))',
+};
+for (const [base, [symbol, what]] of Object.entries(OPERATOR_SYMBOLS)) {
+    const tidal = base === 'set' ? { right: '>|', both: '|>|', squeeze: '||>' } : base === 'keep'
+        ? { right: '<|', both: '|<|', squeeze: '||<' }
+        : { right: symbol + '|', both: '|' + symbol + '|', squeeze: '||' + symbol };
+    const example = (name: string) => OPERATOR_EXAMPLE[base].replace(/RIGHT_OR_BOTH|OP/, name);
+    const see = [base, base + 'Right', base + 'Both', base + 'Squeeze'];
+    DOCS[base + 'Right'] = D(
+        `Tidal's ${tidal.right}: ${what}, taking the rhythm from the other pattern (the right side). Each of its events takes the value of this pattern sounding at its start.`,
+        example(base + 'Right'), `.${base}() is the same with the rhythm from this pattern (the left side).`, see.filter((n) => n !== base + 'Right'),
+    );
+    DOCS[base + 'Both'] = D(
+        `Tidal's ${tidal.both}: ${what}, with the rhythm from both patterns: an event starts wherever either one does, and lasts until the next start on either side.`,
+        example(base + 'Both'), undefined, see.filter((n) => n !== base + 'Both'),
+    );
+    DOCS[base + 'Squeeze'] = D(
+        `Tidal's ${tidal.squeeze}: ${what}, squeezing a whole cycle of the other pattern into each event of this one, so the other pattern's rhythm repeats inside every step.`,
+        example(base + 'Squeeze'), undefined, see.filter((n) => n !== base + 'Squeeze'),
+    );
+}
+DOCS.keep = D(
+    'Tidal\'s |<: keeps the rhythm and the controls of this pattern, and adds only the controls the other pattern has and this one lacks. The opposite of set (#), where the other pattern wins.',
+    'n("0 1").speed(2).keep(n("5 6 7").speed(1).vowel("a")).sound("arpy")',
+    undefined, ['set', 'keepRight', 'keepBoth', 'keepSqueeze'],
+);
+
+// ---------------- More of Tidal: primed and other functions ----------------
+Object.assign(DOCS, {
+    everyOffset: D('Tidal\'s every\': applies a function on the cycles where cycle mod n equals the offset, so everyOffset(4, 2, f) applies it on cycles 2, 6, 10...', 'sound("bd sn hh cp").everyOffset(4, 2, x => x.rev())', FN_ARG, ['every', 'whenmod']),
+    withinZoom: D('Tidal\'s within\': zooms into part of each cycle (begin to end, 0 to 1), applies the function as if that part were a whole cycle, and fits the result back. within() applies the function to the whole pattern and keeps only that part.', 'sound("bd sn hh cp").withinZoom(0, 0.5, x => x.rev())', undefined, ['within', 'zoom']),
+    toScaleBy: D('Tidal\'s toScale\': like toScale, with an octave of any size in semitones, for scales that repeat at other intervals.', 'note(toScaleBy(10, [0, 3, 7], "0 1 2 3 4 5")).sound("arpy")', 'As a method it works on a pattern of numbers: note(fastFromList([0, 1, 2]).toScaleBy(10, [0, 3, 7])).', ['toScale', 'scale']),
+    fitSlices: D('Tidal\'s fit\': cuts the pattern (spread over a number of cycles) into n parts, named by the from pattern, then plays the parts in the order of the to pattern, each squeezed into its step.', 'sound("bd sn hh cp").fitSlices(1, 4, "0 1 2 3", "[3 2] 1 0 0")', 'Also a global: fitSlices(cycles, n, from, to, pattern).', ['fit', 'bite']),
+    substruct: D('Tidal\'s substruct: like struct, but each true step plays a whole cycle of the pattern, squeezed into it.', 'sound("bd sn hh").substruct("t ~ t t")', undefined, ['struct', 'squeeze']),
+    whenT: D('Tidal\'s whenT: applies the function to the events whose time, in cycles, passes the test.', 'sound("hh*8").whenT(t => t % 1 >= 0.5, x => x.speed(2))', 'The test receives the start of each event, e.g. 2.25 for the second quarter of cycle 2.', ['when', 'within']),
+    fastAppend: D('Plays the pattern and another one squeezed into the same cycle, each taking half (Tidal\'s fastAppend).', 'sound("bd*2").fastAppend(sound("hh*3"))', undefined, ['slowAppend', 'fastcat']),
+    slowAppend: D('Plays the pattern in one cycle and another in the next (Tidal\'s slowAppend; the same as append).', 'sound("bd*2").slowAppend(sound("hh*3"))', undefined, ['fastAppend', 'append', 'cat']),
+    jux4: D('Tidal\'s jux4, made for four speakers: the pattern at 5/8 of the way round and the changed copy at 1/8. In stereo the pattern sits a little to the right and the copy mostly to the left.', 'sound("arpy*4").note("c e g b").jux4(x => x.rev())', undefined, ['jux', 'juxcut']),
+    juxcut: D('Like jux, with each side in its own cut group (-1 and -2): a sound only stops sounds on its own side.', 'sound("arpy*4").note("c e g b").juxcut(x => x.fast(2))', undefined, ['jux', 'cut']),
+    spreadf: D('Applies the functions of a list in turn, one per cycle (Tidal\'s spreadf).', 'sound("bd sn hh cp").spreadf([x => x.rev(), x => x.fast(2), x => x.speed(2)])', 'Also a global: spreadf(fns, pattern).', ['spread', 'pickF']),
+    fastSqueeze: D('Each step of the speed pattern plays a whole cycle of the pattern at that speed, squeezed into the step (Tidal\'s fastSqueeze).', 'sound("bd sn").fastSqueeze("1 2 [4 1]")', undefined, ['fast', 'slowSqueeze']),
+    slowSqueeze: D('Like fastSqueeze, slowing the pattern down in each step instead.', 'sound("bd sn hh cp").slowSqueeze("1 2")', undefined, ['slow', 'fastSqueeze']),
+    mono: D('Makes the pattern monophonic, as Tidal\'s mono: when events overlap, the one that starts first plays (of two starting together, the shorter), and the others wait for it to end or are dropped.', 'note("[c, e] g [a, c5]").sound("tri").mono()', undefined, ['legato']),
+    timeLoop: D('Loops the first n cycles of the pattern (Tidal\'s timeLoop).', 'sound("<bd sn hh cp>").timeLoop(2)', undefined, ['loopFirst', 'repeatCycles']),
+    pitchenv: D(
+        'A pitch envelope with breakpoints, as SuperCollider\'s Env: levels in semitones from the note, the times in seconds between them, and the curves of the segments (0 or "lin" for a straight line, negative values move fast at first, positive slow at first, "exp" exponential).',
+        'sound("saw").note("d4").legato(1).pitchenv([-5, 6, 0], [0.1, 1.7], ["lin", -4])',
+        'It replaces penv and a synth\'s own pitch sweep. It is set when the code runs, so it cannot be a pattern.',
+        ['penv', 'accelerate', 'portamento'],
+    ),
+    sig: D('Tidal\'s sig: a signal from a function of time in cycles, sampled at the start of each event.', 'sound("arpy*8").pan(sig(t => Math.sin(t * Math.PI)))', undefined, ['sine', 'saw']),
+    perlinWith: D('Tidal\'s perlinWith: Perlin noise (0 to 1) driven by another pattern instead of time, so the noise can move faster or slower.', 'sound("hh*8").gain(perlinWith(saw.mul(4)))', undefined, ['perlin', 'perlin2']),
+    perlin2: D('Tidal\'s perlin2: two-dimensional Perlin noise (0 to 1), moving with time along one axis and with the given pattern along the other.', 'sound("arpy*8").pan(perlin2(sine.mul(4)))', undefined, ['perlin', 'perlin2With']),
+    perlin2With: D('Tidal\'s perlin2With: two-dimensional Perlin noise (0 to 1) with both coordinates from patterns.', 'sound("arpy*8").lpf(perlin2With(saw.mul(4), cosine.mul(2)).range(300, 3000))', undefined, ['perlin2']),
+    interlace: D('Tidal\'s interlace: moves between two patterns with waveshaping distortion, weaving the distortion across them over 16 cycles.', 'interlace(sound("bd*2 sn"), sound("hh*4"))', undefined, ['weave']),
+    seqP: D('Tidal\'s seqP: plays patterns between given cycles, as a list of [start, stop, pattern]. Each pattern starts its own cycle 0 at its start.', 'seqP([\n  [0, 8, sound("bd*2")],\n  [2, 8, sound("hh*8")],\n  [4, 8, sound("~ cp")]\n])', 'Cycles count from when the music starts; resetCycles() starts the count again.', ['seqPLoop', 'playFor', 'ur']),
+    seqPLoop: D('Like seqP, looping: when the last pattern stops, the whole sequence starts again.', 'seqPLoop([\n  [0, 4, sound("bd*2")],\n  [2, 6, sound("hh*8")]\n])', undefined, ['seqP']),
+    setOutput: D(
+        'Sets the output stage: the master volume (0.8 by default) and the limiter that keeps peaks below -8 dB (on by default). setOutput(1, false) sends the sound out as it is, as SuperCollider does.',
+        'setOutput(1, false)\nsound("supergabber*4").amp(0.07)',
+        'It stays as set until changed, like the tempo. Without the limiter loud patterns can clip: lower the volume or the gain.',
+        ['gain', 'amp'],
+    ),
+    resetCycles: D('Starts counting cycles from 0 again, from the next cycle (Tidal\'s resetCycles): seqP, ur and the < > alternations start over.', 'resetCycles()', undefined, ['seqP']),
+
+    // Envelopes and pitch
+    hold: D('How long the sound holds after its attack, in seconds, before the release (SuperDirt\'s attack, hold, release). It replaces legato and sustain.', 'sound("saw*2").note("c3").attack(0.05).hold(0.2).release(0.3)', undefined, ['attack', 'release', 'sustain']),
+    decay: D('How long a sound rings, in seconds: for drums and plucks the length of their decay; for held synths (with legato, sustain or hold) the time the volume takes after the attack to fall to sustainlevel.', 'sound("supersaw").note("c3 e3").legato(1).decay(0.2).sustainlevel(0.4)', undefined, ['sustainlevel', 'attack', 'release']),
+    sustainlevel: D('The level a held synth falls to during decay(), 0 to 1 (0 by default, so decay() alone makes the note fade out).', 'sound("supersquare*2").note("c3").legato(1).decay(0.1).sustainlevel(0.5)', undefined, ['decay']),
+    penv: D('The depth of the pitch envelope in semitones: the pitch jumps (or rises over pattack) by penv, then returns to the note over pdecay. Synths with a pitch sweep of their own (superkick, super808, supergabber, superzow) use it as the depth of that sweep.', 'sound("supergabber*4").penv("<48 24>")', undefined, ['pattack', 'pdecay', 'pcurve', 'pitchenv']),
+    pattack: D('The time the pitch envelope takes to reach penv, in seconds (0 jumps there at once).', 'sound("sine*2").note("c4").legato(1).penv(12).pattack(0.2).pdecay(0.3)', undefined, ['penv']),
+    pdecay: D('The time the pitch envelope takes to come back from penv to the note, in seconds (0.1 by default).', 'sound("superkick*4").pdecay("<0.02 0.2>")', undefined, ['penv']),
+    pcurve: D('The curve of the pitch envelope, as in SuperCollider: 0 is a straight line, negative values move fast at first (like a drum), positive slow at first.', 'sound("sine*4").note("c3").legato(1).penv(24).pdecay(0.2).pcurve("<0 -6>")', undefined, ['penv']),
+    vib: D('Vibrato: the pitch wobbles this many times a second, vibmod semitones each way (0.5 by default).', 'sound("tri").note("c4 e4").legato(1).vib(5).vibmod(0.3)', undefined, ['vibmod']),
+    vibrato: D('The same as vib().', undefined, undefined, ['vib']),
+    vibmod: D('The depth of the vibrato in semitones each way. Has an effect together with vib().', 'sound("saw").note("c3").legato(1).vib(6).vibmod("<0.2 1>")', undefined, ['vib']),
+    portamento: D('Glides into each note from the previous note of the same sound (in the same orbit), over this many seconds.', 'sound("supersaw*4").note("c3 c4 g3 eb4").legato(1).portamento(0.08)', 'Notes keep their own voices, so long overlapping notes play together while the new one glides.', ['pitchenv']),
+    glide: D('The same as portamento().', undefined, undefined, ['portamento']),
+
+    // The peak equaliser
+    peak: D('A peak (bell) equaliser around this frequency in Hz: peakgain boosts it (or cuts it, when negative) and peakq sets how narrow the band is.', 'sound("supersaw*4").note("c2").peak(sine.range(200, 3000).slow(4)).peakgain(15).peakq(2)', 'Like SuperCollider\'s BPeakEQ; its rq is 1 / peakq.', ['peakgain', 'peakq', 'peakenv']),
+    peakq: D('How narrow the band of the peak equaliser is (Q): higher values touch a narrower band. Default 1.', 'sound("saw*4").note("c2").peak(800).peakgain(12).peakq("<0.5 8>")', undefined, ['peak']),
+    peakgain: D('How much the peak equaliser boosts its band, in dB (negative values cut it). Default 6.', 'sound("saw*4").note("c2").peak(1500).peakgain("<12 -12>")', undefined, ['peak']),
+
+    // Synth parameters
+    voice: D('A timbre parameter of the SuperDirt-style synths, 0 to 1: the side voices of supersaw, the pulse width of superchip, the brightness of superfm, superpiano and supergong, the click of superkick, the density of superstatic.', 'sound("superfm*4").note("c3 e3").voice("<0.1 0.6>")', undefined, ['detune', 'supersaw']),
+    detune: D('How far the voices of a SuperDirt-style synth are detuned, in semitones (supersaw, supersquare, superreese, superzow, superpwm, superhoover).', 'sound("supersaw").note("c3").legato(1).detune("<0.05 0.5>")', undefined, ['voice']),
+    semitone: D('The interval of superfm\'s modulator above the note, in semitones (12 by default, an octave).', 'sound("superfm*4").note("c3").semitone("<12 7 19>")', undefined, ['voice']),
+    rate: D('The speed of a SuperDirt-style synth\'s modulation in Hz: the pulse-width sweep of superpwm, the phasing of superzow, the vibrato of superchip.', 'sound("superpwm").note("c3").legato(1).rate("<0.5 4>")', undefined, ['lfo']),
+    lfo: D('The depth of a SuperDirt-style synth\'s modulation, 0 to 1 (superpwm, superzow), or the vibrato of superchip in semitones.', 'sound("superpwm").note("c3").legato(1).lfo("<0.1 0.9>")', undefined, ['rate']),
+
+    // SuperDirt effects
+    squiz: D('SuperDirt\'s squiz: a lo-fi pitch raiser that plays each wave cycle this many times faster, repeated to fill the time. 1 does nothing; try 2, 4 or 8.', 'sound("supersaw*4").note("c3").squiz("<1 2 4 8>")', undefined, ['waveloss', 'crush']),
+    waveloss: D('SuperDirt\'s waveloss: drops this many out of 100 wave cycles at random, for a broken, gritty sound.', 'sound("saw*8").note("c2").waveloss("<0 20 60>")', undefined, ['squiz']),
+    krush: D('SuperDirt\'s krush: a fat distortion (from Sonic Pi), followed by a low-pass at kcutoff Hz.', 'sound("bd*4").krush("<1 4 8>")', undefined, ['kcutoff', 'triode', 'shape']),
+    kcutoff: D('The low-pass after krush, in Hz (3140 by default).', 'sound("superreese").note("c2").legato(1).krush(4).kcutoff("<800 6000>")', undefined, ['krush']),
+    triode: D('SuperDirt\'s triode: tube-like distortion that only squashes the negative half of the wave, 0 to 1 and beyond.', 'sound("saw*4").note("c2").triode("<0 0.5 1>")', undefined, ['krush', 'shape']),
+    octer: D('SuperDirt\'s octer: blends in the sound an octave up (0 to 1), made by folding the wave.', 'sound("tri*4").note("c3").octer("<0 0.5 1>")', undefined, ['octersub', 'octersubsub']),
+    octersub: D('Adds a sub-octave (one octave down) to the sound, 0 to 1 and beyond.', 'sound("saw*4").note("c3").octersub(1)', undefined, ['octer', 'octersubsub']),
+    octersubsub: D('Adds a sub-sub-octave (two octaves down), 0 to 1 and beyond.', 'sound("saw*4").note("c3").octersubsub(1)', undefined, ['octersub']),
+    fshift: D('SuperDirt\'s frequency shifter: moves every frequency of the sound by this many Hz (unlike pitch, which multiplies them), for metallic, inharmonic tones.', 'sound("arpy*4").note("c e g b").fshift("<0 50 -200>")', undefined, ['fshiftnote', 'fshiftphase', 'ring']),
+    fshiftnote: D('Adds the note\'s frequency times this number to the shift of fshift, so the shift follows the melody.', 'sound("tri*4").note("c e g b").fshiftnote(0.5)', undefined, ['fshift']),
+    fshiftphase: D('The phase of the frequency shifter\'s oscillator, in radians.', 'sound("saw").note("c3").legato(1).fshift(5).fshiftphase(1.5)', undefined, ['fshift']),
+    leslie: D('A rotating Leslie speaker, as in SuperDirt: the mix of the effect, 0 to 1. lrate is how fast it turns, lsize the size of the cabinet.', 'sound("supersquare").note("<c3 e3>").legato(1).leslie(1).lrate("<1 7>")', undefined, ['lrate', 'lsize', 'phaserrate']),
+    lrate: D('How fast the Leslie speaker turns, in turns a second (6.7 by default; about 0.7 for the slow "chorale" setting).', 'sound("superpwm").note("c3").legato(1).leslie(1).lrate(0.7)', undefined, ['leslie']),
+    lsize: D('The size of the Leslie cabinet in metres (0.3 by default): larger gives more pitch wobble.', 'sound("supersaw").note("c3").legato(1).leslie(1).lsize("<0.1 1>")', undefined, ['leslie']),
+    freeze: D('SuperDirt\'s spectral freeze: holds the spectrum of the start of each sound, turning it into a steady drone for as long as the sound lasts.', 'sound("supersaw").note("c3").legato(1).freeze(1)', undefined, ['smear', 'comb']),
+    comb: D('A spectral comb, as SuperDirt\'s: removes bands of the spectrum in evenly spaced teeth, 0 to 1 (more teeth as it grows).', 'sound("supersaw*4").note("c3").comb("<0 0.2 0.8>")', undefined, ['freeze', 'binshift']),
+    smear: D('Spectral smear: blurs the spectrum across neighbouring frequencies, 0 to 1.', 'sound("superpiano*2").note("c4 e4").smear("<0 0.5 1>")', undefined, ['freeze', 'scram']),
+    scram: D('Spectral scramble: swaps frequencies at random, 0 to 1.', 'sound("supersaw*4").note("c3").scram("<0 0.3 0.9>")', undefined, ['smear']),
+    binshift: D('Shifts the spectrum up (or down, when negative): 1 moves every frequency by about 1000 Hz.', 'sound("arpy*4").note("c e g b").binshift("<0 0.1 -0.1>")', undefined, ['fshift', 'comb']),
+    hbrick: D('A spectral brick-wall high-pass: removes this fraction (0 to 1) of the spectrum from the bottom.', 'sound("supersaw*4").note("c2").hbrick("<0 0.1 0.3>")', undefined, ['lbrick', 'hpf']),
+    lbrick: D('A spectral brick-wall low-pass: removes this fraction (0 to 1) of the spectrum from the top.', 'sound("supersaw*4").note("c3").lbrick("<0 0.8 0.95>")', undefined, ['hbrick', 'lpf']),
+
+    // SuperCollider's FreeVerb2
+    freeverb: D('SuperCollider\'s FreeVerb2 on this sound: the mix of the reverb, 0 (dry) to 1 (all reverb). Unlike room(), which sends to a shared reverb, it reverberates each sound on its own, as a SynthDef does, and the sound rings on after its release.', 'sound("supersquare*2").note("c3 g3").legato(0.5).freeverb(0.4).freeroom(0.8)', 'superhoover has it built in (mix 0.3, room 0.9), as in its SynthDef; freeverb(0) turns it off.', ['freeroom', 'freedamp', 'room']),
+    freeroom: D('The room size of freeverb, 0 to 1 (0.5 by default): larger rings longer.', 'sound("arpy*2").note("c e").freeverb(0.5).freeroom("<0.3 0.95>")', undefined, ['freeverb']),
+    freedamp: D('How much freeverb damps the high frequencies, 0 to 1 (0.5 by default).', 'sound("arpy*2").note("c e").freeverb(0.5).freedamp("<0 1>")', undefined, ['freeverb']),
+
+    // MIDI
+    nrpn: D('Sends a MIDI NRPN message, "parameter:value" (both 0 to 16383), with .midi().', 'nrpn("1000:64").midi()', undefined, ['nrpnn', 'nrpnv', 'ccn']),
+    nrpnn: D('The NRPN parameter number (0 to 16383), with nrpnv.', 'nrpnn(1000).nrpnv("0 64 127").midi()', undefined, ['nrpn']),
+    nrpnv: D('The NRPN value (0 to 16383), with nrpnn.', 'nrpnn(5).nrpnv(saw.range(0, 16383).segment(8)).midi()', undefined, ['nrpn']),
+});
+
+// ---------------- Filter envelopes ----------------
+const FILTER_NAMES: Record<string, [filter: string, base: string, example: string]> = {
+    lp: ['low-pass filter', 'lpf', 'sound("supersaw*4").note("c2").lpf(300).lpenv(4).lpdecay(0.2)'],
+    hp: ['high-pass filter', 'hpf', 'sound("supersaw*4").note("c3").hpf(100).hpenv(5).hpattack(0.2)'],
+    bp: ['band-pass filter', 'bpf', 'sound("saw*4").note("c2").bpf(400).bpenv(3).bpdecay(0.3)'],
+    peak: ['peak equaliser', 'peak', 'sound("supergabber*4").peak(3000).peakgain(15).peakenv(-0.32).peakattack(0.3)'],
+};
+for (const [prefix, [filter, base, example]] of Object.entries(FILTER_NAMES)) {
+    const see = ['env', 'attack', 'decay', 'sustain', 'release'].map((part) => prefix + part).concat(base);
+    DOCS[prefix + 'env'] = D(
+        `An envelope on the ${filter} (${base}), in octaves: the frequency moves up by this many octaves (down, when negative) over ${prefix}attack, falls to ${prefix}sustain of the way over ${prefix}decay, and returns over ${prefix}release when the sound ends.`,
+        example, `Without ${prefix}decay the frequency stays at the top; with it, ${prefix}sustain is 0 unless set. Needs ${base}() for the base frequency.`, see.filter((n) => n !== prefix + 'env'),
+    );
+    DOCS[prefix + 'attack'] = D(`The time the ${filter}'s envelope takes to reach ${prefix}env, in seconds (0 jumps there at once).`, example.replace(/\)$/, `).${prefix}attack(0.1)`), undefined, [prefix + 'env']);
+    DOCS[prefix + 'decay'] = D(`The time the ${filter}'s envelope takes to fall from its top to ${prefix}sustain, in seconds.`, example, undefined, [prefix + 'env']);
+    DOCS[prefix + 'sustain'] = D(`Where the ${filter}'s envelope rests after ${prefix}decay, 0 to 1 of ${prefix}env.`, example.replace(/\)$/, `).${prefix}sustain(0.5)`), undefined, [prefix + 'env']);
+    DOCS[prefix + 'release'] = D(`The time the ${filter} takes to go back to its base frequency when the sound ends, in seconds.`, example.replace(/\)$/, `).${prefix}release(0.5)`), undefined, [prefix + 'env']);
+}
+
+// ---------------- Tidal 1.10's stream functions, triggers and SuperDirt's dry ----------------
+Object.assign(DOCS, {
+    dry: D('SuperDirt\'s dry: turns the orbit\'s reverb down, from 0 (all of it, the default) to 1 (none).', 'sound("arpy*2").room(0.5).size(0.8).dry("<0 0.5>")', undefined, ['room', 'size']),
+    first: D('Plays the first cycle of the pattern once, right away (Tidal\'s first).', 'first(sound("<bd sn cp>*4"))', undefined, ['once']),
+    asap: D('The same as once() (Tidal\'s asap).', 'asap(sound("cp*2"))', undefined, ['once']),
+    only: D('Plays only this pattern: the other streams stop (Tidal\'s only = hush >> ...).', 'only(d1(sound("bd*2")))\nd2(sound("hh*8"))', undefined, ['hush', 'solo']),
+    panic: D('Stops everything at once, and sends "all notes off" to the MIDI outputs (Tidal\'s panic).', 'panic()', undefined, ['hush']),
+    setbpm: D('Sets the tempo in beats per minute, 4 beats per cycle (the same as setTempo).', 'setbpm(120)', undefined, ['setcps', 'setTempo']),
+    getcps: D('Returns the tempo in cycles per second (Tidal\'s getcps).', 'getcps()', undefined, ['setcps']),
+    getnow: D('Returns the cycle the clock is at now (Tidal\'s getnow).', 'getnow()', undefined, ['setCycle']),
+    setCycle: D('Sets the cycle the clock is at, from the next cycle scheduled (Tidal\'s setCycle).', 'setCycle(16)', undefined, ['resetCycles', 'getnow']),
+    cps: D('The tempo as a control, as Tidal\'s cps: when an event with cps plays, the tempo changes to it (setcps is once of it).', 'sound("bd*4").cps("<0.5 0.6>")', undefined, ['setcps']),
+    sometimesByAfter: D('Tidal\'s sometimesBy\': applies the function first, then keeps each changed event with the given probability (and the unchanged ones the rest of the time).', 'sound("hh*8").sometimesByAfter(0.5, x => x.fast(2))', undefined, ['sometimesBy']),
+    triggerWith: D('Tidal\'s triggerWith: restarts the pattern at fn(the cycle position when the code runs), e.g. Math.ceil for the next cycle.', 'sound("<bd sn cp hh>").triggerWith(Math.ceil)', undefined, ['qtrigger', 'trigger']),
+    ctrigger: D('Restarts the pattern at the next cycle when the code runs (Tidal\'s ctrigger; the same as qtrigger).', 'sound("<bd sn cp hh>").ctrigger()', undefined, ['qtrigger', 'triggerWith']),
+    rtrigger: D('Restarts the pattern at the nearest cycle when the code runs (Tidal\'s rtrigger).', 'sound("<bd sn cp hh>").rtrigger()', undefined, ['ctrigger', 'ftrigger']),
+    ftrigger: D('Restarts the pattern at the start of the current cycle when the code runs (Tidal\'s ftrigger).', 'sound("<bd sn cp hh>").ftrigger()', undefined, ['ctrigger', 'rtrigger']),
+    mtrigger: D('Restarts the pattern at the next cycle divisible by n when the code runs (Tidal\'s mtrigger).', 'sound("<bd sn cp hh>").mtrigger(4)', undefined, ['qtrigger', 'mt']),
+    mt: D('The same as mtrigger().', 'sound("<bd sn cp hh>").mt(4)', undefined, ['mtrigger']),
+    jumpInNext: D('Tidal\'s jumpIn\': switches the stream n cycles after the next cycle starts.', 'jumpInNext(1, 1, sound("cp*4"))', TRANSITION_TIP, ['jumpIn', 'jumpMod']),
+    jumpModOffset: D('Tidal\'s jumpMod\': like jumpMod, switching `offset` cycles later.', 'jumpModOffset(1, 4, 1, sound("bd sn"))', TRANSITION_TIP, ['jumpMod']),
+    histpan: D('Tidal\'s histpan: the stream\'s last n patterns played together, spread from left to right.', 'histpan(1, 3, sound("arpy*4").note("c e g b"))', 'Each new version of the stream adds to its history.', ['xfadeIn']),
+    waitT: D('Tidal\'s waitT: waits some cycles, then runs a transition. Give the transition and its arguments: waitT(1, 4, xfadeIn, 8, pattern).', 'waitT(1, 2, xfadeIn, 4, sound("hh*8"))', TRANSITION_TIP, ['wait', 'xfadeIn']),
+    weaveWith: D('Tidal\'s weaveWith (weave\'): like weave, with functions instead of patterns, each given the control pattern slowed over the cycles.', 'weaveWith(3, pan(saw2), [x => sound("bd sn").set(x), x => sound("hh*4").set(x)])', undefined, ['weave']),
+});
+
+// Tidal's *Take controls: one for every numeric control (nTake has its own entry).
+for (const name of CONTROL_NAMES) {
+    if (['s', 'sound', 'vowel', 'unit', 'nrpn', 'n'].includes(name)) continue;
+    DOCS[name + 'Take'] = D(
+        `Tidal's ${name}Take: each played event takes the next value of the list as its ${name}, counted under the name across cycles and code changes.`,
+        undefined,
+        undefined,
+        ['nTake', name],
+    );
+}
+
 /** Globals whose help differs from the method of the same name. */
 export const GLOBAL_DOCS: Record<string, Doc> = {
+    toScaleBy: D('toScaleBy(octave, steps, numbers): like toScale, with an octave of `octave` semitones (Tidal\'s toScale\').', 'note(toScaleBy(10, [0, 3, 7], "0 1 2 3 4 5")).sound("arpy")', undefined, ['toScale']),
+    fitSlices: D('fitSlices(cycles, n, from, to, pattern): cuts the pattern into n parts named by `from`, played in the order of `to` (Tidal\'s fit\').', 'fitSlices(1, 2, "0 1", "1 0", sound("bd sn"))', undefined, ['fit']),
+    fastAppend: D('fastAppend(a, b): both patterns squeezed into one cycle.', 'fastAppend(sound("bd*2"), sound("hh*3"))', undefined, ['slowAppend']),
+    slowAppend: D('slowAppend(a, b): one pattern per cycle, a then b.', 'slowAppend(sound("bd*2"), sound("hh*3"))', undefined, ['fastAppend']),
+    spreadf: D('spreadf(fns, pattern): applies the functions in turn, one per cycle.', 'spreadf([x => x.rev(), x => x.fast(2)], sound("bd sn hh"))', undefined, ['spread']),
     toScale: D('toScale(steps, numbers) turns a pattern of numbers into notes of a scale given as semitones.', 'note(toScale([0, 2, 3, 5, 7, 8, 10], "0 2 4 <6 7>")).sound("arpy")', undefined, ['scale']),
     pickF: D('pickF(indices, fns, pattern) applies to the pattern the function the index pattern picks.', 'pickF("<0 1>", [x => x.rev(), x => x.fast(2)], sound("bd sn hh"))', undefined, ['selectF']),
     selectF: D('selectF(amount, fns, pattern) applies to the pattern the function a number from 0 to 1 picks.', 'selectF("<0 0.5>", [x => x.rev(), x => x.fast(2)], sound("bd sn hh"))', undefined, ['pickF']),
@@ -804,7 +971,7 @@ export const GLOBAL_DOCS: Record<string, Doc> = {
 export const SOUND_DOCS: Record<string, Doc> = {
     bd: D('Bass drum (kick): a synthesised kick with a pitch drop. With Dirt-Samples loaded, the bd bank of recorded kicks plays instead.', 'sound("bd*4")', '.n() picks a variation.', ['sn', 'hh']),
     sn: D('Snare drum: noise and a tone. The backbeat, usually on the second and fourth beat.', 'sound("~ sn ~ sn")', undefined, ['cp', 'bd']),
-    hh: D('Hi-hat: short, bright noise. Usually plays fast patterns like hh*8 or hh*16.', 'sound("hh*8").gain(0.6)', undefined, ['oh', 'ch']),
+    hh: D('Hi-hat: short, bright noise. Usually plays fast patterns like hh*8 or hh*16.', 'sound("hh*8").gain(0.88)', undefined, ['oh', 'ch']),
     oh: D('Open hi-hat: a longer hi-hat. Placed on the off-beats it gives the house groove.', 'sound("[~ oh]*4")', undefined, ['hh', 'ch']),
     ch: D('Closed hi-hat: a very short, tight hi-hat.', 'sound("ch*16")', undefined, ['hh', 'oh']),
     cp: D('Hand clap: bursts of noise. Often doubles or replaces the snare.', 'sound("~ cp ~ cp")', undefined, ['sn']),
@@ -816,27 +983,49 @@ export const SOUND_DOCS: Record<string, Doc> = {
     tri: D('A triangle-wave synth: mellow, between sine and square. Nice for melodies and soft chords.', 'sound("tri").note("<c\'maj a\'min>").legato(1)', 'Outside a sound string, tri is a signal instead.', ['sine', 'square']),
     noise: D('White noise: all frequencies equally. Filter it into hats, risers and wind.', 'sound("noise*8").hpf(6000).sustain(0.05)', undefined, ['pink']),
     pink: D('Pink noise: softer and darker than white noise, with less treble.', 'sound("pink ~ ~ pink").sustain(0.2).hpf(800)', undefined, ['noise']),
+
+    // SuperDirt-style synths
+    supersaw: D('Seven detuned saws, as SuperDirt\'s supersaw: the trance lead and pad. detune spreads them (in semitones), voice sets the level of the side voices.', 'sound("supersaw").note("<c3\'min7 f3\'maj7>").legato(1).lpf(2000)', undefined, ['supersquare', 'detune', 'voice']),
+    supersquare: D('Seven detuned square waves: hollow and wide. detune and voice work as in supersaw.', 'sound("supersquare*4").note("c3 eb3 g3 bb3").legato(0.8)', undefined, ['supersaw']),
+    superpwm: D('Pulse-width modulation: two detuned pulse waves whose width sweeps, rate times a second, by lfo. A warm, moving analogue pad.', 'sound("superpwm").note("<c3 g2>").legato(1).rate(0.5)', undefined, ['rate', 'lfo']),
+    superhoover: D('The hoover of rave music (after Nathan Ho\'s SynthDef): 20 detuned saws, each with one an octave down, spread across the stereo field and saturated, scooping up from 5 semitones below to 6 above and settling over 1.8 seconds, through FreeVerb2 (mix 0.3, room 0.9) that rings on for 4 seconds after the note.', 'sound("superhoover").note("d4").legato(1)', 'As in SuperCollider, amp is 0.1 by default. pitchenv() replaces the scoop; detune sets the spread (0.6 semitones); freeverb, freeroom and freedamp change the reverb.', ['supergabber', 'pitchenv', 'freeverb']),
+    superreese: D('Reese bass: three saws detuned against each other and a sine an octave down, the drum and bass growl. Shape it with lpf().', 'sound("superreese").note("<c2 eb2>").legato(1).lpf(600)', undefined, ['detune', 'voice']),
+    superzow: D('Phasing saws that sweep (rate, lfo), with a small rise in pitch at the start.', 'sound("superzow*2").note("c3 g3").legato(1)', undefined, ['rate', 'lfo']),
+    superchip: D('A chiptune pulse wave: voice sets the pulse width, rate and lfo a vibrato.', 'sound("superchip*8").note("c4 e4 g4 c5").voice("<0.125 0.5>")', undefined, ['voice']),
+    superfm: D('Two-operator FM: bright bells, basses and electric pianos. voice is the modulation index, semitone the modulator\'s interval above the note.', 'sound("superfm*4").note("c3 e3 g3 b3").voice(0.4).semitone(12)', undefined, ['voice', 'semitone']),
+    superstatic: D('Crackle: random clicks through a band-pass at the note\'s frequency; voice sets how many.', 'sound("superstatic").legato(1).voice(0.3)', undefined, ['noise']),
+    superpiano: D('An additive piano: stretched partials that fade, the higher ones faster, with a hammer thump. voice sets the brightness.', 'sound("superpiano").note("<c4\'maj e4\'min>").voice(0.6)', undefined, ['arpy']),
+    supergong: D('A gong: inharmonic partials beating slowly, with a long decay. voice sets the brightness.', 'sound("supergong").note("c3").slow(2)', undefined, ['superfm']),
+    superkick: D('A kick drum: a sine falling 30 semitones in 60 ms, with a click (voice). penv, pdecay and decay change it.', 'sound("superkick*4")', undefined, ['super808', 'penv', 'pdecay']),
+    super808: D('The TR-808 kick: a long sine with a slow pitch fall, the hip-hop and trap boom. decay sets its length.', 'sound("super808 ~ ~ super808").decay(1.5)', undefined, ['superkick', 'decay']),
+    superhat: D('The TR-808 hi-hat: six square waves at metallic ratios, band-passed. decay opens it.', 'sound("superhat*8").decay("<0.05 0.3>")', undefined, ['hh', 'decay']),
+    supersnare: D('A snare: two triangle tones and band-passed noise; voice sets the tone\'s share.', 'sound("~ supersnare ~ supersnare")', undefined, ['sn', 'voice']),
+    superclap: D('A hand clap: four quick noise bursts and a tail.', 'sound("~ superclap ~ superclap")', undefined, ['cp']),
+    supergabber: D('The gabber kick (after Nathan Ho\'s SynthDef): a saw falling 4 octaves in 80 ms to 60 Hz, distorted hard, with a chorused high band. penv sets the fall (48 semitones).', 'sound("supergabber*4").legato(0.8).peak(3000).peakgain(15).peakq(2)', 'As in SuperCollider, amp is 0.1 by default and its envelope has a curve of -4. A peak boost (peak, peakgain, peakq) sweeping over the bars gives the classic sound.', ['superkick', 'superhoover', 'penv']),
 };
 
 /** Mini-notation symbols, by the title shown in the help. */
 export const MINI_DOCS: Record<string, Doc> = {
     '~': D('A rest: one step of silence. In "bd ~ sn ~" the kick and snare alternate with silence.', 'sound("bd ~ ~ bd ~ ~ sn ~")'),
     '[ ]': D('Groups steps into a single step: everything inside shares the time of one step, so it plays faster. "bd [sn sn]" plays the two snares in the second half.', 'sound("bd [~ bd] sn [hh hh hh]")', 'Brackets can be nested: "bd [sn [hh hh]]".'),
-    '< >': D('Alternation: plays one of the steps inside per cycle, in turn. "<bd sn cp>" is bd in cycle 0, sn in cycle 1, cp in cycle 2, then again.', 'sound("bd <sn cp> bd <sn [sn sn]>")', 'Great for chord progressions: note("<c\'maj a\'min f\'maj g\'maj>").'),
-    '{ }': D('Polymeter: each comma-separated part keeps its own step length, so parts with different lengths drift against each other. The first part sets how many steps fit in a cycle, or %n sets it.', 'sound("{bd sn, hh hh hh}")\nsound("{bd sn hh}%4")'),
+    '< >': D('Alternation: plays one of the steps inside per cycle, in turn. "<bd sn cp>" is bd in cycle 0, sn in cycle 1, cp in cycle 2, then again. Weights count, as in Tidal: "<a@3 b>" plays a for three cycles.', 'sound("bd <sn cp> bd <sn [sn sn]>")', 'Great for chord progressions: note("<c\'maj a\'min f\'maj g\'maj>").'),
+    '{ }': D('Polymeter: each comma-separated part keeps its own step length, so parts with different lengths drift against each other. The first part sets how many steps fit in a cycle (its weights count: "{a@3 b, c d}" plays 4), or %n sets it (a pattern too: %<2 4>).', 'sound("{bd sn, hh hh hh}")\nsound("{bd sn hh}%4")'),
     ',': D('Plays the parts on each side at the same time. "[bd, hh hh]" plays a kick and two hats together.', 'sound("[bd*2, hh*4, ~ sn]")'),
     '|': D('Random choice: picks one of the parts each cycle.', 'sound("bd [sn | cp | oh] bd [hh | ~]")'),
     '*n': D('Plays the step n times in its slot: "hh*4" is four hats in the time of one step. n can be a fraction ("bd*1.5") or a pattern in < > or [ ]: "bd*<2 3>" is 2 one cycle and 3 the next.', 'sound("bd*2 sn [hh hh]*2 cp*<3 4>")', undefined, ['fast', 'ply']),
     '/n': D('Stretches the step over n cycles: "bd/2" plays once every two cycles, "[a b c]/3" one item per cycle.', 'sound("bd sn/2")', undefined, ['slow']),
-    '!n': D('Repeats the step: "bd!3 sn" is "bd bd bd sn". A lone ! repeats the previous step once more.', 'sound("bd!3 sn")'),
-    '@n': D('Makes the step n times longer than the others (elongation): in "c@3 e" the c lasts three quarters of the cycle.', 'sound("tri").note("c@3 e g@2 b")'),
+    '!n': D('Repeats the step: "bd!3 sn" is "bd bd bd sn". A lone ! (or "! 3" after a space) repeats the previous step, as in Tidal.', 'sound("bd!3 sn")'),
+    '@n': D('Makes the step n times longer than the others (elongation): in "c@3 e" the c lasts three quarters of the cycle. After a space it lengthens the step before ("c @3 e"), and "_@2" adds two.', 'sound("tri").note("c@3 e g@2 b")'),
     '?': D('Removes the step at random: half of the time, or with the probability that follows, e.g. ?0.3.', 'sound("hh*8?")', undefined, ['degradeBy']),
-    '(k,n,r)': D('A Euclidean rhythm: k hits spread as evenly as possible over n steps, rotated by r steps. (3,8) is the tresillo. Each number can be a pattern: "bd(<3 5>,8)".', 'sound("bd(3,8) sn(2,8,4) hh(5,8)")', undefined, ['euclid']),
+    '(k,n,r)': D('A Euclidean rhythm: k hits spread as evenly as possible over n steps, rotated by r steps. (3,8) is the tresillo. Each number can be a pattern or a sequence: "bd(<3 5>,8)", "bd(3 5,8)".', 'sound("bd(3,8) sn(2,8,4) hh(5,8)")', undefined, ['euclid']),
     ':n': D('Picks a sound variation: "sn:2" is the third variation (or the third file of a sample bank). The same as .n(2).', 'sound("bd:0 sn:1 hh:2 cp:3")', undefined, ['n']),
     '_': D('Extends the previous step by one more step: "c _ _ e" holds c for three steps.', 'sound("tri").note("c _ _ e g _ b _")'),
     '.': D('Groups steps with dots: "bd sn . hh hh hh" is the same as "[bd sn] [hh hh hh]".', 'sound("bd bd . sn . hh hh hh")'),
     '%n': D('Sets how many steps per cycle a polymeter plays: "{bd sn hh}%4" plays four steps of the three-step pattern each cycle.', 'sound("{bd sn hh}%4")'),
-    '..': D('A range: "0 .. 7" expands to the steps 0 1 2 3 4 5 6 7, and "7 .. 0" counts down.', 'sound("hh*8").n("0 .. 7")'),
+    '..': D('A range, as in Tidal: "0 .. 7" is one step holding 0 1 2 3 4 5 6 7 (so "0 .. 3 4" is [0 1 2 3] 4), "7 .. 0" counts down, and note names count in semitones ("c .. e").', 'sound("hh*8").n("0 .. 7")'),
+    '-': D('A rest, the same as ~ (Tidal\'s parser takes both).', 'sound("bd - sn -")'),
+    '^name': D('Reads a value set from outside with setBus(name): "^kick" plays what setBus("kick", ...) holds, and nothing until it is set (Tidal\'s ^ reads control values).', 'sound("^kick sn")'),
+    '1%3': D('Numbers can be fractions (1%3) or Tidal\'s ratio letters: w 1, h 1/2, q 1/4, e 1/8, s 1/16, t 1/3, f 1/5, x 1/6 (3q is three quarters).', 'sound("bd*<4 3q>")'),
 };
 
 /** Families of scales, for the hover help of scale names. */
@@ -887,6 +1076,8 @@ export const SCALE_DOCS: Record<string, string> = {
     harmonicmajor: 'Harmonic major: major with a lowered sixth.',
     melodicminordesc: 'Melodic minor descending: the same notes as natural minor.',
     melodicmajor: 'Melodic major: major with lowered sixth and seventh (the Hindu scale).',
+    bartok: 'Bartók: the melodic major, as in Tidal (major with lowered sixth and seventh).',
+    hindu: 'Hindu: the melodic major, as in Tidal (major with lowered sixth and seventh).',
     todi: 'Todi: an Indian raga scale.',
     purvi: 'Purvi: an Indian raga scale with a lowered second and a raised fourth.',
     marva: 'Marva: an Indian raga scale with a lowered second and a raised fourth.',

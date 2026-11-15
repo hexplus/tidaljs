@@ -34,7 +34,6 @@ export const GLOBAL_SIGNATURES: Record<string, Signature> = {
     irand: ['Random integers from 0 to n-1', P('n', 'how many values')],
     scale: ['Turn scale degrees into notes', P('name', 'a scale name like "major", "e:minor", or a pattern "<major minor>"'),
         P('degrees', 'scale degrees like "0 2 4", 0 is the root')],
-    scaleP: ['Same as scale', P('name', 'scale name or pattern'), P('degrees', 'scale degrees')],
     chord: ['A pattern of chords', P('pattern', 'chord names like "c\'maj e\'min7\'i"')],
     arp: ['Arpeggiate a chord pattern', P('mode', 'up, down, updown, converge... or a pattern of modes'), P('pattern', 'chords, e.g. "c\'maj e\'min"')],
     fit: ['Pick values from a list, shifting each cycle', P('step', 'how far the list shifts every cycle'),
@@ -160,7 +159,6 @@ export const METHOD_SIGNATURES: Record<string, Signature> = {
     trunc: ['Play only the first part of each cycle', P('fraction', '0 to 1, or a pattern')],
     repeatCycles: ['Repeat each cycle n times', P('n', 'repeats, or a pattern')],
     loopFirst: ['Loop the first cycle'],
-    discretise: ['Same as segment', P('n', 'samples per cycle')],
     press: ['Move every event to the second half of its step'],
     pressBy: ['Move every event later by part of its step', P('ratio', '0 to 1, or a pattern')],
     plyWith: ['Repeat each event, applying a function once more each time', P('n', 'repeats, or a pattern'), P('fn', FN)],
@@ -180,7 +178,6 @@ export const METHOD_SIGNATURES: Record<string, Signature> = {
     never: ['Never apply a function', P('fn', FN)],
     inside: ['Apply a function inside a fraction of the cycle', P('n', 'e.g. 2 for each half cycle'), P('fn', FN)],
     outside: ['Apply a function over several cycles', P('n', 'e.g. 2 for each pair of cycles'), P('fn', FN)],
-    chunkBack: ['Like chunk, moving backwards', P('n', 'number of parts, or a pattern'), P('fn', FN)],
     fix: ['Apply a function to events with given controls', P('fn', FN), P('controls', 'e.g. { s: "bd" } or { n: [1, 2] }')],
     unfix: ['Apply a function to events without given controls', P('fn', FN), P('controls', 'e.g. { s: "bd" }')],
     contrast: ['One function for events with given controls, another for the rest', P('fnMatch', FN), P('fnOther', FN),
@@ -206,8 +203,6 @@ export const METHOD_SIGNATURES: Record<string, Signature> = {
     // Echoes
     echo: ['Echoes that get quieter', P('count', 'number of sounds'), P('time', 'cycles between them, e.g. 0.2'), P('feedback', 'gain of each echo relative to the last, e.g. 0.5')],
     echoWith: ['Echoes changed by a function', P('count', 'number of sounds'), P('time', 'cycles between them'), P('fn', FN)],
-    stutWith: ['Same as echoWith', P('count', 'number of sounds'), P('time', 'cycles between them'), P('fn', FN)],
-    stut: ['Tidal\'s classic echo', P('count', 'number of sounds'), P('feedback', 'how quiet the last one gets, 0 to 1'), P('time', 'cycles between them')],
     stutter: ['Repeat each sound quickly', P('count', 'number of sounds'), P('time', 'cycles between them, e.g. 1/16')],
     ghost: ['Add ghost notes after each event'],
     ghostWith: ['Add ghost notes changed by a function', P('time', 'cycles, e.g. 1/8'), P('fn', FN)],
@@ -237,12 +232,12 @@ export const METHOD_SIGNATURES: Record<string, Signature> = {
 
 // Controls take one value: a number, a mini-notation string or a pattern.
 const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
-    n: ['Sound variation', 'variation number, e.g. "0 1 2"'],
+    n: ['Sound variation of a bank, or the note of a synth', 'number, e.g. "0 1 2"'],
     note: ['Musical notes', 'note names like "c e g", "eb3", chords "c\'maj", or semitones from middle C'],
-    up: ['Transpose', 'semitones, e.g. 12 for an octave'],
+    up: ['Same as note (Tidal\'s up); transpose with .add(note(12))', 'note names or semitones'],
     freq: ['Frequency', 'Hz, e.g. 440'],
     midinote: ['MIDI note', 'MIDI number, 60 is middle C'],
-    gain: ['Volume', '0 to 2, default 1'],
+    gain: ['Volume on SuperDirt\'s curve (level = gain^4)', '0 to 2, default 1'],
     pan: ['Stereo position', '-1 (left) to 1 (right)'],
     lpf: ['Low-pass filter', 'cutoff in Hz, e.g. 800'],
     cutoff: ['Same as lpf', 'cutoff in Hz'],
@@ -250,12 +245,12 @@ const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
     hcutoff: ['Same as hpf', 'cutoff in Hz'],
     bpf: ['Band-pass filter', 'center in Hz, e.g. 1000'],
     bandf: ['Same as bpf', 'center in Hz'],
-    resonance: ['Low-pass filter resonance', 'Q, e.g. 5'],
-    delay: ['Echo level', '0 to 1, e.g. 0.5'],
-    reverb: ['Reverb', 'amount, 0 to 1'],
+    resonance: ['Low-pass filter resonance', '0 to 1, as in SuperDirt (below 0 damps)'],
+    delay: ['Level of the orbit\'s delay', '0 to 1, e.g. 0.5'],
+    reverb: ['Amount of the orbit\'s reverb', '0 to 1'],
     room: ['Same as reverb', 'amount, 0 to 1'],
-    size: ['Reverb room size', '0 to 1'],
-    orbit: ['Effect bus', 'orbit number, e.g. 1'],
+    size: ['Size of the orbit\'s reverb', '0 to 1 (0.1 at first)'],
+    orbit: ['Orbit: its own delay and reverb', 'orbit number, e.g. 1'],
     distortion: ['Distortion', '1 to 100'],
     crush: ['Bit crusher', 'bits, 1 to 16 (lower is harsher)'],
     vowel: ['Formant filter', '"a", "e", "i", "o" or "u"'],
@@ -276,7 +271,7 @@ const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
     midichan: ['MIDI channel', '0 to 15'],
     delaytime: ['Time between echoes', 'seconds, e.g. 0.25 (cycles with lock(1))'],
     delayt: ['Same as delaytime', 'seconds'],
-    delayfeedback: ['How much each echo repeats', '0 to 1, default 0.5'],
+    delayfeedback: ['How much each echo repeats', '0 to 1 (0 at first)'],
     delayfb: ['Same as delayfeedback', '0 to 1'],
     dfb: ['Same as delayfeedback', '0 to 1'],
     lock: ['Delay time in cycles', '1 for cycles, 0 for seconds'],
@@ -286,11 +281,11 @@ const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
     cut: ['Cut group: a new sound stops the last one', 'group number, e.g. 1'],
     accelerate: ['Change the pitch while the sound plays', 'e.g. 1 to rise an octave, -0.5 to fall'],
     djf: ['DJ filter', '0 to 1: below 0.5 low-pass, above high-pass'],
-    lpq: ['Same as resonance', 'Q, e.g. 5'],
-    hpq: ['High-pass filter resonance', 'Q, e.g. 5'],
+    lpq: ['Same as resonance', '0 to 1, as in SuperDirt'],
+    hpq: ['High-pass filter resonance', '0 to 1, as SuperDirt\'s hresonance'],
     hresonance: ['Same as hpq', 'Q'],
     bpq: ['Band-pass filter resonance', 'Q, e.g. 5'],
-    bandq: ['Same as bpq', 'Q'],
+    bandq: ['Same as bpq', 'Q, default 10'],
     amp: ['Volume, as in SuperDirt', '0.4 is normal'],
     octave: ['Octave of synth notes', '5 is normal, 6 an octave up'],
     unit: ['Unit of speed', '"c" for cycles, "r" for rate'],
@@ -309,7 +304,70 @@ const CONTROL_HELP: Record<string, [summary: string, value: string]> = {
     sus: ['Same as sustain', 'seconds'],
     att: ['Same as attack', 'seconds'],
     rel: ['Same as release', 'seconds'],
+    // Envelopes and pitch
+    hold: ['Time held after the attack (SuperDirt)', 'seconds'],
+    decay: ['How long a sound rings, or the decay of a held synth', 'seconds'],
+    sustainlevel: ['Level a held synth decays to', '0 to 1, default 0'],
+    penv: ['Depth of the pitch envelope', 'semitones, e.g. 12'],
+    pattack: ['Time to reach the pitch envelope\'s depth', 'seconds'],
+    pdecay: ['Time back from the pitch envelope\'s depth', 'seconds, default 0.1'],
+    pcurve: ['Curve of the pitch envelope', '0 straight, negative fast at first'],
+    vib: ['Vibrato speed', 'Hz, e.g. 5'],
+    vibrato: ['Same as vib', 'Hz'],
+    vibmod: ['Vibrato depth', 'semitones each way, default 0.5'],
+    portamento: ['Glide from the previous note', 'seconds, e.g. 0.1'],
+    glide: ['Same as portamento', 'seconds'],
+    peak: ['Peak equaliser', 'centre in Hz, e.g. 1000'],
+    peakq: ['Width of the peak equaliser', 'Q, default 1'],
+    peakgain: ['Boost of the peak equaliser', 'dB, default 6 (negative cuts)'],
+    // Synth parameters
+    voice: ['Timbre of a SuperDirt-style synth', '0 to 1'],
+    detune: ['Detuning of a SuperDirt-style synth', 'semitones'],
+    semitone: ['Modulator interval of superfm', 'semitones, default 12'],
+    rate: ['Modulation speed of a SuperDirt-style synth', 'Hz'],
+    lfo: ['Modulation depth of a SuperDirt-style synth', '0 to 1'],
+    // SuperDirt effects
+    squiz: ['Lo-fi pitch raiser', '1 for none, e.g. 2, 4 or 8'],
+    waveloss: ['Drop wave cycles at random', '0 to 100'],
+    krush: ['Krush distortion', 'e.g. 1 to 8'],
+    kcutoff: ['Low-pass after krush', 'Hz, default 3140'],
+    triode: ['Tube-like distortion', '0 to 1'],
+    octer: ['Add the octave up', '0 to 1'],
+    octersub: ['Add the octave down', '0 to 1'],
+    octersubsub: ['Add two octaves down', '0 to 1'],
+    fshift: ['Frequency shift', 'Hz, can be negative'],
+    fshiftnote: ['Frequency shift in multiples of the note', 'e.g. 0.5'],
+    fshiftphase: ['Phase of the frequency shifter', 'radians'],
+    leslie: ['Rotating speaker', 'mix, 0 to 1'],
+    lrate: ['Rotating speaker speed', 'turns a second, default 6.7'],
+    lsize: ['Rotating speaker size', 'metres, default 0.3'],
+    freeze: ['Spectral freeze', '1 to freeze'],
+    comb: ['Spectral comb', '0 to 1'],
+    smear: ['Spectral smear', '0 to 1'],
+    scram: ['Spectral scramble', '0 to 1'],
+    binshift: ['Shift the spectrum', '1 is about 1000 Hz, can be negative'],
+    hbrick: ['Spectral high-pass', 'fraction of the spectrum removed, 0 to 1'],
+    lbrick: ['Spectral low-pass', 'fraction of the spectrum removed, 0 to 1'],
+    // The orbit's reverb and the tempo
+    dry: ['Turn the orbit\'s reverb down', '0 (all of it) to 1 (none)'],
+    cps: ['Tempo, as a control', 'cycles per second'],
+    // SuperCollider's FreeVerb2
+    freeverb: ['FreeVerb2 on this sound', 'mix, 0 to 1'],
+    freeroom: ['Room size of freeverb', '0 to 1, default 0.5'],
+    freedamp: ['Damping of freeverb', '0 to 1, default 0.5'],
+    // MIDI
+    nrpn: ['MIDI NRPN message', '"parameter:value", e.g. "1000:64"'],
+    nrpnn: ['MIDI NRPN parameter number', '0 to 16383'],
+    nrpnv: ['MIDI NRPN value', '0 to 16383'],
 };
+// Filter envelopes: lpenv, lpattack... and the same for hp, bp and peak.
+for (const [prefix, filter] of [['lp', 'low-pass'], ['hp', 'high-pass'], ['bp', 'band-pass'], ['peak', 'peak equaliser']]) {
+    CONTROL_HELP[prefix + 'env'] = [`Envelope depth of the ${filter}`, 'octaves, can be negative'];
+    CONTROL_HELP[prefix + 'attack'] = [`Attack of the ${filter} envelope`, 'seconds'];
+    CONTROL_HELP[prefix + 'decay'] = [`Decay of the ${filter} envelope`, 'seconds'];
+    CONTROL_HELP[prefix + 'sustain'] = [`Sustain of the ${filter} envelope`, '0 to 1 of the depth'];
+    CONTROL_HELP[prefix + 'release'] = [`Release of the ${filter} envelope`, 'seconds'];
+}
 for (const [name, [summary, desc]] of Object.entries(CONTROL_HELP)) {
     METHOD_SIGNATURES[name] = [summary, P('value', desc + '. A number or a pattern')];
 }
@@ -391,6 +449,76 @@ Object.assign(GLOBAL_SIGNATURES, {
     swap: ['Replace values from a table', P('table', '{ a: "bd", b: "sn" }'), P('pattern', 'e.g. "a b a"')],
     weave: ['Spread a control pattern across patterns, offset in time', P('cycles', 'how long one pass takes'), P('controls', 'a control pattern, e.g. pan(saw)'), P('patterns', 'a list of patterns')],
     snowball: ['Accumulate a function, cycle by cycle', P('depth', 'cycles'), P('combine', '(a, b) => a.add(b)'), P('fn', FN), P('pattern', PATTERN)],
+
+    // The rest of Tidal's library
+    sig: ['A signal from a function of time', P('fn', 't => ..., t in cycles')],
+    perlinWith: ['Perlin noise driven by a pattern', P('input', 'a numeric pattern, e.g. saw.mul(4)')],
+    perlin2: ['2D Perlin noise, time against a pattern', P('y', 'a numeric pattern')],
+    perlin2With: ['2D Perlin noise from two patterns', P('x', 'a numeric pattern'), P('y', 'a numeric pattern')],
+    interlace: ['Move between two patterns with distortion', P('a', PATTERN), P('b', PATTERN)],
+    seqP: ['Play patterns between given cycles', P('sections', '[[start, stop, pattern], ...]')],
+    seqPLoop: ['seqP, looping', P('sections', '[[start, stop, pattern], ...]')],
+    fastAppend: ['Two patterns squeezed into one cycle', P('a', PATTERN), P('b', PATTERN)],
+    slowAppend: ['Two patterns, one per cycle', P('a', PATTERN), P('b', PATTERN)],
+    spreadf: ['Apply the functions in turn, one per cycle', P('fns', 'a list of functions'), P('pattern', PATTERN)],
+    toScaleBy: ['Numbers to notes of a scale with any octave', P('octave', 'semitones'), P('steps', 'semitones'), P('pattern', 'numbers')],
+    fitSlices: ['Cut a pattern into parts and reorder them', P('cycles', 'cycles to cut'), P('n', 'parts'), P('from', 'part names'), P('to', 'order'), P('pattern', PATTERN)],
+    resetCycles: ['Count cycles from 0 again'],
+    setOutput: ['Set the master volume and limiter', P('gain?', 'volume, 0.8 by default'), P('limiter?', 'true (default) or false')],
+    first: ['Play the first cycle once, right away', P('pattern', PATTERN)],
+    asap: ['Same as once', P('pattern', PATTERN)],
+    only: ['Play only this pattern; the other streams stop', P('pattern', PATTERN)],
+    panic: ['Stop everything and silence MIDI'],
+    setbpm: ['Set the tempo in beats per minute', P('bpm', 'beats per minute, 4 beats per cycle')],
+    getcps: ['The tempo in cycles per second'],
+    getnow: ['The cycle the clock is at'],
+    setCycle: ['Set the cycle the clock is at', P('cycle', 'e.g. 0')],
+    jumpInNext: ['Switch n cycles after the next cycle starts (Tidal\'s jumpIn\')', P('stream', 'a number (1 is d1) or a name'), P('n', 'cycles'), P('pattern', PATTERN)],
+    jumpModOffset: ['jumpMod, then offset cycles later (Tidal\'s jumpMod\')', P('stream', 'a number (1 is d1) or a name'), P('n', 'e.g. 4'), P('offset', 'cycles'), P('pattern', PATTERN)],
+    histpan: ['The stream\'s last n patterns, panned', P('stream', 'a number or a name'), P('n', 'how many'), P('pattern', PATTERN)],
+    waitT: ['Wait, then a transition', P('stream', 'a number or a name'), P('cycles', 'cycles to wait'), P('transition', 'e.g. xfadeIn'), P('args', 'its arguments, then the pattern')],
+    weaveWith: ['weave, with functions', P('cycles', 'how long one pass takes'), P('controls', 'a control pattern'), P('fns', 'a list of functions')],
+});
+
+// Operators: the rhythm from the left (add), the right (addRight), both (addBoth) or squeezed (addSqueeze).
+const OPERAND = P('value', 'a number, a mini-notation string, controls like { gain: 0.8 }, or a pattern');
+const OPERATOR_TIDAL: Record<string, string> = { set: '#', keep: '|<', add: '+', sub: '-', mul: '*', div: '/', mod: '%', pow: '**' };
+for (const [base, symbol] of Object.entries(OPERATOR_TIDAL)) {
+    const right = base === 'set' ? '>|' : base === 'keep' ? '<|' : symbol + '|';
+    const both = base === 'set' ? '|>|' : base === 'keep' ? '|<|' : '|' + symbol + '|';
+    const squeeze = base === 'set' ? '||>' : base === 'keep' ? '||<' : '||' + symbol;
+    METHOD_SIGNATURES[base + 'Right'] = [`${base}, with the rhythm of the other pattern (Tidal's ${right})`, OPERAND];
+    METHOD_SIGNATURES[base + 'Both'] = [`${base}, with the rhythm of both patterns (Tidal's ${both})`, OPERAND];
+    METHOD_SIGNATURES[base + 'Squeeze'] = [`${base}, squeezing a cycle of the other pattern into each event (Tidal's ${squeeze})`, OPERAND];
+}
+
+Object.assign(METHOD_SIGNATURES, {
+    keep: ['Keep this pattern\'s controls, adding missing ones (Tidal\'s |<)', OPERAND],
+    everyOffset: ['Apply a function when cycle mod n equals the offset (Tidal\'s every\')', P('n', 'period in cycles'), P('offset', 'which cycle of the period'), P('fn', FN)],
+    withinZoom: ['Apply a function to part of each cycle, zoomed (Tidal\'s within\')', P('begin', '0 to 1'), P('end', '0 to 1'), P('fn', FN)],
+    toScaleBy: ['Numbers to notes of a scale with any octave (Tidal\'s toScale\')', P('octave', 'semitones, e.g. 10'), P('steps', 'semitones, e.g. [0, 3, 7]')],
+    fitSlices: ['Cut into parts and play them in another order (Tidal\'s fit\')', P('cycles', 'cycles to cut, e.g. 1'), P('n', 'number of parts'),
+        P('from', 'names of the parts, e.g. "0 1 2 3"'), P('to', 'order to play them, e.g. "3 [2 1] 0"')],
+    substruct: ['Each true step plays a whole cycle, squeezed', P('booleans', 'e.g. "t ~ t t"')],
+    whenT: ['Apply a function to events whose time passes a test', P('test', 't => ..., t in cycles'), P('fn', FN)],
+    fastAppend: ['This pattern and another squeezed into one cycle', P('other', PATTERN)],
+    slowAppend: ['This pattern, then another in the next cycle', P('other', PATTERN)],
+    jux4: ['jux for four speakers', P('fn', FN)],
+    juxcut: ['jux with a cut group on each side', P('fn', FN)],
+    spreadf: ['Apply the functions of a list in turn, one per cycle', P('fns', 'a list of functions')],
+    fastSqueeze: ['Each step plays a whole cycle at its speed', P('factors', 'speeds, e.g. "1 2 [4 1]"')],
+    slowSqueeze: ['Each step plays a whole cycle slowed down', P('factors', 'e.g. "1 2"')],
+    mono: ['Play one note at a time'],
+    timeLoop: ['Loop the first n cycles', P('n', 'cycles, or a pattern')],
+    sometimesByAfter: ['Apply a function, then keep changed events with a probability (Tidal\'s sometimesBy\')', P('prob', '0 to 1, or a pattern'), P('fn', FN)],
+    triggerWith: ['Restart at fn(cycle position when the code runs)', P('fn', 't => Math.ceil(t)')],
+    ctrigger: ['Restart at the next cycle'],
+    rtrigger: ['Restart at the nearest cycle'],
+    ftrigger: ['Restart at the start of this cycle'],
+    mtrigger: ['Restart at the next cycle divisible by n', P('n', 'e.g. 4')],
+    mt: ['Same as mtrigger', P('n', 'e.g. 4')],
+    pitchenv: ['Pitch envelope with breakpoints, as SuperCollider\'s Env', P('levels', 'semitones, e.g. [-5, 6, 0]'),
+        P('times', 'seconds between them, e.g. [0.1, 1.7]'), P('curves?', '0 or "lin", negative fast at first, "exp"; one or a list')],
 });
 
 Object.assign(METHOD_SIGNATURES, {

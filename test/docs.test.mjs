@@ -10,6 +10,7 @@ import { DOCS, GLOBAL_DOCS, MINI_DOCS, SCALE_DOCS, SOUND_DOCS } from '../src/dat
 import { GLOBAL_SIGNATURES, METHOD_SIGNATURES } from '../src/data/signatures.ts';
 import { SNIPPETS } from '../src/data/snippets.ts';
 import { docForLabel } from '../src/data/docs.ts';
+import { EXAMPLES } from '../src/data/examples.ts';
 
 vm.runInThisContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), { filename: 'tidal.js' });
 const { TidalJS, PatternBuilder } = globalThis;
@@ -56,7 +57,7 @@ for (const [name, doc] of Object.entries(all)) {
 // Every example evaluates and plays without errors or warnings. Sample-bank
 // names only exist once samples() has loaded, so those warnings are allowed.
 const ALLOWED = /Unknown sound "(breaks125|drum)"|Web MIDI is not available/;
-const SILENT = new Set(['query', 'firstCycle', 'exportPattern', 'once']);
+const SILENT = new Set(['query', 'firstCycle', 'exportPattern', 'once', 'first', 'asap']);
 const examples = [
     ...Object.entries(DOCS), ...Object.entries(GLOBAL_DOCS), ...Object.entries(SOUND_DOCS), ...Object.entries(MINI_DOCS),
 ].filter(([, doc]) => doc.example);
@@ -78,4 +79,26 @@ for (const [name, doc] of examples) {
 }
 assert.deepStrictEqual(failures, [], 'examples that do not run:\n' + failures.join('\n'));
 
-console.log('docs: all ' + passed + ' checks passed (' + examples.length + ' examples)');
+// The editor's Examples tab: every piece runs and plays without warnings
+// (sample banks only exist once samples() has loaded them).
+const exampleFailures = [];
+for (const example of EXAMPLES) {
+    try {
+        const result = t.eval(example.code);
+        ok(result.success, 'failed: ' + result.error);
+        const allowed = /samples\(/.test(example.code) ? /Unknown sound/ : ALLOWED;
+        const warnings = result.warnings.filter((w) => !allowed.test(w));
+        ok(warnings.length === 0, 'warns: ' + warnings.join('; '));
+        let events = 0;
+        for (const pattern of t.channels.values()) {
+            for (const ev of pattern.query(0, 8)) { ok(ev && typeof ev.value === 'object', 'bad event'); events++; }
+        }
+        ok(events > 0, 'plays nothing');
+    } catch (error) {
+        exampleFailures.push(example.group + ' / ' + example.title + ': ' + error.message);
+    }
+    t.stopAll();
+}
+assert.deepStrictEqual(exampleFailures, [], 'editor examples that do not run:\n' + exampleFailures.join('\n'));
+
+console.log('docs: all ' + passed + ' checks passed (' + examples.length + ' help examples, ' + EXAMPLES.length + ' editor examples)');

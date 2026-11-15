@@ -155,7 +155,14 @@ export function createLibrary(session: Session) {
         setCurrent(null);
         setTitle(result.title);
         session.openCode(result.code, result.title);
-        session.notify("", 'Opened "' + file.name + '". Press Save to keep it in the library.');
+        if (result.from === "supercollider") {
+          session.notify(result.parts ? "" : "warn", result.parts
+            ? 'Converted "' + file.name + '" from SuperCollider: ' + result.parts + " part" + (result.parts === 1 ? "" : "s")
+              + ". Notes on the conversion are at the top of the code. Press Save to keep it."
+            : 'Converted "' + file.name + '", but nothing in it plays: see the notes at the top of the code.');
+        } else {
+          session.notify("", 'Opened "' + file.name + '". Press Save to keep it in the library.');
+        }
         return;
       }
       const store = await storePromise;
@@ -170,11 +177,11 @@ export function createLibrary(session: Session) {
     }
   }
 
-  /** Opens the file picker. */
-  function chooseFile() {
+  /** Opens the file picker; `accept` narrows it (SuperCollider files only, for the SuperCollider item). */
+  function chooseFile(accept = ".js,.tidal,.txt,.json,.scd,.sc,text/plain,application/json,text/javascript") {
     const picker = document.createElement("input");
     picker.type = "file";
-    picker.accept = ".js,.tidal,.txt,.json,text/plain,application/json,text/javascript";
+    picker.accept = accept;
     picker.onchange = () => {
       const file = picker.files?.[0];
       if (file) void importFile(file);
@@ -185,6 +192,7 @@ export function createLibrary(session: Session) {
   return {
     sketches, current, title, setTitle, kind, dirty,
     save, open, rename, remove, newSketch, exportCurrent, exportAll, importFile, chooseFile,
+    chooseSuperCollider: () => chooseFile(".scd,.sc,.txt,text/plain"),
   };
 }
 
@@ -304,9 +312,10 @@ export function LibraryPanel(library: Library) {
         div("library-buttons", [
           button({ class: "btn small", type: "button", title: "Download the editor's code as a .js file", on: { click: library.exportCurrent } }, "Export sketch"),
           button({ class: "btn small", type: "button", title: "Download every saved sketch as one .json file", on: { click: library.exportAll } }, "Export all"),
-          button({ class: "btn small", type: "button", title: "Open a .js or .txt file, or add the sketches of a .json library", on: { click: library.chooseFile } }, "Import"),
+          button({ class: "btn small", type: "button", title: "Open a .js or .txt file, or add the sketches of a .json library", on: { click: () => library.chooseFile() } }, "Import"),
+          button({ class: "btn small", type: "button", title: "Convert a SuperCollider file (.scd) to TidalJS code", on: { click: library.chooseSuperCollider } }, "Import .scd"),
         ]),
-        p({ class: "hint" }, "Import a .js file to open it, or a library .json to add its sketches. You can also drop a file here."),
+        p({ class: "hint" }, "Import a .js file to open it, a library .json to add its sketches, or a SuperCollider .scd file to convert it. You can also drop a file here."),
       ]),
     ],
   );

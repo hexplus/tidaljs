@@ -3,6 +3,7 @@
  * import. Sketches are kept in IndexedDB; where it is not available (some
  * private modes), in localStorage. No DOM here except for downloads.
  */
+import { convertSuperCollider, looksLikeSuperCollider } from "./supercollider/index.ts";
 
 export interface Sketch {
   id: string;
@@ -92,14 +93,20 @@ export function exportSketch(sketch: Pick<Sketch, "title" | "code" | "cps">): st
 
 export type ImportResult =
   | { kind: "library"; sketches: Sketch[] }
-  | { kind: "code"; title: string; code: string };
+  | { kind: "code"; title: string; code: string; from?: "supercollider"; parts?: number };
 
 /**
  * Reads an imported file: a library exported as JSON (or a single sketch,
- * or a list of sketches), or code. The file name gives code a title.
+ * or a list of sketches), SuperCollider code (converted to TidalJS), or
+ * code. The file name gives code a title.
  */
 export function parseImport(text: string, fileName = ""): ImportResult {
   const trimmed = text.trim();
+  // A SuperCollider file (.scd) is converted to TidalJS code.
+  if (trimmed && looksLikeSuperCollider(trimmed, fileName)) {
+    const converted = convertSuperCollider(text, fileName);
+    return { kind: "code", title: converted.title, code: converted.code, from: "supercollider", parts: converted.parts };
+  }
   if (/^[[{]/.test(trimmed)) {
     let data: unknown;
     try {

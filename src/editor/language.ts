@@ -50,7 +50,7 @@ Object.assign(DESCRIPTIONS, {
   late: "Shift later by n cycles", early: "Shift earlier by n cycles", quantize: "Same as quantise",
   arpeggiate: "Same as arp", hcutoff: "Same as hpf", bandf: "Same as bpf", velocity: "Same as vel",
   setCPS: "Cycles per second", setTempo: "Beats per minute (4 beats per cycle)", withValue: "Map every value",
-  slowcat: "Same as cat", setcps: "Same as setCPS", scaleP: "Same as scale", arp: "Play chord notes in turn",
+  slowcat: "Same as cat", setcps: "Same as setCPS", arp: "Play chord notes in turn",
   scaleList: "Names of all scales", chordList: "Names of all chords",
   const: "Declare a constant", let: "Declare a variable",
 });
@@ -66,7 +66,7 @@ export const GLOBALS: CompletionItem[] = ([
   ["fastcat", "fn"], ["randcat", "fn"], ["struct", "fn"], ["euclidFull", "fn"], ["samples", "fn"], ["silence", "value"],
   ["sine", "value"], ["cosine", "value"], ["saw", "value"], ["isaw", "value"], ["tri", "value"],
   ["square", "value"], ["rand", "value"], ["irand", "fn"], ["perlin", "value"],
-  ["scale", "fn"], ["scaleP", "fn"], ["chord", "fn"], ["arp", "fn"], ["fit", "fn"],
+  ["scale", "fn"], ["chord", "fn"], ["arp", "fn"], ["fit", "fn"],
   ["scaleList", "call"], ["chordList", "call"], ["setBus", "fn"], ["bus", "fn"],
   ["setCPS", "fn"], ["setcps", "fn"], ["setTempo", "fn"], ["stopAll", "call"], ["hush", "call"],
   ["choose", "fn"], ["wchoose", "fn"], ["cycleChoose", "fn"], ["setOscUrl", "fn"],
@@ -86,6 +86,11 @@ export const GLOBALS: CompletionItem[] = ([
   ["unmuteAll", "call"], ["unsoloAll", "call"],
   ["stepcat", "fn"], ["s_cat", "fn"], ["stepalt", "fn"], ["stepzip", "fn"],
   ["ur", "fn"], ["inhabit", "fn"], ["swap", "fn"], ["weave", "fn"], ["snowball", "fn"],
+  ["sig", "fn"], ["perlinWith", "fn"], ["perlin2", "fn"], ["perlin2With", "fn"], ["interlace", "fn"],
+  ["seqP", "fn"], ["seqPLoop", "fn"], ["fastAppend", "fn"], ["slowAppend", "fn"], ["spreadf", "fn"],
+  ["toScaleBy", "fn"], ["fitSlices", "fn"], ["resetCycles", "call"], ["setOutput", "fn"],
+  ["first", "fn"], ["asap", "fn"], ["only", "fn"], ["panic", "call"], ["setbpm", "fn"], ["getcps", "call"], ["getnow", "call"], ["setCycle", "fn"],
+  ["jumpInNext", "fn"], ["jumpModOffset", "fn"], ["histpan", "fn"], ["waitT", "fn"], ["weaveWith", "fn"],
   // Controls on their own: n("0 2"), speed(2)
   ...CONTROL_NAMES.filter((name) => name !== "s" && name !== "sound").map((name) => [name, "fn"]),
   ["const", "kw"], ["let", "kw"],
@@ -138,7 +143,7 @@ export const STRING_SOURCES: Record<StringContext, () => CompletionItem[]> = {
 /** Which strings get which completions, by the function they are passed to. */
 export const STRING_CONTEXT: Record<string, StringContext> = {
   sound: "sound", s: "sound", overlay: "sound", append: "sound",
-  scale: "scale", scaleP: "scale",
+  scale: "scale",
   arp: "arp", arpeggiate: "arp",
   vowel: "vowel",
   note: "chord", chord: "chord",

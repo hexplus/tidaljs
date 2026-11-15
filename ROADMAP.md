@@ -1,6 +1,6 @@
 # TidalJS Development Roadmap
 
-All six phases are implemented. Each section lists the functions and how they behave. Notes mark where TidalJS differs from TidalCycles, usually because it runs in a browser and synthesises its sounds instead of playing samples.
+All phases are implemented. Each section lists the functions and how they behave. Notes mark where TidalJS differs from TidalCycles, usually because it runs in a browser and synthesises its sounds instead of playing samples.
 
 ---
 
@@ -152,7 +152,7 @@ Note: `choose`, `cycleChoose` and `wchoose` pick when the code runs. For values 
 ### 3.3 Scales and Harmony
 ```javascript
 scale()     // [done] scale("e:minor", "0 2 4")
-scaleP()    // [done] Alias of scale(); the scale name can be a pattern: "<major minor>"
+scaleP()    // [removed in Phase 13: use scale()] Alias of scale(); the scale name can be a pattern: "<major minor>"
 chord()     // [done] chord("c'maj e'min7"); chords also work inside note("...")
 arpeggiate() // [done] .arp("up") / .arpeggiate("updown"), the mode can be a pattern
 inversion() // [done] .inversion(1), or "c'maj'i" in chord names
@@ -263,6 +263,10 @@ Note: `export` is a JavaScript keyword, so the function is called `exportPattern
 | Phase 8: The rest of Tidal's library | 120+ | Complete (see the notes) |
 | Phase 9: Streams, transitions, stepwise | 40+ | Complete |
 | Phase 10: Library, export and import | - | Complete |
+| Phase 11: SuperDirt's synths and effects | - | Complete |
+| Phase 12: Parity with Tidal | ~60 fixes | Complete |
+| Phase 13: Deprecated names out, complex examples in | 7 removed | Complete |
+| Phase 14: SuperCollider import | - | Complete |
 
 ---
 
@@ -322,13 +326,13 @@ once() qtrigger() trigger() // [done]
 ```javascript
 brak mask inv sew stitch wedge euclidOff zoom fastGap trunc repeatCycles loopFirst
 press pressBy plyWith rolled rolledBy when ifp foldEvery someCyclesBy always never
-inside outside chunkBack fix unfix contrast spread fastspread spreadChoose pickF selectF
+inside outside chunkBack (removed in Phase 13: chunk(-n)) fix unfix contrast spread fastspread spreadChoose pickF selectF
 select squeeze soak fadeIn fadeOut stripe       // [done]
 ```
 
 ### 8.3 Echoes, samples, values and generators
 ```javascript
-echo echoWith stut stutWith stutter ghost ghostWith                 // [done]
+echo echoWith stut stutWith stutter ghost ghostWith                 // [done; stut and stutWith removed in Phase 13]
 slice splice randslice loopAt smash spin striateBy                  // [done]
 rangex qfloor qceiling qround toScale run scan                      // [done]
 fromList fastFromList fromMaybes timeCat wrandcat binary binaryN ascii necklace
@@ -370,7 +374,7 @@ Each runs from the stream's previous pattern, from the cycle where the code is e
 ```javascript
 stepcat s_cat steptake stepdrop expand contract extend pace stepalt stepzip .steps()   // [done]
 ```
-Patterns count their steps as Tidal does: a mini-notation sequence has as many steps as its weights add up to, `<a b>` has 1, `{...}%n` has n, `stack` takes the least common multiple and `fastcat` the sum.
+Patterns count their steps as Tidal 1.10 does: a mini-notation sequence has as many steps as its weights add up to, `<a b>` has 2 and `{a b c}%4` has 3 (see Phase 12), `stack` takes the least common multiple and `fastcat` the sum.
 
 ### 9.4 More of Tidal
 ```javascript
@@ -392,6 +396,142 @@ The Library tab keeps sketches in the browser: IndexedDB, or localStorage where 
 - Open, rename (click the title), export or delete each sketch.
 - Export the editor's code as a `.js` file, or every sketch as one `.json` library.
 - Import a `.js`/`.txt` file (opens it in the editor) or a library `.json` (adds its sketches without overwriting saved ones), with the Import button or by dropping the file on the tab.
+
+## Phase 11: SuperDirt's synths and effects, and the last of Tidal (complete)
+
+What a track written for SuperCollider and SuperDirt needed and TidalJS lacked. The test case was a SuperCollider gabber track (a pitch-swept, distorted kick and a hoover), which now converts almost line for line (see `track.js`).
+
+### 11.1 Operators: where the rhythm comes from
+```javascript
+.keep()                                  // [done] Tidal's |<
+.addRight() .addBoth() .addSqueeze()     // [done] Tidal's +|, |+| and ||+
+// and the same for set, keep, sub, mul, div, mod and pow (Tidal's >|, |<|, ||- ...)
+```
+`Right` takes the rhythm from the other pattern, `Both` from both (an event starts wherever either does), `Squeeze` fits a whole cycle of the other pattern into each event.
+
+### 11.2 The rest of Tidal's library
+```javascript
+.everyOffset(n, o, f)        // [done] Tidal's every'
+.withinZoom(b, e, f)         // [done] Tidal's within'
+toScaleBy(octave, steps, p)  // [done] Tidal's toScale'
+.fitSlices(cyc, n, from, to) // [done] Tidal's fit'
+.substruct() .whenT() .fastAppend() .slowAppend() .jux4() .juxcut() .spreadf()   // [done]
+.fastSqueeze() .slowSqueeze() .mono() .timeLoop()                                // [done]
+sig() perlinWith() perlin2() perlin2With() interlace() seqP() seqPLoop() resetCycles()   // [done]
+.nrpn("param:value") .nrpnn() .nrpnv()   // [done] MIDI NRPN
+```
+JavaScript names cannot contain `'`, so the primed functions have names of their own. `numerals`, listed earlier as missing, is left out: it could not be confirmed as a Tidal pattern function.
+
+### 11.3 Synths in the style of SuperDirt
+```javascript
+supersaw supersquare superpwm superhoover superreese superzow superchip superfm
+superpiano supergong superstatic superkick super808 supergabber superhat supersnare superclap   // [done]
+.voice() .detune() .semitone() .rate() .lfo()   // [done] their parameters
+```
+They are Web Audio versions, not ports of the SuperCollider code, except `superhoover` and `supergabber`, which follow Nathan Ho's SynthDefs (the hoover's pitch scoop and the gabber's fall, distortion and chorused high band) and keep SuperCollider's internal levels relative to each other.
+
+### 11.4 Envelopes and pitch
+```javascript
+.hold() .decay() .sustainlevel()                 // [done] SuperDirt's hold; decay to a level
+.penv() .pattack() .pdecay() .pcurve()           // [done] pitch envelope; drum synths use it for their sweep
+.pitchenv([levels], [times], curves)             // [done] breakpoints, as SuperCollider's Env (same curve formula)
+.lpenv() .lpattack() .lpdecay() .lpsustain() .lprelease()   // [done] and hp..., bp..., peak...
+.vib() .vibmod() .portamento()                   // [done]
+.accelerate()                                    // [done] now on every sound, drums included
+```
+Pitch changes act on the detune of a voice's oscillators, so they add up: accelerate, the pitch envelope, vibrato and portamento together.
+
+### 11.5 Effects
+```javascript
+.peak() .peakq() .peakgain()                     // [done] peak equaliser (SuperCollider's BPeakEQ)
+.squiz() .waveloss() .fshift() .fshiftnote() .fshiftphase() .octer() .octersub() .octersubsub()   // [done] AudioWorklet
+.krush() .kcutoff() .triode() .leslie() .lrate() .lsize()   // [done]
+.freeze() .comb() .smear() .scram() .binshift() .hbrick() .lbrick()   // [done] spectral, AudioWorklet
+```
+- Effects run in SuperDirt's order: vowel, shape, hpf, bpf, crush, lpf, peak, tremolo, phaser, waveloss, squiz, fshift, triode, krush, octer, ring, distortion, spectral, djf, leslie, pan. `shape` and `crush` used to come after the filters.
+- The sample-by-sample effects run in an AudioWorklet loaded by `init()`; where AudioWorklet is missing they are skipped with a warning.
+- The spectral effects work on a 512-sample window; voices that use them start 384 samples (about 9 ms) earlier, so they stay in time.
+- Negative cut groups cut only the same sound, as in SuperDirt (`juxcut` uses them).
+
+### 11.6 Matching the SuperCollider track exactly
+```javascript
+.freeverb() .freeroom() .freedamp()   // [done] SuperCollider's FreeVerb2 (Jezar's Freeverb, SuperCollider's constants) on each voice
+.resonance(Math.log10(1 / 2) / 3)     // [done] below 0 damps: SuperCollider's rq 2 (resonance is SuperDirt's 0..1, Phase 12)
+setOutput(1, false)                   // [done] no master volume or limiter, as SuperCollider
+```
+- `superhoover` has its SynthDef's reverb and both envelopes in order: `Env.asr(0.01, 1, 1)`, FreeVerb2, then `Env.asr(0, 1, 4, 6)`, so the reverb rings on for 4 seconds.
+- `superhoover` and `supergabber` keep SuperCollider's levels: `amp` works as in SuperCollider, 0.1 by default.
+- Their envelopes follow `Env.asr`'s curves (-4, and 6 for the hoover's release).
+- Fixed: weighted steps (`"a@4 b@4 c@4 d@4 ..."`) lost or repeated steps from the second cycle on, by a rounding error in `compress`.
+- What cannot be matched (oscillator and filter designs, delay interpolation, random values) is listed under Limitations in the README.
+
+## Phase 12: Parity with Tidal (complete)
+
+Every feature was compared with Tidal's Haskell source (tidal-core: Core, UI, Control, Pattern, ParseBP, Chords, Scales, Stepwise, Transition) and with SuperDirt for what controls do when they play. About 60 differences were found and fixed; the "Parity with Tidal" tests in `test/engine.test.mjs` check them.
+
+### 12.1 Randomness
+- Tidal's random numbers exactly (`timeToRand`, `timeToRands`: an xorshift over a 300-cycle loop; 0.5 at time 0), on one stream: `degradeBy` and `unDegradeBy` are complementary, `sometimesBy` picks events before changing them (`sometimesByAfter` is Tidal's `sometimesBy'`), mini-notation `?` and `|` seed from 0 in each string.
+- `choose`, `wchoose` are signals and `cycleChoose` one value per cycle; `randcat` shifts by a random number of cycles; `shuffle` is Tidal's `randrun`; `select` is `floor(x * (n - 1))`; `chooseBy` wraps; `stripe` weighs segments 1, 2 or 3; numeric arguments given a signal are read at each event; `irand`, `brandBy` and `sometimesBy` take patterns.
+
+### 12.2 Structure
+- `euclid` squeezes the pattern into each hit; `swingBy` is `inside n (within (0.5, 1) (x ~>))`; `foldEvery` nests `every`; `iter`, `iterBack` and `chunk` are `cat`s of the variants; `echoWith` shifts then applies; `mono` lets the shorter of two simultaneous events win; `arp` and `rolled` keep the chord's order; `disconverge` ends on the first note; `ply` takes fractions; `plyWith` arpeggiates; `squeeze` focuses a cycle over long events; `ur` effects restart the pattern; `weave` shifts earlier (and `weaveWith`); `binary`/`ascii` squeeze per value; `quantise(n)` rounds halves to even; `linger` is Tidal's zoom; negative `fast`/`slow` reverse; `every(0)` does nothing; negative `chunk` goes backwards; `layer` applies functions; `range`, `whenmod`, `wedge`, `fit`, `echo` and `scan` take patterns.
+
+### 12.3 Mini-notation
+- Weights count inside `< >` and `{ }` (`{ }`'s base is the first part's weight sum; `%` can be a pattern); `a .. b` is one step (note names and fractions too); spaced `!n` and `@n`; chords keep Tidal's list order (`'i`, `'o`, `'d` are positional, `'oo` works, unknown names play the root); chord names and roots can be patterns (`c'<maj min>`, `<c e>'maj`); euclid arguments can be sequences; fractions (`1%3`) and ratio letters (`q`, `e`...); `-` is a rest; `^name` reads a bus; steps as Tidal 1.10 counts them (`<a b c>` 3, `{a b c}%4` 3, euclid n, silence 1).
+
+### 12.4 Controls and SuperDirt playback
+- `gain` is amp * gain^4; `up` is `note`; a bare number in an operator is `n` (whole) or `speed` (fraction) and strings are not joined; `n` is a synth's note; `resonance`/`hpq` 0 to 1 as SuperDirt (`rq = 1000^-r`); `bandq` 10 by default with make-up gain; `djf` 20 Hz to 10 kHz on both filters; `crush` takes fractions; `coarse` on every sound; samples: `octave`, reversed `[begin, end]`, `loop` loops (fractions too), cut groups by `|cut|` with negative ones cutting the same sample, `unit "rate"`.
+- Delay and reverb are global per orbit, fed by every sound of the orbit and set by each event (`delay` 0 when absent, `delaytime`/`delayfeedback`/`room`/`size`/`dry` when present; defaults 0, 0, 0, 0.1, 0); the reverb's `dry` is new.
+- `chop` and `striate` slice within the event's own begin and end (`chop` only when it has both, and through events longer than a cycle); scales `bartok` and `hindu`; an unknown scale plays its degrees as octaves.
+
+### 12.5 Streams, transitions and stepwise
+- Transitions are Tidal's (`_wash`): a new or stopped stream transitions from silence; `wait` starts at `nextSam (now + t - 1)`; `anticipateIn` stutters with a step time falling from 1 to 0; `jumpMod` waits for the next multiple after this cycle; `interpolateIn` keeps controls only the old pattern has; `xfadeIn` keeps the old pattern at gain 0.
+- New: `jumpInNext` (`jumpIn'`), `jumpModOffset` (`jumpMod'`), `wash` and `washIn` (removed in Phase 13), `waitT`, `histpan`; `first`, `once` (a random cycle), `asap`, `only`, `panic`, `setbpm`, `getcps`, `getnow`, `setCycle`; `triggerWith`, `ctrigger`, `rtrigger`, `ftrigger`, `mtrigger`/`mt`; the `cps` control; a `*Take` for every numeric control.
+- Mute and solo follow Tidal (with any solo, soloed streams play, muted or not).
+- Stepwise functions given a pattern use Tidal's `stepJoin`; `steptake` past the end zooms on, and 0 steps take no time in `stepcat`; `chop`, `zoom` and `segment` set steps.
+- Found and fixed along the way: `compress` lost or repeated steps of `@`-weighted sequences from the second cycle on (a rounding error).
+
+## Phase 13: Deprecated names out, complex examples in (complete)
+
+Checked against Tidal's source (its `DEPRECATED` notes, and what `Sound.Tidal.Boot` exports) and the official documentation at tidalcycles.org.
+
+### 13.1 Removed, as Tidal deprecated them
+| Removed | Use instead | Tidal's note |
+|---------|-------------|--------------|
+| `.stut(n, fb, t)` | `.echo(n, t, fb)` | "DEPRECATED, use 'echo' instead" |
+| `.stutWith(n, t, f)` | `.echoWith(n, t, f)` | "DEPRECATED, use 'echoWith' instead" (`stut'` too) |
+| `.discretise(n)` | `.segment(n)` | "the old (deprecated) name for 'segment'" |
+| `.chunkBack(n, f)` (Tidal's `chunk'`) | `.chunk(-n, f)` | "DEPRECATED, use 'chunk' with negative numbers instead" |
+| `wash()`, `washIn()` | `xfadeIn`, `anticipateIn` and the other transitions | "Deprecated aliases", hidden by `Sound.Tidal.Boot` |
+| `scaleP()` | `scale()`, whose name can be a pattern | Tidal 0.9's name, gone since Tidal 1.0 |
+
+`anticipateIn` still uses Tidal's stut inside, as Tidal does.
+
+### 13.2 Fixed
+- `superhat` was about 25 dB too quiet: only the faint upper harmonics of its square waves pass its filters, and the sum is now boosted to the level of `hh`.
+- When a control pattern sets the rhythm (`sound("superfm").note("c2 [~ c2] eb2")`), the steps now come from it too, so `pace`, `stepcat` and the other stepwise functions count the notes.
+- The help no longer holds two versions of 48 entries (the Tidal-parity rewrites had been added as overrides).
+
+### 13.3 Complex examples
+- The Examples tab has an **Advanced** group: rave (SuperDirt's synths, chord patterns, a delay on its own orbit), polymetric techno (`{ }%16`, `stepcat`, `steptake`, `pace`), trance (a gated supersaw, `arp` over eight-note chords), generative ambient (Tidal's random numbers, `rolledBy`, `freeverb`), drum and bass (`bite`, negative `chunk`, `linger`, filter envelopes), chiptune (`c'<maj min>`, `addSqueeze`, `echoWith`, `rot`), gabber (patterned `penv`, peak envelopes, euclid with a patterned rotation) and an arrangement made with `ur`, `layer` and `fix`.
+- The README has a "Complex examples" section: trance, drum and bass, polymetric techno, generative ambient, an arrangement with `ur`, and a live set with streams and transitions.
+
+### 13.4 Documentation review
+- README: removed contribution ideas that are done (samples, `jux`/`off`/`ply`/`iter`); the API tables, features and global controls now describe SuperDirt's semantics (`gain` curve, per-orbit delay and reverb, `n` on synths, negative `chunk`), the newer stream functions, `hush`/`setOutput`, and the mini-notation's `<a@3 b>`, `%<4 8>` and `^name`; the choose example plays sounds.
+- In the editor: the hover signatures, palette buttons and Reference panel said `up` transposes, `delayfeedback` defaults to 0.5 and `lpq` is a Q; they now match the engine (`up` is `note`, feedback starts at 0, `lpq` is 0 to 1), and describe the orbit's delay and reverb.
+- `npm test` now plays every editor example, as it already did with the help examples.
+
+## Phase 14: SuperCollider import (complete)
+
+Open a SuperCollider file (`.scd`) in the editor and get TidalJS code (Sketches → Import SuperCollider, the Library's Import .scd button, or a dropped file). The importer lives in `src/supercollider/`:
+
+- `lexer.ts`, `parser.ts`: sclang's syntax (no operator precedence, `Class(args)`, keyword arguments, `*[...]`, trailing function blocks, events, ranges, `#[...]`, symbols, radix and `pi` numbers).
+- `interpreter.ts`: runs the program's language parts: numbers and arrays (sclang's methods and broadcasting), scales, envelopes, functions, `Pdef`/`Pbindef` (the last definition wins), routines on a virtual clock (`wait`), `Synth(...)`, events and the clocks.
+- `patterns.ts`: SuperCollider's patterns as generators, with SuperCollider's `embedInStream` semantics (Pkey, Pchain, Ppar's merged times). Random value patterns stay symbolic and become TidalJS random signals.
+- `synthdef.ts`: a SynthDef's function runs with symbolic signals; the analysis walks from `Out` through the effects to the oscillators and finds the TidalJS synth, its effects and envelopes, and which control each argument drives.
+- `emit.ts`: plays everything for 512 beats, groups the events by Pbind (or routine instrument), finds each part's period and writes it: a weighted `struct`, each control over its own period, the SynthDef's effects; one cycle is the period most parts share.
+
+`test/supercollider.test.mjs` checks the language, the detection of `.scd` files, and conversions played in the engine: the gabber track's 336 events in 64 seconds (times, notes, peak frequencies, pitch falls, lengths, levels), degrees and scales, rests and random values, sections, routines, Ppar on a TempoClock, Ptpar, chains, chords, SuperDirt events, filter envelopes, and the README's example.
 
 ## What could come next
 

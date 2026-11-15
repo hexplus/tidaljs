@@ -94,7 +94,7 @@ eq(q(ap, 3, 4), 'bd@3');
 eq(q(sound('bd ~ bd ~').overlay('~ sn ~ sn')), 'bd@0 sn@0.25 bd@0.5 sn@0.75');
 const sup = sound('bd sn').superimpose((x) => x.fast(2).up(12));
 eq(sup.query(0, 1).length, 6);
-eq(sup.query(0, 1).filter((e) => e.value.up === 12).length, 4);
+eq(sup.query(0, 1).filter((e) => e.value.note === 72).length, 4); // Tidal: up = note
 eq(q(struct('x ~ x x', sound('bd sn'))), 'bd@0 sn@0.5 sn@0.75');
 eq(q(sound('bd sn').struct('t t t t')), 'bd@0 bd@0.25 sn@0.5 sn@0.75');
 eq(q(struct('1 0 1', 'hh')), 'hh@0 hh@0.6667');
@@ -104,11 +104,11 @@ eq(q(sound('arpy').note('c e g c5')), 'arpy/60@0 arpy/64@0.25 arpy/67@0.5 arpy/7
 eq(q(sound('arpy*4').note('c e')), 'arpy/60@0 arpy/60@0.25 arpy/64@0.5 arpy/64@0.75');
 eq(sound('arpy').note('eb3 f#').query(0, 1).map((e) => e.value.note).join(), '51,66');
 eq(sound('arpy').note('0 7').query(0, 1).map((e) => e.value.note).join(), '60,67');
-eq(sound('arpy').note('c e g').up('0 12 7').query(0, 1).map((e) => e.value.up).join(), '0,12,7');
+eq(sound('arpy').note('c e g').up('0 12 7').query(0, 1).map((e) => e.value.note).join(), '60,72,67'); // up = note replaces it, as in Tidal
 eq(sound('sine').freq('440 554 659').query(0, 1).map((e) => e.value.freq).join(), '440,554,659');
 eq(sound('arpy').midinote('60 64 67').query(0, 1).map((e) => e.value.midinote).join(), '60,64,67');
 eq(sound('bd sn').n('0 1').query(0, 1).map((e) => e.value.n).join(), '0,1');
-eq(sound('bd').up(0.5).query(0, 1)[0].value.up, 0.5);
+eq(sound('bd').up(0.5).query(0, 1)[0].value.note, 60.5);
 eq(sound('hh*4').gain('1 0.5').query(0, 1).map((e) => e.value.gain).join(), '1,1,0.5,0.5');
 
 // Effects
@@ -121,7 +121,7 @@ eq(q(base), 'bd@0 sn@0.5');
 eq(base.query(0, 1)[0].value.gain, undefined);
 
 // Errors are thrown with readable messages
-assert.throws(() => sound('bd').fast('x'), /fast\(\) expects a number/); passed++;
+assert.throws(() => sound('bd').fast('xyz'), /fast\(\) expects a number/); passed++; // "x" alone is Tidal's 1/6
 assert.throws(() => sound('bd').every(4, 5), /every\(\) expects a function/); passed++;
 assert.throws(() => sound('bd').superimpose(() => 3), /must return a pattern/); passed++;
 
@@ -141,7 +141,7 @@ eq(t.cps, 1);
 eq(t.isPlaying, true);
 r = t.eval('sound("bd").play()');
 eq(r.activePatterns, 1);
-r = t.eval('sound("bd").fast("x")');
+r = t.eval('sound("bd").fast("xyz")');
 eq(r.success, false);
 eq(/fast\(\) expects a number/.test(r.error), true);
 eq(t.channels.size, 1); // previous pattern keeps playing on error
@@ -328,10 +328,10 @@ eq(sound('hh*4').gain('1 ~').query(0, 1).length, 2);
 
 // Error locations and pending warnings
 t.eval('sound("bd")');
-let er = t.eval('sound("bd")\n\nsound("hh").fast("x")');
+let er = t.eval('sound("bd")\n\nsound("hh").fast("xyz")');
 eq(er.success, false);
 eq(er.location.line, 3);
-eq(JSON.stringify([er.location.start, er.location.end]), JSON.stringify([13, 34]));
+eq(JSON.stringify([er.location.start, er.location.end]), JSON.stringify([13, 36]));
 er = t.eval('sound("bd")\nsound("hh"');
 eq(er.success, false);
 eq(er.location.line, 2);
@@ -368,7 +368,8 @@ eq(notes(sound('arpy').note('0 .. 3')), '0 1 2 3');
 eq(notes(sound('arpy').note('0..3')), '0 1 2 3');
 eq(notes(sound('arpy').note('3 .. 0')), '3 2 1 0');
 eq(notes(sound('arpy').note('[0 .. 2] 7')), '0 1 2 7');
-eq(sound('arpy').n('<0 .. 2>').query(2, 3)[0].value.n, 2);
+// In Tidal a range is one step: "<0 .. 2>" plays 0 1 2 in every cycle
+eq(sound('arpy').n('<0 .. 2>').query(2, 3).map((e) => e.value.n).join(), '0,1,2');
 eq(notes(sound('arpy').note(scale('major', '0 .. 7'))), '0 2 4 5 7 9 11 12');
 
 // ---------------- More of Tidal's library ----------------
@@ -384,7 +385,7 @@ eq(q(sound('a ~ b c').rot('<0 1>'), 1, 2), 'b@1 c@1.5 a@1.75');
 const jux = sound('bd sn').jux((x) => x.rev()).query(0, 1).map((e) => `${e.value.s}${e.value.pan}@${e.begin}`).sort().join(' ');
 eq(jux, 'bd-1@0 bd1@0.5 sn-1@0.5 sn1@0');
 eq(sound('bd').juxBy(0.5, (x) => x).query(0, 1).map((e) => e.value.pan).sort().join(), '-0.5,0.5');
-const off = sound('arpy').off(0.25, (x) => x.up(12)).query(0, 1).map((e) => `${e.value.up ?? 0}@${e.begin}`).sort().join(' ');
+const off = sound('arpy').off(0.25, (x) => x.add(note(12))).query(0, 1).map((e) => `${(e.value.note ?? 60) - 60}@${e.begin}`).sort().join(' ');
 eq(off, '0@0 12@0.25');
 eq(q(sound('bd').euclid(3, 8)), 'bd@0 bd@0.375 bd@0.75');
 eq(q(sound('bd').euclid(3, 8, 2)), 'bd@0.125 bd@0.5 bd@0.75');
@@ -451,7 +452,8 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(voices[1].time === 2 && voices[1].rate === 2 && voices[1].offset === 1 && voices[1].window === 0.5, true);
     eq(voices[2].rate, 2);
     eq(voices[3].window, 0.25);
-    eq(voices.slice(4).map((v) => v.time).join(), '5,5.5');
+    // SuperDirt's loop: one voice looping [begin, end], loop times as long
+    eq(voices.length === 5 && voices[4].time === 5 && voices[4].window === 1, true);
     eq(t.sampleBanks.has('kick') && !!t._sampleBuffers.get('https://cdn.test/kit/kick/b.wav').buffer, true);
 
     // A bad source is reported and can be retried
@@ -492,10 +494,11 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
 
     // Conditions
     eq(qv(sound('a b').when((c) => c % 2 === 1, (x) => x.fast(2)), 0, 2), 'a@0 b@0.5 a@1 b@1.25 a@1.5 b@1.75');
-    eq(qv(sound('a').foldEvery([2, 3], (x) => x.fast(2)), 0, 4), 'a@0 a@0.5 a@1 a@2 a@2.5 a@3 a@3.5');
+    // Tidal: every 2 f (every 3 f p), so on cycle 0 the outer fast squeezes the inner cycles 0 and 1
+    eq(qv(sound('a').foldEvery([2, 3], (x) => x.fast(2)), 0, 4), 'a@0 a@0.25 a@0.5 a@1 a@2 a@2.5 a@3 a@3.5');
     eq(qv(sound('a b c d').inside(2, (x) => x.rev())), 'b@0 a@0.25 d@0.5 c@0.75');
     eq(qv(sound('<[a b] [c d]>').outside(2, (x) => x.rev()), 0, 2), 'd@0 c@0.5 b@1 a@1.5');
-    eq(qv(sound('a b c d').chunkBack(4, (x) => x.gain(0)), 0, 1), 'a@0 b@0.25 c@0.5 d,gain=0@0.75');
+    eq(qv(sound('a b c d').chunk(-4, (x) => x.gain(0)), 0, 1), 'a@0 b@0.25 c@0.5 d,gain=0@0.75');
     eq(qv(sound('bd sn').fix((x) => x.speed(2), { s: 'bd' })), 'bd,speed=2@0 sn@0.5');
     eq(qv(sound('bd sn').unfix((x) => x.speed(2), { s: 'bd' })), 'bd@0 sn,speed=2@0.5');
     eq(qv(sound('a b').spread((p, x) => p.fast(x), [1, 2]), 0, 2), 'a@0 b@0.5 a@1 b@1.25 a@1.5 b@1.75');
@@ -504,9 +507,11 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(qv(sound('a').always((x) => x.fast(2))), 'a@0 a@0.5');
     eq(qv(sound('a').never((x) => x.fast(2))), 'a@0');
 
-    // Echoes: Tidal's gains (stut: feedback + (1 - feedback) * (count - x) / count)
+    // Echoes: Tidal's gains (anticipateIn's internal stut: feedback + (1 - feedback) * (count - x) / count)
     eq(qv(sound('bd').echo(3, 0.2, 0.5)), 'bd@0 bd,gain=0.5@0.2 bd,gain=0.25@0.4');
-    eq(qv(sound('bd').stut(3, 0.5, 0.125)), 'bd@0 bd,gain=0.833@0.125 bd,gain=0.667@0.25');
+    eq(qv(sound('bd')._stut(3, 0.5, 0.125)), 'bd@0 bd,gain=0.833@0.125 bd,gain=0.667@0.25');
+    // Names Tidal deprecated are gone (stut, stutWith, discretise, chunk' as chunkBack; wash, washIn, scaleP globals).
+    for (const name of ['stut', 'stutWith', 'discretise', 'chunkBack']) eq(typeof sound('bd')[name], 'undefined');
     eq(qv(sound('bd').stutter(4, 1 / 16)), 'bd@0 bd@0.063 bd@0.125 bd@0.188');
     eq(qv(sound('sn').ghost()).split(' ').map((x) => x.split('@')[1]).join(), '0,0.188,0.313,0.5');
 
@@ -529,7 +534,7 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(qv(binary('<5 1>'), 1, 2).split(' ').filter((x) => x.startsWith('true')).length, 1);
     eq(qv(ascii('a')).split(' ').map((x) => (x.startsWith('true') ? 1 : 0)).join(''), '01100001');
     eq(qv(necklace(12, [4, 2])).split(' ').map((x) => (x.startsWith('true') ? 1 : 0)).join(''), '100010100010');
-    eq(qv(select('<0 0.5>', [sound('a'), sound('b')]), 0, 2), 'a@0 b@1');
+    eq(qv(select('<0 0.5 1>', [sound('a'), sound('b')]), 0, 3), 'a@0 a@1 b@2'); // Tidal: floor(x * (n - 1))
     eq(qv(squeeze('0 1', [sound('a b'), sound('c d e')])), 'a@0 b@0.25 c@0.5 d@0.667 e@0.833');
     eq(qv(timeCat([[1, sound('a')], [3, sound('b b b')]])), 'a@0 b@0.25 b@0.5 b@0.75');
     eq(lindenmayer(3, 'a:b,b:ab', 'ab'), 'bababbab');
@@ -546,7 +551,9 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(qv(note('0 4').sound('arpy').add(note('<12 7>')), 1, 2), 'note=67,arpy@1 note=71,arpy@1.5');
     eq(qv(n('0 4').add(12)), 'n=12@0 n=16@0.5');
     eq(qv(sound('bd*2').speed(2).mul(speed('1 0.5'))), 'bd,speed=2@0 bd,speed=1@0.5');
-    eq(qv(sound('drum').add(s(':3'))), 'drum,n=3@0');
+    eq(qv(sound('drum').add(s(':3'))), 'drum@0'); // Tidal keeps the left string (no joining)
+    eq(qv(sound('drum').add(3)), 'drum,n=3@0'); // a whole number is n, as Tidal's fromInteger
+    eq(qv(sound('drum').mul(speed(2)).add(0.5)), 'drum,speed=2.5@0'); // a fraction is speed (fromRational); unionWith adds missing keys
     eq(qv(n('0 .. 7').mod(4)).split(' ').map((x) => x.split('@')[0]).join(), 'n=0,n=1,n=2,n=3,n=0,n=1,n=2,n=3');
     eq(qv(d1(sound('bd'))), 'bd@0');
 
@@ -571,8 +578,11 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(sound('cp').unit('x').query(0, 1)[0].value.unit, undefined);
 
     // Steps, as Tidal counts them
-    eq([sound('bd sn').steps(), sound('bd [sn sn]').steps(), sound('bd@3 sn').steps(), sound('<a b>').steps(), sound('{a b c}%4').steps()].join(), '2,2,4,1,4');
+    eq([sound('bd sn').steps(), sound('bd [sn sn]').steps(), sound('bd@3 sn').steps(), sound('<a b>').steps(), sound('{a b c}%4').steps()].join(), '2,2,4,2,3'); // Tidal 1.10: <a b> has 2 steps, {a b c}%4 has 3
     eq(sound('bd sn').fast(2).n(1).steps(), 2);
+    // The steps follow the side that sets the rhythm.
+    eq(sound('arpy').note('c e g').steps(), 3);
+    eq(sound('a b c d').note('c e').steps(), 4);
     eq(stack(sound('a b'), sound('c d e')).steps(), 6);
     eq(fastcat(sound('a b'), sound('c')).steps(), 3);
 
@@ -615,7 +625,8 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     t._nextCycle = 2;
     t.eval('xfadeIn(1, 2, sound("sn*2"))');
     eq(qs(t.channels.get('d1'), 2, 3), 'bd,gain=1@2 sn,gain=0@2 bd,gain=0.961@2.5 sn,gain=0.619@2.5');
-    eq(qs(t.channels.get('d1'), 4, 5), 'sn,gain=1@4 sn,gain=1@4.5');
+    // Tidal keeps the old pattern after the fade, at gain 0 (silent)
+    eq(qs(t.channels.get('d1'), 4, 5), 'bd,gain=0@4 sn,gain=1@4 bd,gain=0@4.5 sn,gain=1@4.5');
     t.eval('jumpIn(1, 1, sound("cp"))');
     eq(qs(t.channels.get('d1'), 2, 4), 'sn@2 sn@2.5 cp@3');
     t.eval('jumpMod(1, 4, sound("bd"))');
@@ -663,6 +674,234 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(voices.join(), [1, Math.pow(2, 1 / 12), Math.pow(2, 1 / 12)].map((x) => +x.toFixed(4)).join());
     delete t._sampleVoice;
     t._session = null;
+}
+
+// Weighted steps keep their places in every cycle (rounding at cycle 1 used to drop some)
+{
+    const seq = 'a@4 b@4 c@4 d@4 e@3 f g@2 h@3 i j@2';
+    const at = (c) => sound(seq).query(c, c + 1).sort((x, y) => x.begin - y.begin).map((e) => e.value.s + Math.round((e.begin - c) * 28)).join(' ');
+    for (const c of [0, 1, 2, 5, 123]) eq(at(c), 'a0 b4 c8 d12 e16 f19 g20 h22 i25 j26');
+    let chunked = 0;
+    for (let x = 0; x < 20; x += 0.0137) chunked += sound(seq).query(x, Math.min(20, x + 0.0137)).length;
+    eq(chunked, 200);
+}
+
+// Operators: where the rhythm comes from (Tidal's |+, +|, |+| and ||+)
+{
+    const vals = (p, b = 0, e = 1) => p.query(b, e).sort((x, y) => x.begin - y.begin)
+        .map((ev) => `${ev.value.n}@${+ev.begin.toFixed(4)}-${+ev.end.toFixed(4)}`).join(' ');
+    eq(vals(n('0 1').add(n('10 20 30'))), '10@0-0.5 21@0.5-1');
+    eq(vals(n('0 1').addRight(n('10 20 30'))), '10@0-0.3333 20@0.3333-0.6667 31@0.6667-1');
+    eq(vals(n('0 1').addBoth(n('10 20 30'))), '10@0-0.3333 20@0.3333-0.5 21@0.5-0.6667 31@0.6667-1');
+    eq(vals(n('0 1').addSqueeze(n('10 20'))), '10@0-0.25 20@0.25-0.5 11@0.5-0.75 21@0.75-1');
+    eq(vals(n('5 6').subRight(n('1 2 3'))), '4@0-0.3333 3@0.3333-0.6667 3@0.6667-1');
+    eq(vals(n('0 1').setRight(n('7 8 9'))), '7@0-0.3333 8@0.3333-0.6667 9@0.6667-1');
+    const kept = n('0 1').speed(2).keep(n('5 6').speed(1).vowel('a')).query(0, 1)[0].value;
+    eq(kept.n, 0); eq(kept.speed, 2); eq(kept.vowel, 'a');
+    eq(vals(n('0 1').keepRight(n('5 6 7'))), '0@0-0.3333 0@0.3333-0.6667 1@0.6667-1');
+    eq(vals(n('2 3').mulSqueeze(n('1 10'))), '2@0-0.25 20@0.25-0.5 3@0.5-0.75 30@0.75-1');
+    // a signal on the right keeps the left rhythm
+    eq(sound('bd*4').addBoth(speed(saw)).query(0, 1).length, 4);
+}
+
+// Primed functions and the rest of Tidal's library
+{
+    const ss = (p, b = 0, e = 1) => q(p, b, e);
+    eq(ss(sound('bd sn').everyOffset(3, 1, (x) => x.fast(2)), 1, 2), 'bd@1 sn@1.25 bd@1.5 sn@1.75');
+    eq(ss(sound('bd sn').everyOffset(3, 1, (x) => x.fast(2)), 2, 3), 'bd@2 sn@2.5');
+    eq(ss(sound('a b c d').withinZoom(0, 0.5, (x) => x.rev())), 'b@0 a@0.25 c@0.5 d@0.75');
+    // within reverses the whole cycle and keeps its first half; withinZoom reverses the half
+    eq(ss(sound('a b c d').within(0, 0.5, (x) => x.rev())), 'd@0 c@0.25 c@0.5 d@0.75');
+    eq(ss(sound('bd sn').fitSlices(1, 2, '0 1', '1 0')), 'sn@0 bd@0.5');
+    eq(ss(sound('bd sn hh cp').fitSlices(1, 4, '0 1 2 3', '3 0')), 'cp@0 bd@0.5');
+    eq(ss(sound('bd sn').substruct('t ~ t t')), 'bd@0 sn@0.125 bd@0.5 sn@0.625 bd@0.75 sn@0.875');
+    eq(ss(sound('bd sn').fastSqueeze('1 2')), 'bd@0 sn@0.25 bd@0.5 sn@0.625 bd@0.75 sn@0.875');
+    eq(ss(sound('bd sn').slowSqueeze('2')), 'bd@0');
+    eq(ss(sound('bd*4').whenT((t) => t % 1 >= 0.5, (x) => x.speed(2))), 'bd@0 bd@0.25 bd@0.5 bd@0.75');
+    eq(sound('bd*4').whenT((t) => t % 1 >= 0.5, (x) => x.speed(2)).query(0, 1).filter((e) => e.value.speed === 2).length, 2);
+    eq(ss(sound('bd').fastAppend('sn')), 'bd@0 sn@0.5');
+    eq(ss(sound('bd').slowAppend('sn'), 0, 2), 'bd@0 sn@1');
+    eq(ss(fastAppend(sound('bd'), sound('sn'))), 'bd@0 sn@0.5');
+    eq(sound('bd').jux4((x) => x.speed(2)).query(0, 1).map((e) => e.value.pan).sort().join(), '-0.75,0.25');
+    eq(sound('bd').juxcut((x) => x).query(0, 1).map((e) => `${e.value.pan}/${e.value.cut}`).sort().join(), '-1/-1,1/-2');
+    eq(ss(sound('bd sn').spreadf([(x) => x.rev(), (x) => x.fast(2)]), 0, 1), 'sn@0 bd@0.5');
+    eq(ss(sound('bd sn').spreadf([(x) => x.rev(), (x) => x.fast(2)]), 1, 2), 'bd@1 sn@1.25 bd@1.5 sn@1.75');
+    eq(ss(note('[c, e] g').mono()), '/60@0 /67@0.5');
+    const mono = n('0@3 1').slow(1).query(0, 1);
+    eq(mono.length, 2);
+    eq(ss(n('<0 1 2 3>').sound('a').timeLoop(2), 2, 4), 'a@2 a@3');
+    eq(n('<0 1 2 3>').timeLoop(2).query(2, 4).map((e) => e.value.n).join(), '0,1');
+    eq(ss(seqP([[0, 2, sound('bd')], [1, 3, sound('hh')]]), 0, 3), 'bd@0 bd@1 hh@1 hh@2');
+    eq(ss(seqPLoop([[0, 2, sound('bd')], [1, 3, sound('hh')]]), 3, 5), 'bd@3 bd@4 hh@4');
+    eq(note(toScaleBy(10, [0, 2, 4], '0 3 4')).query(0, 1).map((e) => e.value.note).join(), '60,70,72');
+    eq(toScaleBy(12, [0, 4, 7], '0 3 -1').query(0, 1).map((e) => e.value).join(), '0,12,-5');
+    eq(interlace(sound('bd*2'), sound('hh')).query(0, 1).every((e) => typeof e.value.shape === 'number'), true);
+    eq(sig((t) => t * 2)._signal(0.25), 0.5);
+    const pw = perlinWith(saw.mul(4));
+    eq(pw._signal(0.5) >= 0 && pw._signal(0.5) <= 1, true);
+    eq(Math.abs(perlinWith(3).query(0, 1)[0].value - perlin._signal(3)) < 1e-9, true);
+    const p2 = perlin2(sine);
+    for (const t of [0.1, 0.4, 0.77, 3.3]) eq(p2._signal(t) >= 0 && p2._signal(t) <= 1, true);
+    eq(nrpn('1000:64').query(0, 1)[0].value.nrpn, '1000:64');
+    eq(sound('saw').pitchenv([-5, 6, 0], [0.1, 1.7], ['lin', -4]).query(0, 1)[0].value.pitchenv.curves.join(), '0,-4');
+    assert.throws(() => sound('saw').pitchenv([0, 1], [0.1, 0.2]), /one time/); passed++;
+    // New controls exist as methods and globals
+    for (const name of ['penv', 'pattack', 'pdecay', 'hold', 'decay', 'peak', 'lpenv', 'peakattack', 'squiz', 'leslie', 'freeze', 'vib', 'portamento', 'voice']) {
+        eq(typeof sound('bd')[name], 'function');
+        eq(typeof globalThis[name], 'function');
+    }
+    eq(sound('bd').vibrato(4).query(0, 1)[0].value.vib, 4);
+    eq(sound('bd').glide(0.1).query(0, 1)[0].value.portamento, 0.1);
+    // resetCycles restarts the count at the scheduling frontier
+    t.isPlaying = true;
+    t._nextCycle = 12.5;
+    t._anchorTime = 0;
+    t._anchorCycle = 0;
+    const at = t.timeAt(12.5);
+    t.resetCycles();
+    eq(t._nextCycle, 0);
+    eq(Math.abs(t.timeAt(0) - at) < 1e-9, true);
+    t.isPlaying = false;
+}
+
+// Envelopes: SuperCollider's Env curves and the pitch envelope of synths
+{
+    const at = (env, x) => TidalJS.prototype._envelopeAt.call(t, env, x);
+    const hoover = { levels: [-5, 6, 0], times: [0.1, 1.7], curves: [0, -4] };
+    eq(at(hoover, 0), -5);
+    eq(+at(hoover, 0.05).toFixed(6), 0.5);
+    eq(+at(hoover, 0.1).toFixed(6), 6);
+    const sc = (x) => 6 + (0 - 6) * (1 - Math.exp(-4 * x)) / (1 - Math.exp(-4));
+    eq(+at(hoover, 0.1 + 0.85).toFixed(6), +sc(0.5).toFixed(6));
+    eq(at(hoover, 5), 0);
+    const pe = (def, v) => TidalJS.prototype._pitchEnvelope.call(t, def, v);
+    const gabber = t.samples.get('supergabber');
+    eq(JSON.stringify(pe(gabber, {})), JSON.stringify({ levels: [0, 48, 0], times: [0.001, 0.08], curves: [-1, -1] }));
+    eq(pe(gabber, { penv: 19.2 }).levels[1], 19.2);
+    eq(pe(t.samples.get('saw'), {}), null);
+    eq(pe(t.samples.get('saw'), { penv: 12 }).times.join(), '0,0.1');
+    eq(pe(t.samples.get('superhoover'), {}).levels.join(), '-5,6,0');
+    eq(pe(t.samples.get('superhoover'), { pitchenv: { levels: [0, 1], times: [1], curves: [0] } }).levels.join(), '0,1');
+    for (const name of ['supersaw', 'superhoover', 'supergabber', 'superkick', 'super808', 'superpiano', 'superfm']) eq(TidalJS.soundNames.includes(name), true);
+
+    // FreeVerb2: superhoover has its own (SuperCollider's mix 0.3, room 0.9), others only with freeverb
+    const fv = (name, v) => JSON.stringify(TidalJS.prototype._freeverbOf.call(t, t.samples.get(name), v));
+    eq(fv('superhoover', {}), JSON.stringify({ mix: 0.3, room: 0.9, damp: 0.5 }));
+    eq(fv('superhoover', { freeverb: 0 }), 'null');
+    eq(fv('saw', {}), 'null');
+    eq(fv('saw', { freeverb: 0.4, freeroom: 0.8 }), JSON.stringify({ mix: 0.4, room: 0.8, damp: 0.5 }));
+    // superhoover and supergabber: amp as in SuperCollider (0.1 by default) and Env.asr's curves
+    eq(t.samples.get('supergabber').amp, 0.1);
+    eq(t.samples.get('supergabber').curve, -4);
+    eq(t.samples.get('superhoover').curve, 6);
+    eq(t.samples.get('superhoover').release, 4);
+    // Envelope segments follow SuperCollider's curve and stop part way at `until`
+    const calls = [];
+    const param = { setValueAtTime: (v, at) => calls.push(['set', +v.toFixed(4), at]), linearRampToValueAtTime: (v, at) => calls.push(['ramp', +v.toFixed(4), at]),
+        setValueCurveAtTime: (values, at, dur) => calls.push(['curve', +values[values.length - 1].toFixed(4), at, dur]) };
+    const reached = TidalJS.prototype._envSegments.call(t, param, 0, 1, [{ dur: 1, level: 0, curve: -4 }], 0.5);
+    const scHalf = 1 - (1 - Math.exp(-2)) / (1 - Math.exp(-4));
+    eq(+reached.toFixed(4), +scHalf.toFixed(4));
+    eq(calls[1][0], 'curve');
+    eq(calls[1][3], 0.5);
+    eq(+TidalJS.prototype._envSegments.call(t, param, 0, 0, [{ dur: 2, level: 1, curve: 0 }], 1).toFixed(4), 0.5);
+}
+
+// The output stage: master volume and limiter
+{
+    eq(JSON.stringify(setOutput(1, false)), JSON.stringify({ gain: 1, limiter: false }));
+    eq(t.masterGain.gain.value, 1);
+    eq(JSON.stringify(setOutput()), JSON.stringify({ gain: 0.8, limiter: true }));
+    assert.throws(() => setOutput(-1), /volume/); passed++;
+}
+
+// ---------------------------------------------------------------------
+// Parity with Tidal: each check is a difference found by comparing with
+// Tidal's source (tidal-core, Sound.Tidal.*), and SuperDirt for playback.
+// ---------------------------------------------------------------------
+{
+    const r4 = (x) => +x.toFixed(4);
+    const ev = (p, b = 0, e = 1) => p.query(b, e).sort((x, y) => x.begin - y.begin || x.end - y.end)
+        .map((e2) => (typeof e2.value === 'object' ? (e2.value.n ?? e2.value.note ?? e2.value.s) : e2.value) + '@' + r4(e2.begin) + '-' + r4(e2.end)).join(' ');
+    const vals = (p, b = 0, e = 1) => ev(p, b, e).split(' ').map((x) => x.split('@')[0]).join(' ');
+
+    // Random numbers are Tidal's timeToRand (xorshift over a 300-cycle loop)
+    eq(rand._signal(0), 0.5);
+    eq(rand._signal(1.25), rand._signal(301.25));
+    eq(JSON.stringify(sound('hh*8?').query(0, 4)), JSON.stringify(sound('hh*8?').query(0, 4))); // same string, same choices
+    // degradeBy and unDegradeBy share rand, so they are complementary; sometimesBy picks events first
+    let both = 0;
+    for (let c = 0; c < 50; c++) {
+        const kept = new Set(sound('x*8').degradeBy(0.3).query(c, c + 1).map((e2) => e2.begin));
+        for (const e2 of sound('x*8').unDegradeBy(0.3).query(c, c + 1)) if (kept.has(e2.begin)) both++;
+    }
+    eq(both, 0);
+    eq(sound('bd*4').sometimesBy(0.5, (x) => x.ply(2)).query(0, 50).length % 1, 0);
+    eq(vals(sound('x*16').degradeBy(saw), 0, 1).split(' ').length < 16, true); // a signal amount is read at each event
+    eq(choose([0, 2, 4]) instanceof PatternBuilder, true);
+    eq(new Set([0, 1, 2, 3, 4, 5, 6, 7].map((c) => cycleChoose([0, 1, 2, 3]).query(c, c + 1)[0].value)).size > 1, true);
+    eq([...Array(30).keys()].every((c) => n('0 .. 7').shuffle(8).query(c, c + 1).map((e2) => e2.value.n).sort().join() === '0,1,2,3,4,5,6,7'), true);
+    eq(vals(select(0.5, [n('0'), n('1')])), '0'); // floor(x * (n - 1))
+    eq(vals(chooseBy('0 1.25', ['a', 'b', 'c', 'd'])), 'a b'); // the index wraps
+
+    // Structure
+    eq(ev(n('0 1').euclid(3, 8)), '0@0-0.0625 1@0.0625-0.125 0@0.375-0.4375 1@0.4375-0.5 0@0.75-0.8125 1@0.8125-0.875');
+    eq(ev(n('0*4').swingBy(0.5, 2), 1, 2), '0@1-1.25 0@1.25-1.5 0@1.5-1.75 0@1.75-2');
+    eq([0, 1, 2, 3, 4, 5, 6].map((c) => vals(n('0').foldEvery([2, 3], (x) => x.add(n(1))), c, c + 1)).join(' '), '2 0 1 1 1 0 2');
+    eq(vals(n('<[0 1 2 3] [4 5 6 7]>').iter(4), 1, 2), '1 2 3 4');
+    eq([0, 1, 2, 3].map((c) => vals(n('<0 1 2 3>').chunk(4, (x) => x.add(n(10))), c, c + 1)).join(' '), '10 0 0 0');
+    eq(ev(n('0').echoWith(2, 0.25, (x) => x.fast(2))), '0@0-1 0@0.125-0.625 0@0.625-1.125');
+    eq(ev(n('[0 1, 2 ~ 3]').mono()), '2@0-0.3333 0@0.3333-0.5 1@0.5-1');
+    eq(vals(n('[0,1,2,3,4]').arp('disconverge')), '0 4 1 3 2 3 1 4 0');
+    eq(vals(n('[0,7,4]').arp('up')), '0 7 4');
+    eq(vals(binary('3 5')).split(' ').map((x) => (x === 'true' ? 1 : 0)).join(''), '0000001100000101');
+    eq(weave(3, pan(saw), [n('0'), n('1'), n('2')]).query(0, 1).sort((x, y) => x.value.n - y.value.n).map((e2) => r4(e2.value.pan)).join(' '), '0 0.3333 0.6667');
+    eq(ev(n('0').ply(2.5)), '0@0-0.4 0@0.4-0.8 0@0.8-1');
+    eq(ev(n('[0,4]').plyWith(2, (x) => x.add(n(12)))), '0@0-0.25 4@0.25-0.5 12@0.5-0.75 16@0.75-1');
+    eq(ev(squeeze(run(1).slow(2), [n('0 1')]), 0, 2), '0@0-1 1@1-2');
+    eq(vals(fastFromList([0.5, 1.5, 2.5]).quantise()), '0 2 2');
+    eq(vals(n('0 .. 7').linger(-0.25)), '7 6 7 6 7 6 7 6');
+    eq(ev(n('0 1').fast(-1)), '1@0-0.5 0@0.5-1');
+    eq(ev(layer([(x) => x, (x) => x.add(n(1))], n('0'))), '0@0-1 1@0-1');
+
+    // Mini-notation
+    eq(ev(sound('<a@3 b>'), 0, 4), 'a@0-3 b@3-4');
+    eq(ev(sound('{a@3 b, c d}')).startsWith('c@0-0.25 a@0-0.75'), true);
+    eq(ev(n('0 .. 3 4')), '0@0-0.125 1@0.125-0.25 2@0.25-0.375 3@0.375-0.5 4@0.5-1');
+    eq(note('c .. e').query(0, 1).map((e2) => e2.value.note - 60).join(), '0,1,2,3,4');
+    eq(vals(sound('a !3 b')), 'a a a b');
+    eq(ev(sound('a @3 b')), 'a@0-0.75 b@0.75-1');
+    eq(note("c'm69'd2").query(0, 1).map((e2) => e2.value.note - 60).join(), '-5,0,3,9,14');
+    eq(note("c'm69'o").query(0, 1).map((e2) => e2.value.note - 60).join(), '-12,-3,3,7,14');
+    eq([0, 1].map((c) => note("c'<maj min>").query(c, c + 1).map((e2) => e2.value.note - 60).join()).join(' | '), '0,4,7 | 0,3,7');
+    eq(ev(sound('a - b')), 'a@0-0.3333 b@0.6667-1');
+    eq(ev(sound('a').fast('<4 q>'), 0, 1).split(' ').length, 4);
+    eq([sound('<a b c>').steps(), sound('{a b, c d e}').steps(), sound('{a b c}%4').steps(), sound('bd(3,8)').steps(), sound('~').steps()].join(), '3,6,3,8,1');
+
+    // Controls and SuperDirt playback
+    eq(note('7').up(12).query(0, 1)[0].value.note, 72); // up = note
+    eq(ev(sound('a').add(1)), 'a@0-1'.replace('a@', '1@')); // a bare whole number is n
+    eq(JSON.stringify(sound('a').add(s(':3')).query(0, 1)[0].value), '{"s":"a"}'); // strings are not joined
+    eq(ev(sound('bev').begin(0.5).striate(2)).length > 0 && sound('bev').begin(0.5).striate(2).query(0, 1).map((e2) => e2.value.begin).join(), '0.5,0.75');
+    eq(sound('bev').chop(2).steps(), 2);
+    eq(scale('bartok', '0 1 2').query(0, 1).map((x) => x.value).join(), '0,2,4');
+
+    // Streams, transitions and stepwise
+    t.stopAll();
+    t.eval('mortal(1, 1, 1, sound("bd"))');
+    eq(t.channels.get('d1').query(2, 4).length, 0); // a new stream starts from silence
+    t.soloed.add('d9');
+    t.muted.add('d9');
+    eq(t.isAudible('d9'), true); // soloed wins over muted, as in Tidal
+    t.soloed.clear();
+    t.muted.clear();
+    eq(ev(stepcat(sound('<a b>'), sound('c d'))), 'a@0-0.5 c@0.5-0.75 d@0.75-1');
+    eq(ev(sound('a b c d').steptake('1 3')), 'a@0-0.25 a@0.25-0.5 b@0.5-0.75 c@0.75-1');
+    eq(vals(sound('a b c d').steptake(6)), 'a b c d a b');
+    eq(ev(stepcat(sound('a b').steptake(0), sound('c'))), 'c@0-1');
+    eq(sound('a').segment(4).steps(), 4);
+    eq(sound('a b c d').zoom(0.25, 0.75).steps(), 2);
+    t.stopAll();
 }
 
 console.log(`all ${passed} checks passed`);
