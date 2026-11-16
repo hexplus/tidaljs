@@ -26,6 +26,8 @@ export interface EvalResult {
   pending?: boolean;
   /** Live update only: held back until a manifest this code asks for arrives; it may bring these sounds. */
   waitingForSamples?: string[];
+  /** With waitingForSamples: settles (never rejects) once those manifests have arrived or failed. */
+  samplesSettled?: Promise<void>;
   activePatterns: number;
   error?: string;
   /** Where the error happened, as offsets in the code. */

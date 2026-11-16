@@ -660,5 +660,194 @@ const reset = () => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 6
+/** The audio time of `cycle` on a clock that starts at 0.05 s at 1 cps and changes tempo at [cycle, cps] points. */
+const timeOn = (changes, cycle) => {
+    let time = 0.05;
+    let at = 0;
+    let cps = 1;
+    for (const [c, next] of changes) {
+        if (c >= cycle) break;
+        time += (c - at) / cps;
+        at = c;
+        cps = next;
+    }
+    return +(time + (cycle - at) / cps).toFixed(6);
+};
+const hitsOf = (played, s, until) => played.filter((e) => e.s === s && e.time <= until + 1e-9).map((e) => e.time);
+const gridOf = (changes, step, until) => {
+    const out = [];
+    for (let c = 0; timeOn(changes, c) <= until + 1e-9; c += step) out.push(timeOn(changes, c));
+    return out;
+};
+{
+    // 1. An invalid samples() argument is an error in the code: nothing waits, nothing is asked for or retried,
+    // and the playing streams stay.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    t.eval('d1(sound("bd*2"))');
+    const working = t.channels.get('d1');
+    const loadsBefore = t._sampleLoads.size;
+    for (const bad of ['samples(42)', 'samples("")', 'samples(["k.wav"])', 'samples(null)', 'samples("github:nobody")', 'samples({ k: ["k.wav"] }, 5)']) {
+        for (const options of [live, {}]) {
+            const r = t.eval(bad + '\nd1(sound("zonk*2"))', options);
+            eq([r.success, r.pending, r.waitingForSamples, r.samplesSettled], [false, undefined, undefined, undefined], bad);
+            ok(/samples\(/.test(r.error), bad + ': ' + r.error);
+            eq(r.location && r.location.line, 1, 'located on the samples() line');
+            eq(t.channels.get('d1'), working, 'what plays stays');
+        }
+    }
+    eq([t.sampleFailures(), t._sampleLoads.size], [[], loadsBefore], 'no load started or failed');
+    await assert.rejects(t.loadSamples(42), TypeError); passed++;
+
+    // A manifest that fails: the held-back edit waits for that load only, and once it settles the check
+    // ends in a warning: it does not wait again.
+    const answers = {};
+    globalThis.fetch = (url) => new Promise((resolve) => {
+        answers[url] = (banks, status = 200) => resolve(status === 200 ? { ok: true, url, json: async () => banks } : { ok: false, status });
+    });
+    const code = 'samples("https://kit.test/r6/strudel.json")\nd1(sound("zonk*2"))';
+    let r = t.eval(code, live);
+    eq(r.waitingForSamples, ['zonk']);
+    ok(r.samplesSettled instanceof Promise, 'tied to the load it waits for');
+    let settled = false;
+    r.samplesSettled.then(() => { settled = true; });
+    // Another load settling does not count.
+    const other = t.loadSamples('https://other.test/r6/strudel.json');
+    answers['https://other.test/r6/strudel.json']({ hat: ['h.wav'] });
+    await other;
+    await new Promise((done) => realSetTimeout(done, 5));
+    eq(settled, false, 'not settled by another load');
+    answers['https://kit.test/r6/strudel.json'](null, 500);
+    await r.samplesSettled;
+    eq(t.sampleFailures().map((f) => f.source), ['https://kit.test/r6/strudel.json|']);
+    r = t.eval(code, live);
+    eq([r.pending, r.warnings, r.waitingForSamples, r.samplesSettled], [true, ['Unknown sound "zonk"'], undefined, undefined], 'settled: no new wait');
+    eq(t.channels.get('d1'), working);
+    t.retrySamples();
+    t.stopAll();
+}
+{
+    // 3a. Tempo requests in cycle order across ticks: a stream added later asks for a change at an earlier
+    // cycle (0.45, 4 cps) than one already asked for (0.5, 2 cps); both happen, in cycle order.
+    reset();
+    t.lookahead = 0.1;
+    const live = { keepUnchanged: true }; // (a, x, y are unknown sounds: no holding back on warnings)
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x").cps(2))');
+    let played = run(0, 300);
+    ok(t._tempoRequests.some((q) => q.cycle === 0.5), 'the 0.5 request was asked for in an earlier tick');
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x").cps(2))\nd3(sound("y").late(0.45).cps(4))', live);
+    played = played.concat(run(325, 800));
+    const changes = [[0.45, 4], [0.5, 2]];
+    eq(timeOn(changes, 0.5), 0.5125);
+    eq(hitsOf(played, 'a', 0.76), gridOf(changes, 0.125, 0.76), 'every hit on the reconciled clock');
+
+    // 3b. An equal request counts: d3's 2 cps at 0.4 takes over when d2's 2 cps at 0.2 goes before its onset.
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2))\nd3(sound("~ ~ y ~ ~").cps(2))');
+    played = run(0, 100);
+    eq(t._tempoRequests.length, 2, 'both asked for, the second equal to the tempo before it');
+    t.eval('d1(sound("a*8"))\nd3(sound("~ ~ y ~ ~").cps(2))', live);
+    played = played.concat(run(125, 1000));
+    eq(hitsOf(played, 'a', 0.95), gridOf([[0.4, 2]], 0.125, 0.95), '1 cps up to 0.4, then 2 cps');
+
+    // 3c. Mute and solo: a change from a stream that is not heard does not happen; heard again before its onset,
+    // it does; muted past its onset, it never happens.
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2))');
+    played = run(0, 50);
+    eq(t.cps, 2);
+    t.mute('d2');
+    eq(t.cps, 1, 'muted: undone at once');
+    t.mute('d2', false);
+    eq(t.cps, 2, 'heard again: back');
+    t.solo('d1');
+    eq(t.cps, 1, 'another stream soloed: undone');
+    t.unsoloAll();
+    played = played.concat(run(75, 1000));
+    eq(hitsOf(played, 'a', 0.95), gridOf([[0.2, 2]], 0.125, 0.95), 'it happened at 0.2');
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).playFor(0, 1))'); // in cycle 0 only
+    played = run(0, 50);
+    t.mute('d2');
+    played = played.concat(run(75, 600));
+    t.mute('d2', false);
+    played = played.concat(run(625, 1200));
+    eq(t.cps, 1, 'muted past its onset: never happened');
+    eq(hitsOf(played, 'a', 1.15), gridOf([], 0.125, 1.15));
+
+    // 3d. Stop and Reset Cycles drop the requests not sent yet and keep the committed tempo (2 cps, from cycle 0).
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("x ~ ~ ~ ~").cps("<2 3>"))');
+    run(0, 300);
+    eq(t.cps, 3, 'the 3 cps at cycle 1 is asked for ahead');
+    t.stopAll();
+    eq(t.cps, 2, 'Stop: the committed tempo');
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("x ~ ~ ~ ~").cps("<2 3>"))');
+    played = run(0, 300);
+    eq(t.cps, 3);
+    t.resetCycles();
+    eq(t.cps, 2, 'Reset Cycles: the committed tempo');
+    played = played.concat(run(325, 1200));
+    // Cycle 0.7 (0.4 s) becomes cycle 0: 2 cps up to the new cycle 1 (0.9 s), then 3 cps.
+    eq(hitsOf(played, 'a', 1.2).filter((x) => x >= 0.4 - 1e-9),
+        [0.4, 0.4625, 0.525, 0.5875, 0.65, 0.7125, 0.775, 0.8375, 0.9, 0.941667, 0.983333, 1.025, 1.066667, 1.108333, 1.15, 1.191667]);
+    t.stopAll();
+}
+{
+    // 4a. Positive nudge when the old pattern held nothing back: the new version's onsets that its nudge moves
+    // past what was sent are still its to play.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a"))');
+    const before = run(0, 600);
+    eq(t._nudged.length, 0, 'nothing held back at the edit');
+    t.eval('d1(sound("b*4").nudge(0.3))');
+    const after = run(625, 2000);
+    eq(hitsOf(before, 'a', 2), [0.05]);
+    eq(hitsOf(after, 'b', 1.95), [0.85, 1.1, 1.35, 1.6, 1.85], 'from cycle 0.5 (nominal 0.55 s, sounding at 0.85 s)');
+    eq(hitsOf(after, 'a', 2), [], 'the old pattern sends nothing more');
+
+    // 4b. A nudge longer than the stall threshold: onsets whose nominal time is long past but still held back
+    // are handed over, every position once.
+    reset();
+    t.eval('d1(sound("a*4").nudge(0.8))');
+    const held = run(0, 600);
+    eq(held.length, 0);
+    ok(t._nudged.some((it) => it.ev.begin === 0), 'cycle 0 (nominal 0.05 s) still held at 0.6 s');
+    t.eval('d1(sound("b*4").nudge(0.8))');
+    const handed = run(625, 2000);
+    eq(handed.map((e) => e.s + '@' + e.time), ['b@0.85', 'b@1.1', 'b@1.35', 'b@1.6', 'b@1.85']);
+    t.stopAll();
+}
+{
+    // 5. Parameter bindings that run code (a computed key, a default) make the function not pure: a call
+    // to it counts as a write, so editing what it runs rebuilds the streams.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    const gain = () => t.channels.get('d1').query(0, 1)[0].value.gain;
+    const program = (level) => `const config = { level: 0.2 }\nfunction touch() { config.level = ${level}; return "k" }\nfunction f({ [touch()]: x }) { return x }\nconst unused = f({})\nd1(sound("bd").gain(config.level))`;
+    t.eval(program(0.9));
+    eq(gain(), 0.9);
+    t.eval(program(0.5), live);
+    eq(gain(), 0.5, 'a computed key in the parameters');
+    const counter = (step) => `const config = { level: 0.1 }\nconst keys = ["a"]\nconst f = ({ [keys[config.level += ${step}, 0]]: x }) => x\nconst unused = f({})\nd1(sound("bd").gain(config.level))`;
+    t.eval(counter(0.2));
+    t.eval(counter(0.4), live);
+    eq(+gain().toFixed(6), 0.5, 'a computed key with an assignment');
+    const deep = (level) => `const config = { level: 0.2 }\nfunction touch() { config.level = ${level}; return 1 }\nfunction f([{ a } = { a: touch() }]) { return a }\nconst unused = f([])\nd1(sound("bd").gain(config.level))`;
+    t.eval(deep(0.7));
+    t.eval(deep(0.3), live);
+    eq(gain(), 0.3, 'a default inside an array pattern');
+    // Plain bindings stay pure: renames, nesting and rest.
+    const plain = 'function f({ a: [b, ...c], d }) { return b }\nconst x = f({ a: [1] })\nd1(sound("bd"))';
+    t.eval(plain);
+    const kept = t.channels.get('d1');
+    t.eval(plain + '\nd2(sound("hh"))', live);
+    eq(t.channels.get('d1'), kept, 'a plain destructuring function is still pure');
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

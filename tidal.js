@@ -1681,6 +1681,9 @@
     // How far a negative nudge can move an event earlier and still play on time: events are asked for
     // this many seconds before they are sent (see _tick). Earlier ones play this much early, with a warning.
     const NUDGE_EARLY = 0.2;
+    // How far back (seconds) a replaced stream's new pattern is asked for, for onsets that a positive nudge
+    // moves past what was already sent (see _tick).
+    const NUDGE_LATE = 1;
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -3356,18 +3359,10 @@
                 params.add(toks[k].value);
                 k += 2;
             } else if (isPunct(toks[k], '(')) {
-                let depth = 0;
-                let defaults = false;
-                for (; k < toks.length; k++) {
-                    const t = toks[k];
-                    if (t.type === 'punct' && OPENERS.has(t.value)) depth++;
-                    else if (t.type === 'punct' && CLOSERS.has(t.value)) { if (--depth === 0) { k++; break; } }
-                    else if (t.type === 'name' && !t.prop) params.add(t.value);
-                    // A default value (x = ..., or in a destructuring pattern) runs when the function is
-                    // called: whether it writes is not read here, so the function is not counted as pure.
-                    if (isPunct(t, '=')) defaults = true;
-                }
-                if (defaults) continue;
+                const bindings = plainParameters(toks, k);
+                if (!bindings) continue;
+                for (const p of bindings.names) params.add(p);
+                k = bindings.end;
                 if (isPunct(toks[k], '=>')) k++;
             } else {
                 continue;
@@ -3390,6 +3385,38 @@
             }
         }
         return pure;
+    }
+
+    /**
+     * The names a parameter list starting at toks[open] ("(") binds, and the
+     * index after its ")", when binding them runs no code: only names,
+     * destructuring brackets, renames (key: name), rest (...) and commas.
+     * A default value (x = ..., also inside a pattern) or a computed key
+     * ({ [expr]: x }) runs when the function is called, and anything else
+     * is not read here: then null, and the function is not counted as pure.
+     */
+    function plainParameters(toks, open) {
+        const names = [];
+        const stack = [];
+        for (let k = open; k < toks.length; k++) {
+            const t = toks[k];
+            const prev = toks[k - 1];
+            if (t.type === 'punct' && OPENERS.has(t.value)) {
+                if (k > open && t.value === '(') return null;
+                // [ directly after { or , in an object pattern opens a computed key.
+                if (t.value === '[' && stack[stack.length - 1] === '{' && (isPunct(prev, '{') || isPunct(prev, ','))) return null;
+                stack.push(t.value);
+            } else if (t.type === 'punct' && CLOSERS.has(t.value)) {
+                stack.pop();
+                if (stack.length === 0) return { names, end: k + 1 };
+            } else if (t.type === 'name' && !t.prop) {
+                // In an object pattern, a name before ":" is the key read, not a binding.
+                if (!(stack[stack.length - 1] === '{' && isPunct(toks[k + 1], ':'))) names.push(t.value);
+            } else if (!(isPunct(t, ',') || isPunct(t, ':') || isPunct(t, '...'))) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /** Bracket depth before token k. */
@@ -5948,13 +5975,14 @@
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
-            this._speculative = [];            // tempo changes events asked for ahead (see _settleTempo)
+            this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
+            this._tempoBase = null;            // the committed tempo while there are requests
             this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
             this._bankSeq = 0;                 // numbers samples() registrations in the order they were made
             this._bankSeqs = new Map();        // bank -> the number of the registration that set it
-            this._txnBanksPending = false;
+            this._txnPendingLoads = [];        // the manifests code being evaluated asks for that have not arrived
         }
 
         // --- Setup -----------------------------------------------------
@@ -6333,36 +6361,68 @@
         }
 
         /**
-         * Tempo changes from events (a cps control) are made when the event is
-         * asked for, ahead of time. One whose onset has been sent has taken
-         * effect. One still ahead belongs to its stream's pattern: if that
-         * stream was removed or replaced meanwhile, the change (and those made
-         * after it) is undone, the others are made again, and events not yet
-         * sent get their times from the clock as it is then.
+         * Tempo changes from events (a cps control) are asked for ahead of
+         * time, when their events are, and stay requests until their onset
+         * has been sent. The clock is the committed tempo plus the requests
+         * still ahead whose stream still plays the pattern that asked (and is
+         * audible), made in cycle order (then in the order they were asked
+         * for): so one asked for in a later tick at an earlier cycle (a
+         * stream added meanwhile) goes before those after it, and one equal to
+         * the tempo before it still counts (it matters again if an earlier one
+         * goes). Recomputed whenever streams change (removed, replaced, muted,
+         * soloed); events not yet sent get their times from the clock as it
+         * is then.
          */
-        _settleTempo() {
-            this._speculative = this._speculative.filter((s) => s.cycle >= this._dispatchCycle);
-            const stale = this._speculative.findIndex((s) => this.channels.get(s.owner.id) !== s.owner.pattern);
-            if (stale < 0) return;
-            const undo = this._speculative[stale];
-            const redo = this._speculative.slice(stale + 1).filter((s) => this.channels.get(s.owner.id) === s.owner.pattern);
-            this._speculative.length = stale;
-            this._anchorTime = undo.anchor.time;
-            this._anchorCycle = undo.anchor.cycle;
-            this.cps = undo.anchor.cps;
-            this._tempoHistory = undo.history;
-            for (const s of redo) this._retempo(s.cycle, s.cps, s.owner);
+        _reconcileTempo() {
+            if (!this._tempoBase) return;
+            this._restoreTempo(this._tempoBase);
+            const requests = this._tempoRequests.filter((r) => this._tempoOwned(r)).sort((a, b) => a.cycle - b.cycle || a.seq - b.seq);
+            for (const r of requests) this._retempo(r.cycle, r.cps);
         }
 
-        /** Undoes every tempo change still ahead (a deliberate setCPS has the last word over them). */
-        _dropSpeculativeTempo() {
-            const first = this._speculative[0];
-            this._speculative = [];
-            if (!first) return;
-            this._anchorTime = first.anchor.time;
-            this._anchorCycle = first.anchor.cycle;
-            this.cps = first.anchor.cps;
-            this._tempoHistory = first.history;
+        /** True while the stream that asked for a tempo change still plays that pattern and is heard. */
+        _tempoOwned(r) {
+            return this.channels.get(r.owner.id) === r.owner.pattern && this.isAudible(r.owner.id);
+        }
+
+        /** Records a tempo change asked for by a stream's event (see _reconcileTempo). */
+        _requestTempo(cycle, cps, owner, seq) {
+            if (!this._tempoBase) this._tempoBase = this._snapshotTempo();
+            this._tempoRequests.push({ cycle, cps, owner, seq });
+        }
+
+        /**
+         * Requests whose onset has been sent took effect: those still owned
+         * join the committed tempo, the others are gone.
+         */
+        _commitTempo() {
+            if (!this._tempoBase) return;
+            const due = this._tempoRequests.filter((r) => r.cycle < this._dispatchCycle);
+            if (!due.length) return;
+            this._tempoRequests = this._tempoRequests.filter((r) => r.cycle >= this._dispatchCycle);
+            this._restoreTempo(this._tempoBase);
+            for (const r of due.filter((x) => this._tempoOwned(x)).sort((a, b) => a.cycle - b.cycle || a.seq - b.seq)) this._retempo(r.cycle, r.cps);
+            this._tempoBase = this._tempoRequests.length ? this._snapshotTempo() : null;
+            this._reconcileTempo();
+        }
+
+        /** Drops the requests not yet taken effect: the clock goes back to the committed tempo. */
+        _dropTempoRequests() {
+            const base = this._tempoBase;
+            this._tempoBase = null;
+            this._tempoRequests = [];
+            if (base) this._restoreTempo(base);
+        }
+
+        _snapshotTempo() {
+            return { time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps, history: this._tempoHistory.slice() };
+        }
+
+        _restoreTempo(s) {
+            this._anchorTime = s.time;
+            this._anchorCycle = s.cycle;
+            this.cps = s.cps;
+            this._tempoHistory = s.history.slice();
         }
 
         /** The tempo in force at a cycle (see cycleAt). */
@@ -6383,15 +6443,9 @@
          * Changes the tempo from `cycle` on: the old mapping stays valid up to
          * that frontier, the new one starts there at the same time.
          */
-        _retempo(cycle, cps, owner = null) {
-            // A change asked for ahead by a stream's event is speculative until it has taken effect
-            // (see _settleTempo): what it replaces is kept to go back to.
-            if (owner) {
-                this._speculative.push({
-                    cycle, cps, owner, history: this._tempoHistory.slice(),
-                    anchor: { time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps },
-                });
-            }
+        _retempo(cycle, cps) {
+            if (Math.abs(cps - this.cps) <= 1e-9) return; // the same tempo: nothing changes
+            cycle = Math.max(cycle, this._anchorCycle); // never before the mapping in force
             const time = this.timeAt(cycle);
             this._tempoHistory.push({ time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps });
             if (this._tempoHistory.length > 32) this._tempoHistory.shift();
@@ -6836,7 +6890,7 @@
             // (from what was already sent: events asked for ahead get their times when they go out; tempo
             // changes events asked for ahead are overridden)
             if (this.isPlaying) {
-                this._dropSpeculativeTempo();
+                this._dropTempoRequests();
                 this._retempo(Math.max(this._dispatchCycle, this._anchorCycle), next);
             }
             else this.cps = next;
@@ -6902,13 +6956,14 @@
          * for ahead (in the old numbering) are asked for again.
          */
         _renumber(cycle) {
+            this._dropTempoRequests(); // those not sent yet were asked for in the old numbering
             this._anchorTime = this.timeAt(this._dispatchCycle);
             this._anchorCycle = cycle;
             this._nextCycle = cycle;
             this._dispatchCycle = cycle;
             this._tempoHistory = [];
             this._queried.clear();
-            this._speculative = []; // (what was already sent, _sentHorizon, is a time: it stays)
+            // (what was already sent, _sentHorizon, is a time: it stays)
             this._nudged = [];
         }
 
@@ -6927,7 +6982,8 @@
             this._dispatchCycle = 0;
             this._queried.clear();
             this._sentHorizon = -Infinity;
-            this._speculative = [];
+            this._tempoRequests = [];
+            this._tempoBase = null;
             this._tempoHistory = [];
             this._nudged = [];
             this.isPlaying = true;
@@ -6941,7 +6997,7 @@
             this._nudged = []; // events held back for a later tick never play
             this._queried.clear();
             this._sentHorizon = -Infinity;
-            this._speculative = [];
+            this._dropTempoRequests(); // tempo changes whose onset was not sent never happened: the committed tempo stays
             const session = this._session;
             this._session = null;
             this._teardownSession(session);
@@ -7008,6 +7064,7 @@
             if (typeof id === 'string') this.streams.delete(id);
             const stopped = this.channels.size === 0;
             if (stopped) this._halt();
+            else this._reconcileTempo();
             if (typeof this.onError === 'function') this.onError(error, { stream: typeof id === 'string' ? id : null, stopped });
         }
 
@@ -7027,6 +7084,7 @@
             if (this._stage('mute', () => this.mute(key, on))) return;
             if (on) this.muted.add(key);
             else this.muted.delete(key);
+            this._reconcileTempo();
         }
 
         /** Solos (or unsolos) a stream: only soloed streams are heard while any is. */
@@ -7035,16 +7093,19 @@
             if (this._stage('solo', () => this.solo(key, on))) return;
             if (on) this.soloed.add(key);
             else this.soloed.delete(key);
+            this._reconcileTempo();
         }
 
         unmuteAll() {
             if (this._stage('mute', () => this.unmuteAll())) return;
             this.muted.clear();
+            this._reconcileTempo();
         }
 
         unsoloAll() {
             if (this._stage('solo', () => this.unsoloAll())) return;
             this.soloed.clear();
+            this._reconcileTempo();
         }
 
         /** The playing streams in order, with their state, for the editor. */
@@ -7095,45 +7156,60 @@
             const ctx = this.audioContext;
             if (!this.isPlaying || !ctx) return;
             const now = ctx.currentTime;
-            // Tempo changes asked for ahead by streams that were removed or replaced since do not happen.
-            this._settleTempo();
+            // Tempo changes asked for ahead by streams that were removed, replaced or silenced since do not happen.
+            this._reconcileTempo();
             // Events are asked for NUDGE_EARLY seconds before the horizon at which they are sent, so
             // one that a negative nudge moves earlier (up to NUDGE_EARLY) is known in time to play.
             const to = this.cycleAt(now + this.lookahead + NUDGE_EARLY);
 
             // Every audible stream's events since that stream was last asked. A stream that is new or
             // whose pattern changed takes over at the audible boundary, what was already sent: it is asked
-            // from far enough back to cover what the old pattern only held back (a later nudge), and of
-            // its events only those sounding at or after that boundary go out. So a live update repeats
-            // nothing that was sent (an onset moved earlier by a negative nudge) and drops nothing that
-            // was not (one moved later). Simultaneous events keep a fixed order: the streams' order,
-            // then the order each stream gives them.
+            // from far enough back to cover onsets a positive nudge moves past that boundary (NUDGE_LATE
+            // seconds, or further back to what the old pattern still held back), and of its events only
+            // those sounding at or after the boundary go out. So a live update repeats nothing that was
+            // sent (an onset moved earlier by a negative nudge) and drops nothing that was not (one moved
+            // later), whether or not the old pattern had such an onset waiting. Simultaneous events keep a
+            // fixed order: the streams' order, then the order each stream gives them. Silent streams are
+            // asked too, for their tempo changes only (those count again if the stream is heard before them).
             const items = [];
+            const requests = [];
             let order = 0;
             for (const [id, pattern] of [...this.channels]) {
                 const stream = order++;
                 const asked = this._queried.get(id);
                 const fresh = !asked || asked.pattern !== pattern;
                 let from = asked && !fresh ? asked.to : this._dispatchCycle;
-                if (fresh) for (const it of this._nudged) if (it.id === id && it.ev.begin < from) from = it.ev.begin;
                 // After a long stall (e.g. a suspended tab) skip ahead instead of firing a burst of late events.
                 if (this.timeAt(from) < now - 0.5) from = this.cycleAt(now);
+                if (fresh && Number.isFinite(this._sentHorizon)) {
+                    // The look back starts from the boundary and is not subject to the stall rule: an onset whose
+                    // nominal time is long past may still sound later (its nudge); late ones are skipped when sent.
+                    let back = this.cycleAt(Math.max(this._sentHorizon, now) - NUDGE_LATE);
+                    for (const it of this._nudged) if (it.id === id && it.ev.begin < back) back = it.ev.begin;
+                    if (back < from) from = back;
+                }
                 // No new cycles to ask for (after a sharp slowdown the frontier can be far ahead): events
                 // held back still go out when their time comes (below).
                 if (to <= from) continue;
                 this._queried.set(id, { pattern, to });
-                if (!this.isAudible(id)) continue;
+                const audible = this.isAudible(id);
                 let events;
                 try {
                     events = pattern.query(from, to);
                 } catch (error) {
-                    this._streamFailed(id, error);
+                    if (audible) this._streamFailed(id, error);
                     continue;
                 }
-                // Each event keeps its stream and the pattern it came from, so one held back can be dropped
-                // when that stream is muted, replaced or removed before it goes out.
-                const after = fresh ? this._sentHorizon : -Infinity;
-                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i, id, pattern, after });
+                for (let i = 0; i < events.length; i++) {
+                    const v = asObject(events[i].value);
+                    // Tidal's cps control (onsets before what was sent were the old pattern's to make).
+                    if (isNum(v.cps) && v.cps > 0 && events[i].begin >= this._dispatchCycle) {
+                        requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i });
+                    }
+                    // Each event keeps its stream and the pattern it came from, so one held back can be dropped
+                    // when that stream is muted, replaced or removed before it goes out.
+                    if (audible) items.push({ ev: events[i], v, stream, i, id, pattern, after: fresh ? this._sentHorizon : -Infinity });
+                }
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
             if (to > this._nextCycle) this._nextCycle = to;
@@ -7143,12 +7219,10 @@
 
             // Tidal's cps control: an event changes the tempo from its onset
             // on, for every event that starts there or later (setcps is once . cps).
-            for (const it of items) {
-                if (!isNum(it.v.cps) || !(it.v.cps > 0)) continue;
-                const cps = clamp(it.v.cps, 0.05, 10);
-                // Owned by the stream (and its pattern) that asked for it, until it has taken effect.
-                if (Math.abs(cps - this.cps) > 1e-9) this._retempo(it.ev.begin, cps, { id: it.id, pattern: it.pattern });
-            }
+            // Owned by the stream (and its pattern) that asked for it, until it has taken effect.
+            requests.sort((a, b) => a.cycle - b.cycle || a.stream - b.stream || a.i - b.i);
+            for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++);
+            if (requests.length) this._reconcileTempo();
 
             // Then in the order they sound (nudge included), so the last word on
             // an orbit's effects or a cut group is the latest event's. A note's
@@ -7164,6 +7238,7 @@
                 }
             }
             this._dispatch(items, now);
+            this._commitTempo();
         }
 
         /**
@@ -7285,7 +7360,7 @@
             this._txn = txn;
             this._txnCps = undefined;
             this._txnBanks = new Set(); // banks samples() stages in this code
-            this._txnBanksPending = false; // and whether it asks for a manifest that has not arrived
+            this._txnPendingLoads = []; // and the manifests it asks for that have not arrived
             // options.cps: the tempo the document brings (the editor's draft tempo). It is staged first, so
             // it applies only if the code commits, and a setCPS() in the code has the last word.
             if (isNum(options.cps) && options.cps > 0) this.setCPS(options.cps);
@@ -7333,7 +7408,7 @@
                             // Unknown, unless a bank this code adds may hold it: a manifest this code asks for that has
                             // not arrived yet (one that failed, or a fetch other code left, does not count). Then the
                             // name waits: a live update is held back until it is known (see below).
-                            if (this._txnBanksPending) unresolved.add(v.s);
+                            if (this._txnPendingLoads.length) unresolved.add(v.s);
                             else warnings.add(`Unknown sound "${v.s}"`);
                         }
                     }
@@ -7350,10 +7425,15 @@
 
                 // A live update holds back on warnings, and on sounds a bank it asks for may still bring: the
                 // playing streams stay until the manifest arrives and the code is checked again.
+                // samplesSettled tells when the manifests it waits for have arrived or failed (it never rejects),
+                // so the code is checked again once, for those loads; a failed one brings nothing, so the check
+                // after it ends in a warning instead of waiting again.
                 if (options.keepOnWarnings && (warnings.size > 0 || unresolved.size > 0)) {
+                    const waiting = unresolved.size > 0 && warnings.size === 0;
                     return {
                         success: false, pending: true, activePatterns: this.channels.size, warnings: [...warnings],
-                        waitingForSamples: unresolved.size > 0 && warnings.size === 0 ? [...unresolved] : undefined,
+                        waitingForSamples: waiting ? [...unresolved] : undefined,
+                        samplesSettled: waiting ? Promise.allSettled(this._txnPendingLoads).then(() => undefined) : undefined,
                     };
                 }
 
@@ -7405,6 +7485,7 @@
                 }
                 this.streams = streams;
                 this.channels = new Map([...streams].map(([name, s]) => [name, s.playing]));
+                this._reconcileTempo(); // tempo changes ahead from streams this code removed or replaced go
                 this._collecting = null;
                 // The controls and keyboards of this code replace the old ones (those not used any more go).
                 const live = this._live;
@@ -7429,6 +7510,7 @@
                 this._txn = null;
                 this._txnCps = undefined;
                 this._txnBanks = null;
+                this._txnPendingLoads = [];
                 this._collecting = null;
                 this._warnings = null;
                 this._live = null;
@@ -8396,6 +8478,17 @@
          * ("/samples/bd.wav") paths work as in a link.
          */
         loadSamples(source, base = '') {
+            // An argument that is not a source is the code's mistake, not a load that failed: in code being
+            // evaluated it is an error there (nothing of that code runs, what plays stays), and it is never
+            // asked for, retried or waited for.
+            const invalid = invalidSampleSource(source, base);
+            if (invalid) {
+                const error = new TypeError(invalid);
+                if (this._txn) throw error;
+                const rejected = Promise.reject(error);
+                rejected.catch(() => { /* the caller's to handle */ });
+                return rejected;
+            }
             const entry = this._samplePlan(source, base);
             // The banks replace those of the same name only now (in code being evaluated, when it
             // commits), in the order the samples() calls ran: each registration has a number, and a
@@ -8414,7 +8507,7 @@
                 // For the warnings of this evaluation: names it adds count as known, and a manifest it
                 // asks for that has not arrived means any name may come (see eval).
                 if (entry.plan) for (const bank of entry.plan) this._txnBanks.add(bank.name);
-                else if (!entry.failed) this._txnBanksPending = true; // a manifest that failed brings nothing
+                else if (!entry.failed) this._txnPendingLoads.push(entry.promise); // a manifest that failed brings nothing
                 let settle;
                 const result = new Promise((resolve) => { settle = resolve; });
                 result.catch(() => { /* as above */ });
@@ -8446,8 +8539,6 @@
                     return planBanks(map, resolveUrl(base || (typeof map._base === 'string' ? map._base : ''), finalUrl));
                 })();
                 entry.promise.then((plan) => { entry.plan = plan; }, () => { entry.failed = true; });
-            } else if (!source || typeof source !== 'object') {
-                entry.promise = Promise.reject(new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }'));
             } else {
                 entry.plan = planBanks(source, resolveUrl(base || (typeof source._base === 'string' ? source._base : ''), pageBase()));
                 entry.promise = Promise.resolve(entry.plan);
@@ -10598,6 +10689,21 @@
             const trackHeader = [0x4d, 0x54, 0x72, 0x6b, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff];
             return new Uint8Array([...header, ...trackHeader, ...track]);
         }
+    }
+
+    /** Why samples(source, base) cannot be a sample source, or null when it can. */
+    function invalidSampleSource(source, base) {
+        const expects = 'samples() expects "github:user/repo", a manifest URL or { name: [files] }';
+        if (typeof base !== 'string') return 'samples(): the base URL must be text';
+        if (typeof source === 'string') {
+            if (!source.trim()) return expects + ', not an empty text';
+            if (/^\s*github:/i.test(source) && !/^github:[^/\s]+\/[^/\s]+(?:\/[^\s]+)?$/.test(source.trim())) {
+                return `samples("${source}"): a GitHub source is "github:user/repo" (or github:user/repo/branch)`;
+            }
+            return null;
+        }
+        if (!source || typeof source !== 'object' || Array.isArray(source)) return expects;
+        return null;
     }
 
     /**
