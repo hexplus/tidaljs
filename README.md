@@ -866,6 +866,28 @@ This project is licensed under the MIT License. See [LICENSE.md](LICENSE.md) for
 - **Web Audio API developers** for making browser audio possible
 - **Contributors** who help make TidalJS better
 
+### Projects TidalJS builds on
+
+TidalJS follows the design and behaviour of these projects. Each one keeps its own license, which applies to that project's code and files.
+
+| Project | Links | What TidalJS takes from it | License |
+| --- | --- | --- | --- |
+| **TidalCycles** (Tidal), by Alex McLean and contributors | [tidalcycles.org](https://tidalcycles.org/) · [GitHub](https://github.com/tidalcycles/Tidal) | The pattern model, mini-notation, function names and their semantics | [GPL-3.0](https://github.com/tidalcycles/Tidal/blob/main/LICENSE) |
+| **SuperCollider** | [supercollider.github.io](https://supercollider.github.io/) · [GitHub](https://github.com/supercollider/supercollider) | The language the `.scd` importer reads; the behaviour of its UGens, filters and FreeVerb2 | [GPL-3.0](https://github.com/supercollider/supercollider/blob/develop/COPYING) |
+| **SuperDirt**, by Julian Rohrhuber and contributors | [GitHub](https://github.com/musikinformatik/SuperDirt) | The synths, effects, orbits and the meaning of each control | [GPL-2.0](https://github.com/musikinformatik/SuperDirt/blob/develop/LICENSE) |
+| **Dirt-Samples** | [GitHub](https://github.com/tidalcycles/Dirt-Samples) | The sample library `samples("github:tidalcycles/dirt-samples")` loads. The samples are not bundled with TidalJS: they are downloaded from GitHub when loaded | The repository has no license file; the samples come from many sources |
+| **Strudel** | [strudel.cc](https://strudel.cc/) · [Codeberg](https://codeberg.org/uzu/strudel) | The `strudel.json` sample manifest format | [AGPL-3.0](https://codeberg.org/uzu/strudel/src/branch/main/LICENSE) |
+| **Freeverb**, by Jezar at Dreampoint | — | The reverb algorithm behind SuperCollider's FreeVerb2 and `freeverb()` | Public domain |
+| **Audio EQ Cookbook**, by Robert Bristow-Johnson | [W3C](https://www.w3.org/TR/audio-eq-cookbook/) | The biquad filter formulas Web Audio uses | [W3C Document License](https://www.w3.org/copyright/document-license/) |
+
+### Libraries and tools
+
+| Project | Use | License |
+| --- | --- | --- |
+| [SibuJS](https://sibujs.dev/) | The framework the editor is built with | MIT |
+| [Vite](https://vite.dev/) | Development server and build (development only) | MIT |
+| [TypeScript](https://www.typescriptlang.org/) | Type checking and compilation (development only) | Apache-2.0 |
+
 ## Get Started Now
 
 ```javascript
