@@ -949,7 +949,7 @@ passed++;
  * seconds, when given: else from 0 to `seconds`). `sounding`: [time, n] pairs, how many notes sound at that time.
  */
 for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset', 'stop-replay', 'periodic-gaps', 'overlap', 'second-clock',
-  'quant-onsets', 'quant-stop', 'pdef-routine-order', 'pdef-stop-routines']) {
+  'quant-onsets', 'quant-stop', 'pdef-routine-order', 'pdef-stop-routines', 'quant-phase-values']) {
   const dir = new URL('./fixtures/supercollider/', import.meta.url);
   const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
   const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
@@ -1108,6 +1108,52 @@ for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset'
   eq(play(p + 'x = p.play(quant: [4, 2]);\nRoutine({ 1.wait; x.stop; }).play;', 12).events, []);
   const again = play(p + 'Pdef(\\a, p);\nRoutine({ 0.5.wait; Pdef(\\a).play(quant: 4); 1.wait; Pdef(\\a).stop; 1.wait; Pdef(\\a).play }).play;', 6);
   eq(again.events.map((e) => [e.time, e.note]), [[3, 60], [4, 62], [5, 60]]);
+}
+// Each value plays at its own event's onset, however the part's first and last loops fall (the fixture
+// quant-phase-values checks the first case). Expected by hand: a .play with quant [q, p] at beat b starts at
+// roundUp(b - p % q, q) + p; then the events follow their durs, the values their own Pseqs; amp (on \default)
+// is written as 1.2 * amp. `first` is SuperCollider's single play; past its end, the preview loops it.
+{
+  const pairs = (code, seconds, keys = ['note']) => play(code, seconds).events.map((e) => [e.time, ...keys.map((k) => Math.round(e[k] * 1e9) / 1e9)]);
+  // The finding: a part that starts at beat 0.5 within its loop and ends within a later loop (2.5 beats, so the
+  // preview loops every 2.5 seconds).
+  const repro = 'Pbind(\\midinote, Pseq([60, 61], 1), \\dur, 1).play(quant: [2, 0.5]);';
+  eq(pairs(repro, 2.5), [[0.5, 60], [1.5, 61]], 'quant [2, 0.5]: first pass');
+  eq(pairs(repro, 5), [[0.5, 60], [1.5, 61], [3, 60], [4, 61]], 'quant [2, 0.5]: the preview loop');
+  eq(pairs(repro.replace('\\midinote, Pseq([60, 61], 1)', '\\note, Pseq([0, 1], 1)'), 5), [[0.5, 60], [1.5, 61], [3, 60], [4, 61]], '\\note');
+  // A second control over another period: amp 0.1, 0.2, 0.3 round and round while the notes play twice.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61], 2), \\amp, Pseq([0.1, 0.2, 0.3], inf), \\dur, 1).play(quant: [2, 0.5]);', 5.5, ['note', 'amp']),
+    [[0.5, 60, 0.12], [1.5, 61, 0.24], [2.5, 60, 0.36], [3.5, 61, 0.12], [5, 60, 0.12]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61], inf), \\amp, Pseq([0.1, 0.2, 0.3], inf), \\dur, 1).play(quant: [2, 0.5]);', 7, ['note', 'amp']),
+    [[0.5, 60, 0.12], [1.5, 61, 0.24], [2.5, 60, 0.36], [3.5, 61, 0.12], [4.5, 60, 0.24], [5.5, 61, 0.36], [6.5, 60, 0.12]]);
+  // A phase that is no multiple of the step (half a beat): the loop starts at beat 1, the part at 1.25.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62], 1), \\dur, 0.5).play(quant: [4, 1.25]);', 5.5),
+    [[1.25, 60], [1.75, 61], [2.25, 62], [4, 60], [4.5, 61], [5, 62]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62], inf), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.5).play(quant: [4, 1.25]);', 4.5, ['note', 'amp']),
+    [[1.25, 60, 0.12], [1.75, 61, 0.24], [2.25, 62, 0.12], [2.75, 60, 0.24], [3.25, 61, 0.12], [3.75, 62, 0.24], [4.25, 60, 0.12]]);
+  // Finite parts that end within a loop: five notes over a rhythm of 1.5 beats (they end at beat 5.25), and one
+  // stopped at beat 3.6.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62, 63, 64], 1), \\amp, Pseq([0.1, 0.2], inf), \\dur, Pseq([1, 0.5], inf)).play(quant: [4, 1.25]);\nPbind(\\midinote, 40, \\dur, 4).play;', 8, ['note', 'amp'])
+    .filter((e) => e[1] !== 40), [[1.25, 60, 0.12], [2.25, 61, 0.24], [2.75, 62, 0.12], [3.75, 63, 0.24], [4.25, 64, 0.12]]);
+  eq(pairs('x = Pbind(\\midinote, Pseq([60, 61, 62], inf), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.5).play(quant: [4, 1.25]);\nRoutine({ 3.6.wait; x.stop }).play;', 5.5, ['note', 'amp']),
+    [[1.25, 60, 0.12], [1.75, 61, 0.24], [2.25, 62, 0.12], [2.75, 60, 0.24], [3.25, 61, 0.12], [4.85, 60, 0.12], [5.35, 61, 0.24]]);
+  // Launched by routines: at beat 1 with quant [2, 0.5] it starts at 2.5; at beat 0.75 (two routines) with
+  // quant [1, 0.5], at 1.5.
+  eq(pairs('Routine({ 1.wait; Pbind(\\midinote, Pseq([60, 61], 1), \\dur, 1).play(quant: [2, 0.5]) }).play;', 4.5), [[2.5, 60], [3.5, 61]]);
+  eq(pairs('Routine({ 0.5.wait; Routine({ 0.25.wait; Pbind(\\midinote, Pseq([60, 61, 62], 1), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.75).play(quant: [1, 0.5]) }).play }).play;', 3.75, ['note', 'amp']),
+    [[1.5, 60, 0.12], [2.25, 61, 0.24], [3, 62, 0.12]]);
+  // A value that grows each loop counts from the part's first event, not from the start of the piece.
+  eq(pairs('Routine({ 4.wait; Pbind(\\midinote, Pseries(60, 1, inf), \\dur, 1).play }).play;', 8), [[4, 60], [5, 61], [6, 62], [7, 63]]);
+  eq(pairs('Pbind(\\midinote, Pseries(60, 1, inf), \\dur, 0.5).play(quant: [4, 1.25]);', 3), [[1.25, 60], [1.75, 61], [2.25, 62], [2.75, 63]]);
+  // A part that begins with a rest: nothing plays where the loop would have a step before its first note.
+  eq(pairs('Pbind(\\midinote, Pseq([\\rest, 60, 61], 1), \\amp, Pseq([0.4, 0.2], inf), \\dur, 1).play(quant: [2, 0.5]);', 3.5, ['note', 'amp']),
+    [[1.5, 60, 0.24], [2.5, 61, 0.48]]);
+  // Times that are no binary fraction of a cycle (a cycle of 2.75 beats, steps of thirds): no onset is lost or
+  // doubled by rounding, at the bounds or where a value changes.
+  eq(pairs('Routine({ 3.wait; Pbind(\\midinote, Pseq([65, 60, 68], 1), \\dur, Pseq([1, 0.75], inf)).play(quant: [2, 0.5]) }).play;', 7.25), [[4.5, 65], [5.5, 60], [6.25, 68]]);
+  eq(pairs('Pbind(\\midinote, Pseq([67, 70, 61, 64, 60], 2), \\amp, Pseq([0.1, 0.3], inf), \\dur, 0.5).play(quant: [1, 2.5]);', 7.5, ['note', 'amp']),
+    [[2.5, 67, 0.12], [3, 70, 0.36], [3.5, 61, 0.12], [4, 64, 0.36], [4.5, 60, 0.12], [5, 67, 0.36], [5.5, 70, 0.12], [6, 61, 0.36], [6.5, 64, 0.12], [7, 60, 0.36]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 62, 64], 1), \\dur, 1/3).play(quant: [1, 2.5]);', 3.5), [[2.5, 60], [2.833333333, 62], [3.166666667, 64]]);
 }
 // Pdef plays are taken in the order of their times, whichever routine (and however far in the file) calls them: a
 // later routine that starts the Pdef before an earlier routine plays it again leaves one voice at every onset (the

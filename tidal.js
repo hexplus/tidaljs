@@ -3357,12 +3357,17 @@
                 k += 2;
             } else if (isPunct(toks[k], '(')) {
                 let depth = 0;
+                let defaults = false;
                 for (; k < toks.length; k++) {
                     const t = toks[k];
                     if (t.type === 'punct' && OPENERS.has(t.value)) depth++;
                     else if (t.type === 'punct' && CLOSERS.has(t.value)) { if (--depth === 0) { k++; break; } }
                     else if (t.type === 'name' && !t.prop) params.add(t.value);
+                    // A default value (x = ..., or in a destructuring pattern) runs when the function is
+                    // called: whether it writes is not read here, so the function is not counted as pure.
+                    if (isPunct(t, '=')) defaults = true;
                 }
+                if (defaults) continue;
                 if (isPunct(toks[k], '=>')) k++;
             } else {
                 continue;
@@ -5942,12 +5947,13 @@
             this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
+            this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
+            this._speculative = [];            // tempo changes events asked for ahead (see _settleTempo)
             this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
             this._bankSeq = 0;                 // numbers samples() registrations in the order they were made
             this._bankSeqs = new Map();        // bank -> the number of the registration that set it
-            this._pendingRegistrations = 0;    // committed samples() registrations still waiting for their manifest
             this._txnBanksPending = false;
         }
 
@@ -6326,6 +6332,39 @@
             return this._anchorTime + (cycle - this._anchorCycle) / this.cps;
         }
 
+        /**
+         * Tempo changes from events (a cps control) are made when the event is
+         * asked for, ahead of time. One whose onset has been sent has taken
+         * effect. One still ahead belongs to its stream's pattern: if that
+         * stream was removed or replaced meanwhile, the change (and those made
+         * after it) is undone, the others are made again, and events not yet
+         * sent get their times from the clock as it is then.
+         */
+        _settleTempo() {
+            this._speculative = this._speculative.filter((s) => s.cycle >= this._dispatchCycle);
+            const stale = this._speculative.findIndex((s) => this.channels.get(s.owner.id) !== s.owner.pattern);
+            if (stale < 0) return;
+            const undo = this._speculative[stale];
+            const redo = this._speculative.slice(stale + 1).filter((s) => this.channels.get(s.owner.id) === s.owner.pattern);
+            this._speculative.length = stale;
+            this._anchorTime = undo.anchor.time;
+            this._anchorCycle = undo.anchor.cycle;
+            this.cps = undo.anchor.cps;
+            this._tempoHistory = undo.history;
+            for (const s of redo) this._retempo(s.cycle, s.cps, s.owner);
+        }
+
+        /** Undoes every tempo change still ahead (a deliberate setCPS has the last word over them). */
+        _dropSpeculativeTempo() {
+            const first = this._speculative[0];
+            this._speculative = [];
+            if (!first) return;
+            this._anchorTime = first.anchor.time;
+            this._anchorCycle = first.anchor.cycle;
+            this.cps = first.anchor.cps;
+            this._tempoHistory = first.history;
+        }
+
         /** The tempo in force at a cycle (see cycleAt). */
         _cpsAt(cycle) {
             if (cycle < this._anchorCycle && this._tempoHistory.length) return this._tempoSegment((s) => s.cycle <= cycle).cps;
@@ -6344,7 +6383,15 @@
          * Changes the tempo from `cycle` on: the old mapping stays valid up to
          * that frontier, the new one starts there at the same time.
          */
-        _retempo(cycle, cps) {
+        _retempo(cycle, cps, owner = null) {
+            // A change asked for ahead by a stream's event is speculative until it has taken effect
+            // (see _settleTempo): what it replaces is kept to go back to.
+            if (owner) {
+                this._speculative.push({
+                    cycle, cps, owner, history: this._tempoHistory.slice(),
+                    anchor: { time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps },
+                });
+            }
             const time = this.timeAt(cycle);
             this._tempoHistory.push({ time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps });
             if (this._tempoHistory.length > 32) this._tempoHistory.shift();
@@ -6786,8 +6833,12 @@
             }
             // Re-anchor at the scheduling frontier so already scheduled
             // events keep their times and new ones follow the new tempo.
-            // (from what was already sent: events asked for ahead get their times when they go out)
-            if (this.isPlaying) this._retempo(Math.max(this._dispatchCycle, this._anchorCycle), next);
+            // (from what was already sent: events asked for ahead get their times when they go out; tempo
+            // changes events asked for ahead are overridden)
+            if (this.isPlaying) {
+                this._dropSpeculativeTempo();
+                this._retempo(Math.max(this._dispatchCycle, this._anchorCycle), next);
+            }
             else this.cps = next;
             return this.cps;
         }
@@ -6857,6 +6908,7 @@
             this._dispatchCycle = cycle;
             this._tempoHistory = [];
             this._queried.clear();
+            this._speculative = []; // (what was already sent, _sentHorizon, is a time: it stays)
             this._nudged = [];
         }
 
@@ -6874,6 +6926,8 @@
             this._nextCycle = 0;
             this._dispatchCycle = 0;
             this._queried.clear();
+            this._sentHorizon = -Infinity;
+            this._speculative = [];
             this._tempoHistory = [];
             this._nudged = [];
             this.isPlaying = true;
@@ -6886,6 +6940,8 @@
             this._stopTimer();
             this._nudged = []; // events held back for a later tick never play
             this._queried.clear();
+            this._sentHorizon = -Infinity;
+            this._speculative = [];
             const session = this._session;
             this._session = null;
             this._teardownSession(session);
@@ -7039,20 +7095,27 @@
             const ctx = this.audioContext;
             if (!this.isPlaying || !ctx) return;
             const now = ctx.currentTime;
+            // Tempo changes asked for ahead by streams that were removed or replaced since do not happen.
+            this._settleTempo();
             // Events are asked for NUDGE_EARLY seconds before the horizon at which they are sent, so
             // one that a negative nudge moves earlier (up to NUDGE_EARLY) is known in time to play.
             const to = this.cycleAt(now + this.lookahead + NUDGE_EARLY);
 
             // Every audible stream's events since that stream was last asked. A stream that is new or
-            // whose pattern changed is asked from what was already sent (what was only held back of
-            // the old pattern is dropped), so a live update leaves no gap and no repeats. Simultaneous
-            // events keep a fixed order: the streams' order, then the order each stream gives them.
+            // whose pattern changed takes over at the audible boundary, what was already sent: it is asked
+            // from far enough back to cover what the old pattern only held back (a later nudge), and of
+            // its events only those sounding at or after that boundary go out. So a live update repeats
+            // nothing that was sent (an onset moved earlier by a negative nudge) and drops nothing that
+            // was not (one moved later). Simultaneous events keep a fixed order: the streams' order,
+            // then the order each stream gives them.
             const items = [];
             let order = 0;
             for (const [id, pattern] of [...this.channels]) {
                 const stream = order++;
                 const asked = this._queried.get(id);
-                let from = asked && asked.pattern === pattern ? asked.to : this._dispatchCycle;
+                const fresh = !asked || asked.pattern !== pattern;
+                let from = asked && !fresh ? asked.to : this._dispatchCycle;
+                if (fresh) for (const it of this._nudged) if (it.id === id && it.ev.begin < from) from = it.ev.begin;
                 // After a long stall (e.g. a suspended tab) skip ahead instead of firing a burst of late events.
                 if (this.timeAt(from) < now - 0.5) from = this.cycleAt(now);
                 // No new cycles to ask for (after a sharp slowdown the frontier can be far ahead): events
@@ -7069,7 +7132,8 @@
                 }
                 // Each event keeps its stream and the pattern it came from, so one held back can be dropped
                 // when that stream is muted, replaced or removed before it goes out.
-                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i, id, pattern });
+                const after = fresh ? this._sentHorizon : -Infinity;
+                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i, id, pattern, after });
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
             if (to > this._nextCycle) this._nextCycle = to;
@@ -7082,7 +7146,8 @@
             for (const it of items) {
                 if (!isNum(it.v.cps) || !(it.v.cps > 0)) continue;
                 const cps = clamp(it.v.cps, 0.05, 10);
-                if (Math.abs(cps - this.cps) > 1e-9) this._retempo(it.ev.begin, cps);
+                // Owned by the stream (and its pattern) that asked for it, until it has taken effect.
+                if (Math.abs(cps - this.cps) > 1e-9) this._retempo(it.ev.begin, cps, { id: it.id, pattern: it.pattern });
             }
 
             // Then in the order they sound (nudge included), so the last word on
@@ -7122,10 +7187,13 @@
                 it.duration = (it.ev.end - it.ev.begin) / this._cpsAt(it.ev.begin);
             }
             all.sort((a, b) => a.time - b.time || a.seq - b.seq);
-            this._nudged = all.filter((it) => it.time >= horizon);
+            // A replacement's events before the boundary it took over at were the old pattern's to play.
+            const live = all.filter((it) => !(it.time < it.after));
+            this._nudged = live.filter((it) => it.time >= horizon);
             const sent = this.cycleAt(horizon);
             if (sent > this._dispatchCycle) this._dispatchCycle = sent;
-            for (const it of all) {
+            if (horizon > this._sentHorizon) this._sentHorizon = horizon;
+            for (const it of live) {
                 if (it.time >= horizon) break;
                 if (it.time < now - 0.02) continue;
                 try {
@@ -7175,6 +7243,7 @@
                 return { success: false, error: 'Code must be a string', activePatterns: this.channels.size, warnings: [] };
             }
             const warnings = new Set();
+            const unresolved = new Set(); // sounds that only a manifest this code asks for (not arrived yet) may hold
             const collected = []; // [statement index, value]
             const statements = splitStatementRanges(code);
             let current = -1;     // statement being run or checked
@@ -7260,10 +7329,12 @@
                         if (bank) {
                             const pitched = this._pitchedFile(v.s, isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60);
                             if (this.audioContext) this._sampleBuffer(pitched ? pitched.url : this._sampleUrl(bank, v), false);
-                        } else if (!this.samples.has(v.s) && !this._txnBanks.has(v.s) && !this._txnBanksPending && this._pendingRegistrations === 0) {
-                            // Unknown, unless a bank this code adds, or a manifest it (or code that plays) still waits
-                            // for, may hold it. A fetch left by code that was rejected does not count.
-                            warnings.add(`Unknown sound "${v.s}"`);
+                        } else if (!this.samples.has(v.s) && !this._txnBanks.has(v.s)) {
+                            // Unknown, unless a bank this code adds may hold it: a manifest this code asks for that has
+                            // not arrived yet (one that failed, or a fetch other code left, does not count). Then the
+                            // name waits: a live update is held back until it is known (see below).
+                            if (this._txnBanksPending) unresolved.add(v.s);
+                            else warnings.add(`Unknown sound "${v.s}"`);
                         }
                     }
                 }
@@ -7277,8 +7348,13 @@
                     named.add(name);
                 }
 
-                if (options.keepOnWarnings && warnings.size > 0) {
-                    return { success: false, pending: true, activePatterns: this.channels.size, warnings: [...warnings] };
+                // A live update holds back on warnings, and on sounds a bank it asks for may still bring: the
+                // playing streams stay until the manifest arrives and the code is checked again.
+                if (options.keepOnWarnings && (warnings.size > 0 || unresolved.size > 0)) {
+                    return {
+                        success: false, pending: true, activePatterns: this.channels.size, warnings: [...warnings],
+                        waitingForSamples: unresolved.size > 0 && warnings.size === 0 ? [...unresolved] : undefined,
+                    };
                 }
 
                 // Each pattern plays in a stream: d1 to d16 or p("name") name
@@ -8329,21 +8405,16 @@
             // editor (sampleFailures); a promise nobody awaits is not an unhandled rejection.
             const register = () => {
                 const seq = ++this._bankSeq;
-                if (entry.plan) {
-                    const done = Promise.resolve(this._registerBanks(entry.plan, seq));
-                    return done;
-                }
-                // A committed registration still waiting for its manifest: its banks may be any name.
-                this._pendingRegistrations++;
+                if (entry.plan) return Promise.resolve(this._registerBanks(entry.plan, seq));
                 const job = entry.promise.then((plan) => this._registerBanks(plan, seq));
-                job.catch(() => { /* reported where the manifest failed */ }).finally(() => { this._pendingRegistrations--; });
+                job.catch(() => { /* reported where the manifest failed */ });
                 return job;
             };
             if (this._txn) {
                 // For the warnings of this evaluation: names it adds count as known, and a manifest it
                 // asks for that has not arrived means any name may come (see eval).
                 if (entry.plan) for (const bank of entry.plan) this._txnBanks.add(bank.name);
-                else this._txnBanksPending = true;
+                else if (!entry.failed) this._txnBanksPending = true; // a manifest that failed brings nothing
                 let settle;
                 const result = new Promise((resolve) => { settle = resolve; });
                 result.catch(() => { /* as above */ });
@@ -8374,7 +8445,7 @@
                     const finalUrl = typeof response.url === 'string' && response.url ? response.url : url;
                     return planBanks(map, resolveUrl(base || (typeof map._base === 'string' ? map._base : ''), finalUrl));
                 })();
-                entry.promise.then((plan) => { entry.plan = plan; }, () => {});
+                entry.promise.then((plan) => { entry.plan = plan; }, () => { entry.failed = true; });
             } else if (!source || typeof source !== 'object') {
                 entry.promise = Promise.reject(new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }'));
             } else {

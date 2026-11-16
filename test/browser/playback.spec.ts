@@ -83,6 +83,38 @@ test("a tempo set by an event survives a live edit of another stream; the docume
   await expect.poll(cps).toBe(2); // the cps(2) event at cycle 0 runs again
 });
 
+for (const withName of [true, false]) {
+  test(`a live edit waiting for its bank keeps the working stream, then ${withName ? "commits when the sound arrives" : "stays held back when it does not"}`, async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("https://banks.test/**", async (route) => {
+      if (route.request().url().endsWith(".json")) {
+        await held;
+        await route.fulfill({ contentType: "application/json", body: JSON.stringify(withName ? { zork: ["z.wav"] } : { other: ["o.wav"] }) });
+      } else {
+        await route.fulfill({ status: 404, body: "" });
+      }
+    });
+    await page.goto("/");
+    const d1Sound = () => page.evaluate(() => {
+      const t = (window as unknown as { tidal: { channels: Map<string, { query(b: number, e: number): { value: { s: string } }[] }> } }).tidal;
+      return t.channels.get("d1")?.query(0, 1)[0]?.value.s;
+    });
+    await setCode(page, 'd1(sound("bd*2"))');
+    await playAndWait(page);
+    await setCode(page, 'samples("https://banks.test/kit/strudel.json")\nd1(sound("zork*2"))');
+    await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Waiting for samples (zork)");
+    expect(await d1Sound()).toBe("bd"); // the working stream stays
+    release();
+    if (withName) {
+      await expect.poll(d1Sound, { timeout: 5000 }).toBe("zork");
+    } else {
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain('Unknown sound "zork"');
+      expect(await d1Sound()).toBe("bd");
+    }
+  });
+}
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');

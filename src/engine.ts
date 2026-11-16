@@ -24,6 +24,8 @@ export interface EvalResult {
   success: boolean;
   /** Live update only: the new code has warnings, the old patterns keep playing. */
   pending?: boolean;
+  /** Live update only: held back until a manifest this code asks for arrives; it may bring these sounds. */
+  waitingForSamples?: string[];
   activePatterns: number;
   error?: string;
   /** Where the error happened, as offsets in the code. */

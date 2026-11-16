@@ -548,5 +548,117 @@ const reset = () => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 5
+{
+    // 1. Both sides of one edit boundary: onsets moved earlier (already sent) are not sent again by the
+    // replacement; onsets moved later (still held back) are sent, by the replacement.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*4").nudge("-0.15 0.15"))');
+    const before = run(0, 600);
+    // At the edit, one onset moved earlier has gone out ahead of its cycle, and one moved later is still held.
+    ok(t._nudged.some((it) => it.v.s === 'a' && it.nudge > 0), 'a later onset is held back at the edit');
+    t.eval('d1(sound("b*4").nudge("-0.15 0.15"))');
+    const after = run(625, 2000);
+    const hits = before.concat(after);
+    // Every position of the grid exactly once, each at its own nudge, in time order, a then b.
+    // "-0.15 0.15": the first half of each cycle 0.15 s early, the second half 0.15 s late. The hit at cycle 0
+    // would be before the start (-0.1 s) and is skipped, as always.
+    const expected = [];
+    for (let k = 1; k <= 8; k++) {
+        const c = k * 0.25;
+        expected.push(+(0.05 + c + (c % 1 < 0.5 ? -0.15 : 0.15)).toFixed(6));
+    }
+    expected.sort((x, y) => x - y);
+    const times = hits.map((e) => e.time).filter((x) => x <= 1.95 + 1e-9);
+    eq(times, expected.filter((x) => x <= 1.95 + 1e-9), 'the complete sequence');
+    eq(new Set(times).size, times.length, 'nothing sent twice');
+    const letters = hits.map((e) => e.s).join('');
+    ok(/^a+b+$/.test(letters), 'a, then b: ' + letters);
+    t.stopAll();
+}
+{
+    // 2. A 2-cps event removed before its 0.250 s onset does not change the tempo.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2))'); // x at cycle 0.2: 0.25 s
+    run(0, 50);
+    eq(t.cps, 2, 'asked for ahead: the change is made (speculatively)');
+    t.eval('d1(sound("a*8"))'); // d2 removed before 0.25 s
+    const played = run(75, 1100).filter((e) => e.s === 'a');
+    eq(t.cps, 1, 'undone');
+    for (let i = 1; i < played.length; i++) eq(+(played[i].time - played[i - 1].time).toFixed(6), 0.125, 'every hit at 1 cps');
+    // A change that has taken effect stays.
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("x ~ ~ ~ ~").cps(2))'); // at cycle 0: sent at once
+    run(0, 100);
+    t.eval('d1(sound("a*8"))');
+    run(125, 300);
+    eq(t.cps, 2, 'a change already in effect is kept');
+    t.stopAll();
+}
+{
+    // 3. Live validation while manifests resolve.
+    reset();
+    const answers = {};
+    globalThis.fetch = (url) => (url.endsWith('.json')
+        ? new Promise((resolve) => {
+            answers[url] = (banks, status = 200) => resolve(status === 200
+                ? { ok: true, url, json: async () => banks } : { ok: false, status });
+        })
+        : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    // A fetch other committed code left (still on its way) does not hide a typo in code that does not ask for it.
+    t.eval('samples("https://other.test/a/strudel.json")\nd1(sound("bd*2"))');
+    const working = t.channels.get('d1');
+    let r = t.eval('d1(sound("bdd*2"))', live);
+    eq([r.pending, r.warnings], [true, ['Unknown sound "bdd"']]);
+    // A cached 404 does not either.
+    const failing = samples('https://broken.test/b/strudel.json');
+    answers['https://broken.test/b/strudel.json'](null, 404);
+    await assert.rejects(failing); passed++;
+    r = t.eval('samples("https://broken.test/b/strudel.json")\nd1(sound("bdd*2"))', live);
+    eq([r.pending, r.warnings], [true, ['Unknown sound "bdd"']]);
+    eq(t.channels.get('d1'), working);
+    // A bank the code itself asks for, not arrived: the edit waits, the working stream stays.
+    r = t.eval('samples("https://kit.test/c/strudel.json")\nd1(sound("zork*2"))', live);
+    eq([r.pending, r.warnings, r.waitingForSamples], [true, [], ['zork']]);
+    eq(t.channels.get('d1'), working, 'the working stream stays while the bank is unresolved');
+    // It arrives with the name: checked again, the edit commits.
+    answers['https://kit.test/c/strudel.json']({ zork: ['k.wav'] });
+    await new Promise((r) => realSetTimeout(r, 10)); // that manifest has arrived (another is still on its way)
+    r = t.eval('samples("https://kit.test/c/strudel.json")\nd1(sound("zork*2"))', live);
+    eq([r.success, r.warnings], [true, []]);
+    await Promise.resolve();
+    ok(t.sampleBanks.has('zork'));
+    // It arrives without the name: the edit stays held back, with the warning.
+    r = t.eval('samples("https://kit.test/d/strudel.json")\nd1(sound("blip*2"))', live);
+    eq(r.waitingForSamples, ['blip']);
+    const playingNow = t.channels.get('d1');
+    answers['https://kit.test/d/strudel.json']({ hat: ['h.wav'] });
+    await new Promise((r) => realSetTimeout(r, 10));
+    r = t.eval('samples("https://kit.test/d/strudel.json")\nd1(sound("blip*2"))', live);
+    eq([r.pending, r.warnings], [true, ['Unknown sound "blip"']]);
+    eq(t.channels.get('d1'), playingNow);
+    answers['https://other.test/a/strudel.json']({});
+    await t.whenSamplesLoaded();
+    t.retrySamples();
+    t.stopAll();
+}
+{
+    // 4. A default parameter is code that runs: an unused call whose default writes changes the stream.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    t.eval('const config = { level: 0.2 }\nconst bump = (v = (config.level = 0.9)) => v\nconst unused = bump()\nd1(sound("bd").gain(config.level))');
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.9);
+    t.eval('const config = { level: 0.2 }\nconst bump = (v = (config.level = 0.6)) => v\nconst unused = bump()\nd1(sound("bd").gain(config.level))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.6);
+    // A destructuring default in the parameters, the same.
+    t.eval('const config = { level: 0.2 }\nconst set = ({ v = (config.level = 0.8) } = {}) => v\nconst unused = set()\nd1(sound("bd").gain(config.level))');
+    t.eval('const config = { level: 0.2 }\nconst set = ({ v = (config.level = 0.4) } = {}) => v\nconst unused = set()\nd1(sound("bd").gain(config.level))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.4);
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

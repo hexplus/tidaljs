@@ -259,6 +259,8 @@ export function createSession() {
 
   /** True while the last run's "Loading samples" message is shown. */
   let waitingForSamples = false;
+  /** A live update held back until a manifest it asks for arrives: its text, checked again then. */
+  let recheckAfterSamples: string | null = null;
 
   /**
    * Sample loads finished (or failed, or were retried). Nothing runs again:
@@ -270,7 +272,16 @@ export function createSession() {
    */
   function samplesSettled(engine: Tidal) {
     setSampleBanks(new Map([...engine.sampleBanks].map(([name, files]) => [name, files.length])));
-    if (engine.isLoadingSamples() || statusSeq !== runStatus) return;
+    if (engine.isLoadingSamples()) return;
+    // A live update that waited for its samples is checked again now: it commits if the sounds came,
+    // and stays held back (with the warning) if they did not. The playing streams stayed meanwhile.
+    const recheck = recheckAfterSamples;
+    recheckAfterSamples = null;
+    if (recheck !== null && editor.getValue() === recheck && engine.isPlaying && !isExternal(provenance())) {
+      runCode(engine, true, recheck);
+      return;
+    }
+    if (statusSeq !== runStatus) return;
     const failures = engine.sampleFailures().filter((f) => !reportedFailures.has(f.source));
     if (failures.length) {
       for (const f of failures) reportedFailures.add(f.source);
@@ -343,6 +354,11 @@ export function createSession() {
     if (editor.getValue() === text) editor.showProblems(result, text);
     const where = result.location ? " (line " + result.location.line + ")" : "";
 
+    if (result.pending && result.waitingForSamples) {
+      recheckAfterSamples = text;
+      report("playing warn", "Waiting for samples (" + result.waitingForSamples.join(", ") + "); the previous patterns keep playing.");
+      return;
+    }
     if (result.pending) {
       report("playing warn", "Waiting for valid code; the previous patterns keep playing.", result.warnings);
       return;

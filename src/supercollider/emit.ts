@@ -304,21 +304,55 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     // Controls over several loops of the rhythm start there too: the shift is modulo all of them (w.span).
     const loopSpan = w.span ?? w.period;
     const late = w.rhythm ? w.start : mod(w.start, loopSpan);
-    if (late > 1e-9 && (w.rhythm || loopSpan - late > 1e-9)) body += "\n  .late(" + cycles(late) + ")";
+    const shifted = late > 1e-9 && (w.rhythm || loopSpan - late > 1e-9);
+    if (shifted) body += "\n  .late(" + cycles(late) + ")";
+    // Values that grow each loop count from the part's first loop: the loop of the written code it falls in.
+    body = firstLoop(body, w.rhythm ? 0 : Math.round((w.start - (shifted ? late : 0)) / w.period));
     // When it plays: from its start (its first event or rest), until it stops.
-    const from = part.drone ? 0 : Math.max(0, part.start);
-    if (part.end !== null) {
+    const start = part.drone ? 0 : Math.max(0, part.start);
+    // The written loop repeats its steps before the part's first loop and after its last one, so where the part
+    // begins or ends with rests (or with another SynthDef's events) the loop may have onsets there: then it plays
+    // from its first event, and until the loop's next onset after its last one.
+    let from = start;
+    let until = part.end;
+    let offsets: number[] = [];
+    if (!part.drone && !w.rhythm) {
+      const sounding = part.events;
+      const first = sounding[0].t, last = sounding[sounding.length - 1].t;
+      offsets = sounding.filter((e) => e.t >= w.start - 1e-9 && e.t < w.start + w.period - 1e-9).map((e) => e.t - w.start);
+      // The loop's first onset at or after t.
+      const onsetFrom = (t: number) => Math.min(...offsets.map((o) => w.start + o + w.period * Math.ceil((t - w.start - o) / w.period - 1e-9)));
+      if (first > from + 1e-9 && onsetFrom(from) < first - 1e-9) from = first;
+      if (until !== null && onsetFrom(last + 1e-6) < until - 1e-9) until = onsetFrom(last + 1e-6);
+    }
+    // TidalJS compares where each event starts with these bounds exactly. An event's start is the sum of the
+    // part's shift and its place in the loop: when those are not binary fractions (of a cycle, of the loop), the
+    // sum may round to just below a bound that falls on an onset, and the event there would be left out (or the
+    // one at the end let in). Then that bound is written a little early, below any rounding and far from the
+    // onsets before it.
+    const shared = [shifted ? late : 0, w.period, loopSpan].every((x) => isBinary(x / beatsPerCycle));
+    const exactAt = (beats: number) => {
+      const at = offsets.find((o) => { const d = mod(beats - w.start - o, w.period); return d < 1e-9 || w.period - d < 1e-9; });
+      return at === undefined || (shared && isBinary(beats / beatsPerCycle) && isBinary(at / w.period));
+    };
+    const edge = (beats: number) => {
+      if (exactAt(beats)) return cycles(beats);
+      note("Where a part starts or stops at a time that is not a binary fraction of a cycle (or of its loop), the time is written " + EDGE
+        + " cycle early: TidalJS compares event times exactly, and rounding could otherwise leave out the event there or let in the next one.");
+      return Math.abs(beats) < 1e-9 ? "-" + EDGE : cycles(beats) + " - " + EDGE;
+    };
+    if (part.end !== null && until !== null) {
       const whole = loopLength !== null && Math.abs(loopLength / w.period - Math.round(loopLength / w.period)) < 1e-6;
-      if (loopLength === null || from > 1e-9 || part.end < loopLength - 1e-9 || !whole) {
-        body += "\n  .playFor(" + cycles(from) + ", " + cycles(part.end) + ")";
+      if (loopLength === null || from > 1e-9 || until < loopLength - 1e-9 || !whole) {
+        body += "\n  .playFor(" + edge(from) + ", " + edge(until) + ")";
         if (loopLength !== null) loopNeeded = true;
       }
       comment.push(loopLength === null
-        ? "It plays once, from beat " + fmt(from) + " to beat " + fmt(part.end) + ", as in SuperCollider."
-        : "It plays from beat " + fmt(from) + " to beat " + fmt(part.end) + " of the piece.");
+        ? "It plays once, from beat " + fmt(start) + " to beat " + fmt(part.end) + ", as in SuperCollider."
+        : "It plays from beat " + fmt(start) + " to beat " + fmt(part.end) + " of the piece.");
     } else if (from > 1e-9) {
-      body += "\n  .stopFor(0, " + cycles(from) + ")";
-      comment.push("It starts at beat " + fmt(from) + ", as in SuperCollider.");
+      body += "\n  .stopFor(" + edge(0) + ", " + edge(from) + ")";
+      comment.push("It starts at beat " + fmt(start) + ", as in SuperCollider.");
     }
     blocks.push(comment.map(commentLine).join("\n") + "\n" + (valid.length > 1 ? "const " + name + " = " : "") + body);
   }
@@ -784,6 +818,18 @@ function isRest(ev: SCEvent): boolean {
 
 // ---------------------------------------------------------------- one part
 
+/**
+ * Stands, in a written body, for the loop (of the part's own time, one cycle a loop) where the part's first loop
+ * falls once the part is placed (shifted by its start): values that grow each loop count from there. One
+ * private-use character, replaced (firstLoop) before the code is shown.
+ */
+const FIRST_LOOP = "\uE000";
+
+/** The body with FIRST_LOOP replaced: `t - q` counts the loops from loop q of the written code. */
+function firstLoop(body: string, q: number): string {
+  return body.split(FIRST_LOOP).join(q === 0 ? "" : q > 0 ? " - " + fmt(q) : " + " + fmt(-q));
+}
+
 interface WrittenPart {
   label: string;
   comment: string[];
@@ -1061,12 +1107,13 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
       const byLoop = Array.from({ length: loops }, (_, k) => cellsOf(key, k));
       const grows = growth(byLoop, key === "note");
       if (grows) {
-        const w = writeControl(key, byLoop[0], weights, 1, () => tokenIndex++, { period, tempo });
+        const w = writeControl(key, byLoop[0], weights, [byLoop[0].length], () => tokenIndex++, { period, tempo });
         if (w !== null) lines.push("." + key + "(" + w + ")");
-        // In the loop's own time each loop is one cycle: floor(t) counts the loops.
+        // In the loop's own time each loop is one cycle: floor(t) counts the loops, from the part's first loop
+        // (FIRST_LOOP: where that loop falls in the written code, known once the part is placed).
         extra.push(grows.op === "add"
-          ? ".add(" + key + "(sig((t) => Math.floor(t)" + (grows.d === 1 ? "" : " * " + fmt(grows.d)) + ")))"
-          : ".mul(" + key + "(sig((t) => " + fmt(grows.d) + " ** Math.floor(t))))");
+          ? ".add(" + key + "(sig((t) => Math.floor(t" + FIRST_LOOP + ")" + (grows.d === 1 ? "" : " * " + fmt(grows.d)) + ")))"
+          : ".mul(" + key + "(sig((t) => " + fmt(grows.d) + " ** Math.floor(t" + FIRST_LOOP + "))))");
         continue;
       }
       // A list shuffled again each time (Pn(Pshuf(list))): it may span several loops of the rhythm.
@@ -1088,17 +1135,22 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
     }
     const mult = m ?? Math.max(1, Math.floor(FALLBACK / period));
     spans(mult);
+    // Each value from its own event's onset: every loop of the rhythm with its own steps and widths (the first
+    // and last loops of a part that starts or ends within a loop hold fewer events, and gaps where the others
+    // have them), so that each value starts where its event plays in the written code, not where a step of the
+    // first loop would put it.
     const cells: Cell[] = [];
-    const cellWeights: number[] = [];
+    const cellWidths: number[] = [];
+    const sizes: number[] = [];
     for (let k = 0; k < mult; k++) {
-      // The rhythm repeats, so each period has the same steps.
       const ks = k === 0 ? steps : stepsOf(evs, start + k * period, period);
-      ks.forEach((s, j) => {
+      for (const s of ks) {
         cells.push(s.event ? rows[index.get(s.event) as number].get(key) ?? GAP : GAP);
-        cellWeights.push(weights[j] ?? 1);
-      });
+        cellWidths.push(s.width);
+      }
+      sizes.push(ks.length);
     }
-    const written = writeControl(key, cells, cellWeights, mult, () => tokenIndex++, { period, tempo });
+    const written = writeControl(key, cells, toWeights(cellWidths, note), sizes, () => tokenIndex++, { period, tempo });
     if (written !== null) lines.push("." + key + "(" + written + ")");
   }
   lines.push(...extra);
@@ -1159,13 +1211,14 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
   }
   if (osc) lines.push(".osc(" + str(part.instrument.slice(5)) + ")");
 
-  // Group the controls: up to four per line.
+  // Group the controls: up to four per line (FIRST_LOOP not counted).
   const body = [lines[0]];
   let cur = "";
+  const size = (s: string) => s.length - (s.split(FIRST_LOOP).length - 1);
   for (const l of lines.slice(1)) {
-    if (l.length > 60 || cur.length + l.length > 70) {
+    if (size(l) > 60 || size(cur) + size(l) > 70) {
       if (cur) body.push(cur);
-      if (l.length > 60) { body.push(l); cur = ""; continue; }
+      if (size(l) > 60) { body.push(l); cur = ""; continue; }
       cur = l;
     } else cur += l;
   }
@@ -1525,7 +1578,13 @@ function isWholeRatio(a: number, b: number) {
 
 // ---------------------------------------------------------------- writing values
 
-function writeControl(key: string, cells: Cell[], weights: number[], mult: number, nextToken: () => number, wctx: WriteCtx): string | null {
+/**
+ * A control's values, one cell per step (GAP where no event starts), each step as wide as its own loop has it.
+ * `loops` gives how many of the cells each loop of the rhythm holds (the first and last loops of a part may
+ * differ from the others): one loop is one sequence; several are one sequence slowed down over them when that is
+ * exact, else cat() of one sequence per loop, so that every value starts at its own event's onset.
+ */
+function writeControl(key: string, cells: Cell[], weights: number[], loops: number[], nextToken: () => number, wctx: WriteCtx): string | null {
   const real = cells.filter((c) => c !== GAP);
   if (real.length === 0) return null;
   if (real.every((c) => c === null)) return null;
@@ -1543,34 +1602,58 @@ function writeControl(key: string, cells: Cell[], weights: number[], mult: numbe
     if (c === GAP) filled.push(last);
     else { filled.push(c); last = c; }
   }
-  if (!hasToken) {
+  // The steps from `from` to `to` as a sequence (runs of one value merged when `merge`).
+  const run = (texts: (i: number) => string, merge: boolean, from: number, to: number) => {
     const items: string[] = [];
     const ws: number[] = [];
-    filled.forEach((c, i) => {
-      const text = miniValue(c, isNote);
-      if (items.length && items[items.length - 1] === text) ws[ws.length - 1] += weights[i];
+    for (let i = from; i < to; i++) {
+      const text = texts(i);
+      if (merge && items.length && items[items.length - 1] === text) ws[ws.length - 1] += weights[i];
       else { items.push(text); ws.push(weights[i]); }
-    });
+    }
     const g = ws.map((w) => Math.round(w * 1000)).reduce((a, b) => gcd(a, b));
-    const ints = ws.map((w) => Math.round((w * 1000) / (g || 1)));
-    const body = seq(items, ints);
-    return str(mult > 1 ? "[" + body + "]/" + mult : body);
-  }
+    return { items, ws, body: seq(items, ws.map((w) => Math.round((w * 1000) / (g || 1)))) };
+  };
+  // Several loops: one sequence slowed down over them ("[...]/n") when every value then starts exactly on its
+  // onset (n a power of two, every change a binary fraction of a loop: no rounding); otherwise cat() of one
+  // sequence per loop, each exactly one cycle, laid out like the rhythm's own loop.
+  const sequence = (texts: (i: number) => string, merge: boolean) => {
+    const n = loops.length;
+    if (n === 1) return str(run(texts, merge, 0, cells.length).body);
+    const whole = run(texts, merge, 0, cells.length);
+    const total = whole.ws.reduce((a, b) => a + b, 0);
+    let at = 0;
+    const even = loops.every((size) => { const w = weights.slice(at, at + size).reduce((a, b) => a + b, 0); at += size; return Math.abs(w * n - total) < 1e-9; });
+    let cum = 0;
+    const exact = even && isBinary(1 / n) && whole.ws.every((w) => isBinary(((cum += w) * n) / total));
+    if (exact) return str("[" + whole.body + "]/" + n);
+    const bodies: string[] = [];
+    at = 0;
+    for (const size of loops) {
+      bodies.push(run(texts, merge, at, at + size).body);
+      at += size;
+    }
+    const args = bodies.map(str);
+    if (args.join(", ").length <= 60) return "cat(" + args.join(", ") + ")";
+    // A long list: a few loops per line.
+    const rows: string[] = [];
+    for (const a of args) {
+      if (rows.length && rows[rows.length - 1].length + a.length + 2 <= 72) rows[rows.length - 1] += ", " + a;
+      else rows.push(a);
+    }
+    return "cat(\n    " + rows.join(",\n    ") + "\n  )";
+  };
+  if (!hasToken) return sequence((i) => miniValue(filled[i], isNote), true);
   // Random values mixed with fixed ones: squeeze picks one of them per step.
   const choices: string[] = [];
   const index: string[] = [];
-  const ws: number[] = [];
-  filled.forEach((c, i) => {
+  filled.forEach((c) => {
     const code = c instanceof RandToken || c instanceof SigCell ? valueCode(c, isNote, nextToken, wctx) : str(miniValue(c, isNote));
     let k = choices.indexOf(code);
     if (k < 0 || c instanceof RandToken) { choices.push(code); k = choices.length - 1; }
     index.push(String(k));
-    ws.push(weights[i]);
   });
-  const g = ws.map((w) => Math.round(w * 1000)).reduce((a, b) => gcd(a, b));
-  const ints = ws.map((w) => Math.round((w * 1000) / (g || 1)));
-  const body = seq(index, ints);
-  return "squeeze(" + str(mult > 1 ? "[" + body + "]/" + mult : body) + ", [" + choices.join(", ") + "])";
+  return "squeeze(" + sequence((i) => index[i], false) + ", [" + choices.join(", ") + "])";
 }
 
 function cellKey(c: Cell): string {
@@ -2212,7 +2295,7 @@ function randomStretches(part: Part, ctx: Context, label: string, comment: strin
     const evs = part.events.filter((e) => e.t >= from - 1e-9 && e.t < from + W - 1e-9).map((e) => ({ ...e, t: e.t - from }));
     if (evs.length === 0) { bodies.push("silence"); continue; }
     const w = writePart({ ...part, events: evs, start: 0, end: W, horizon: W, drone: false }, ctx);
-    if (w) bodies.push(w.body.split("\n").join("\n  "));
+    if (w) bodies.push(firstLoop(w.body, 0).split("\n").join("\n  "));
   }
   if (bodies.every((b) => b === "silence")) return null;
   ctx.note("Line " + part.line + " has random durations: " + K + " random " + W + "-beat stretches of it are written, and randcat picks one each cycle (SuperCollider never repeats).");
@@ -2284,6 +2367,15 @@ function writeMidiKeys(rec: PlayRecord, ctx: Context): { comment: string[]; body
 }
 
 /** A ratio as exact code: 8 / 3 rather than 2.66667, so long loops do not drift. */
+/** How early a bound that rounding could cross is written, in cycles (see edge in emitTidal). */
+const EDGE = "1e-9";
+
+/** Whether x (in cycles) is a binary fraction that sums of such numbers keep exactly (k / 2^20). */
+function isBinary(x: number): boolean {
+  const scaled = x * 2 ** 20;
+  return Number.isInteger(scaled) && Math.abs(scaled) < 2 ** 32;
+}
+
 function ratioCode(x: number): string {
   if (Math.abs(Number(fmt(x)) - x) < 1e-12 * Math.max(1, x)) return fmt(x);
   for (let d = 2; d <= 192; d++) {
