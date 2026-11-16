@@ -573,10 +573,68 @@ Pbind(\instrument, \sq, \cutoff, ~c.asMap, \dur, 0.25).play;`, 1);
   ok(js.includes('.rhythm(rand.range(0.025, 0.1))'), 'a random wait in a routine becomes rhythm()');
   ok(events.every((e, i) => i === 0 || (e.time - events[i - 1].time > 0.1 - 1e-6 && e.time - events[i - 1].time < 0.4 + 1e-6)), 'waits between 0.1 and 0.4 beats');
 }
-// Random durations with rests between notes: random stretches, one picked each cycle.
+// Random durations with rests between notes: a rest is a silent step of rhythm(), with its own random duration.
 {
-  const { js } = play(String.raw`Pbind(\note, Pseq([0, \rest, 7], inf), \dur, Pwhite(0.1, 0.5)).play;`, 4);
-  ok(js.includes('randcat('), 'with rests, random stretches');
+  const { js, events } = play(String.raw`Pbind(\note, Pseq([0, \rest, 7], inf), \dur, Pwhite(0.1, 0.5)).play;`, 16);
+  ok(js.includes('.struct("x ~ x")') && js.includes('.slow(3)') && js.includes('.rhythm(rand.range(0.025, 0.125))') && !js.includes('randcat'), 'with rests, rhythm() too');
+  ok(events.length > 20, 'it plays');
+  for (let i = 1; i < events.length; i++) {
+    const gap = events[i].time - events[i - 1].time;
+    eq(events[i].note, [60, 67][i % 2], 'the notes keep their order');
+    // From 0 to 7 a rest comes between: two random durations.
+    if (events[i].note === 67) ok(gap > 0.2 - 1e-6 && gap < 1 + 1e-6, 'a note, a rest, then the next note: two durations');
+    else ok(gap > 0.1 - 1e-6 && gap < 0.5 + 1e-6, 'one duration');
+  }
+  ok(new Set(events.filter((e) => e.note === 67).map((e, i, a) => i && Math.round((e.time - a[i - 1].time) * 1e6))).size > 4, 'the rests vary too');
+}
+{
+  // At 2 beats per second, rests from a random choice of durations.
+  const { js, events } = play(String.raw`TempoClock.default.tempo = 2; Pbind(\note, Pseq([0, \rest, 7, 5], inf), \dur, Prand([0.25, 0.5], inf), \legato, 0.5).play;`, 8);
+  ok(js.includes('.rhythm(choose([0.0625, 0.125]))') && js.includes('.legato(0.5)'), 'a random choice, in cycles, with rests');
+  for (let i = 1; i < events.length; i++) {
+    const gap = events[i].time - events[i - 1].time;
+    const choices = events[i].note === 67 ? [0.25, 0.375, 0.5] : [0.125, 0.25];
+    ok(choices.some((d) => Math.abs(gap - d) < 1e-6), 'each gap is the durations it spans, in seconds: ' + gap);
+  }
+}
+// Random and fixed durations in a loop: rhythm() reads one length per step from cat().
+{
+  const { js, events } = play(String.raw`Pbind(\note, Pseq([0, 3, 7, 10], inf), \dur, Pseq([0.25, Pwhite(0.1, 0.5, 1), 0.5], inf)).play;`, 16);
+  ok(js.includes('.rhythm(cat("0.0625", rand.range(0.025, 0.125).segment(1), "0.125"))') && !js.includes('randcat'), 'a loop of step lengths');
+  ok(events.length > 30, 'it plays');
+  for (let i = 1; i < events.length; i++) {
+    const gap = events[i].time - events[i - 1].time;
+    eq(events[i].note, [60, 63, 67, 70][i % 4], 'the notes keep their order');
+    const step = (i - 1) % 3;
+    if (step === 1) ok(gap > 0.1 - 1e-6 && gap < 0.5 + 1e-6, 'the random step');
+    else near(gap, step === 0 ? 0.25 : 0.5, 'the fixed steps');
+  }
+}
+{
+  // A stretch that changes: each step's random duration is scaled by its own stretch.
+  const { js, events } = play(String.raw`Pbind(\note, Pseq([0, 3, 7], inf), \dur, Pwhite(0.1, 0.5), \stretch, Pseq([1, 2], inf)).play;`, 16);
+  ok(js.includes('.rhythm(cat(rand.range(0.025, 0.125).segment(1), rand.range(0.05, 0.25).segment(1)))'), 'stretched random durations');
+  for (let i = 1; i < events.length; i++) {
+    const gap = events[i].time - events[i - 1].time;
+    const k = (i - 1) % 2 ? 2 : 1;
+    ok(gap > 0.1 * k - 1e-6 && gap < 0.5 * k + 1e-6, 'a duration times its stretch');
+  }
+}
+{
+  // A routine with a random wait and a fixed one.
+  const { js, events } = play(String.raw`Routine({ loop { Synth(\default, [\freq, 200]); rrand(0.1, 0.4).wait; Synth(\default, [\freq, 300]); 0.5.wait } }).play;`, 16);
+  ok(js.includes('.rhythm(cat(rand.range(0.025, 0.1).segment(1), "0.125"))'), 'a random wait and a fixed one');
+  for (let i = 1; i < events.length; i++) {
+    const gap = events[i].time - events[i - 1].time;
+    eq(events[i].freq, [200, 300][i % 2], 'the synths keep their order');
+    if (events[i].freq === 300) ok(gap > 0.1 - 1e-6 && gap < 0.4 + 1e-6, 'the random wait');
+    else near(gap, 0.5, 'the fixed wait');
+  }
+}
+{
+  // Two waits after one synth add up to a length no single random duration gives: random stretches.
+  const { js } = play(String.raw`Routine({ loop { Synth(\default, [\freq, 200]); 0.25.wait; rrand(0.1, 0.4).wait } }).play;`, 4);
+  ok(js.includes('randcat(') && !js.includes('.rhythm('), 'a fixed and a random wait in a row: random stretches');
 }
 
 // GUI windows become groups of the Controls panel, laid out as in SuperCollider; labels come from StaticText.

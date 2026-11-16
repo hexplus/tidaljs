@@ -841,6 +841,8 @@ export class Pbind extends Pattern {
           else if (!["slider", "toggle", "midicc", "oscin"].includes(v.kind)) ctx.host.note("A random " + name + " is drawn for each event.");
           else ctx.host.note("A live " + name + " (a slider, MIDI or OSC value) takes its starting value: TidalJS's rhythm cannot follow it.");
           v = v.realize(ctx.host.rng);
+          // The draw, to tell the event's length (scaled by stretch and tempo) from the duration it drew.
+          if (name === "dur" || name === "delta") ev.set("__durvalue", v);
         }
         ev.set(name, v);
       }

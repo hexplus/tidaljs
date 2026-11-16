@@ -2302,12 +2302,23 @@ export class Interpreter implements Host {
       // A random wait in a routine: the events just played get the random duration (TidalJS's rhythm()).
       if (this.routine && typeof x === "number") {
         const now = this.routine.time;
+        let marked = false;
         for (let i = this.routine.events.length - 1; i >= 0 && Math.abs(this.routine.events[i].time - now) < 1e-9; i--) {
           const ev = this.routine.events[i].event;
           if (ev.has("__pattern")) continue;
           ev.set("__randtime", true);
           ev.set("__durtoken", token);
           ev.set("__durvalue", x);
+          marked = true;
+        }
+        // No event now (a second random wait, or one after a fixed wait): the event before it lasts a sum of
+        // waits, which no single random duration gives.
+        if (!marked) {
+          const last = [...this.routine.events].reverse().find((e) => !e.event.has("__pattern"));
+          if (last) {
+            last.event.set("__randtime", true);
+            last.event.set("__randgap", true);
+          }
         }
       }
     }

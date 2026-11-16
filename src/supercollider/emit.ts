@@ -68,6 +68,8 @@ interface SimEvent {
   sustain: number;
   instrument: string;
   ev: SCEvent;
+  /** A rest: it plays nothing, but takes its time (a random duration draws for it too). */
+  rest?: boolean;
 }
 
 interface Part {
@@ -75,6 +77,8 @@ interface Part {
   line: number;
   instrument: string;
   events: SimEvent[];
+  /** The rests between the events, for random durations (rhythm() gives each its own step). */
+  rests?: SimEvent[];
   /** The time the stream ended (finite patterns), or null. */
   end: number | null;
   /** One synth that plays until it is stopped. */
@@ -114,13 +118,19 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
 
   // Play everything.
   const events: SimEvent[] = [];
+  const restsBySrc = new Map<string, SimEvent[]>();
   let finiteEnd: number | null = null;
   let anyInfinite = false;
   for (const rec of played) {
     const scale = tempo / (rec.clock.tempo || 1);
     const sim = simulate(interp, rec, scale);
     if (rec.endless) sim.end = null;
-    events.push(...sim.events);
+    for (const e of sim.events) {
+      if (!e.rest) { events.push(e); continue; }
+      const list = restsBySrc.get(e.src) ?? [];
+      list.push(e);
+      restsBySrc.set(e.src, list);
+    }
     if (sim.end === null) anyInfinite = true;
     else finiteEnd = Math.max(finiteEnd ?? 0, sim.end);
   }
@@ -187,7 +197,7 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     const instrument = instruments.size === 1 ? list[0].instrument : "";
     const drone = isDrone(list);
     if (!drone) finiteParts++;
-    parts.push({ name: src, line: list[0].line, instrument, events: list, end: anyInfinite ? null : finiteEnd, drone });
+    parts.push({ name: src, line: list[0].line, instrument, events: list, rests: restsBySrc.get(src) ?? [], end: anyInfinite ? null : finiteEnd, drone });
   }
   if (!anyInfinite && finiteEnd !== null && finiteParts > 0) {
     note("In SuperCollider this plays once (" + fmt(finiteEnd) + (finiteEnd === 1 ? " beat" : " beats") + "); in TidalJS it loops.");
@@ -218,8 +228,7 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     if (w.rhythm) {
       // One event per cycle (the k-th at cycle k), which rhythm() spreads over its random durations, in cycles.
       if (w.rhythm.steps !== 1) body += "\n  .slow(" + fmt(w.rhythm.steps) + ")";
-      const k = 1 / beatsPerCycle;
-      body += "\n  .rhythm(" + tokenCode(w.rhythm.dur.map((x) => x * k, "x * " + fmt(k), [k, 0]), false, 0) + ")";
+      body += "\n  .rhythm(" + durationsCode(w.rhythm.durs, 1 / beatsPerCycle) + ")";
     } else if (Math.abs(span - 1) > 1e-9) {
       body += span > 1 ? "\n  .slow(" + ratioCode(span) + ")" : "\n  .fast(" + ratioCode(1 / span) + ")";
     }
@@ -313,10 +322,12 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
     if (sub !== undefined && depth < 4) {
       // A pattern a routine started: played from now.
       run(interp, sub, t, numOf(ev.get("__line"), line), scale, out, depth + 1);
-    } else if (!isRest(ev)) {
+    } else {
       const offset = numOf(ev.get("timingOffset"), 0);
       const src = String(ev.get("__src") ?? "p" + line);
-      out.push(resolve(ev, (t + offset) * scale, ownDelta(ev) * scale, src, numOf(ev.get("__line"), line), scale));
+      const delta = ownDelta(ev) * scale;
+      if (!isRest(ev)) out.push(resolve(ev, (t + offset) * scale, delta, src, numOf(ev.get("__line"), line), scale));
+      else if (delta > 1e-9) out.push({ ...resolve(ev, (t + offset) * scale, delta, src, numOf(ev.get("__line"), line), scale), rest: true });
     }
     const adv = advanceOf(ev);
     t += adv > 0 || adv === 0 ? adv : 0;
@@ -365,10 +376,24 @@ interface WrittenPart {
   /** The part's loop, in beats. */
   period: number;
   /**
-   * Random durations: the body plays one event per beat (its values in order), and rhythm() plays them one
-   * after another, each as long as a draw of `dur` (in beats, before it is put in cycles). `steps`: events in the loop.
+   * Random durations: the body plays one step per beat (its values in order, a rest a silent step), and rhythm()
+   * plays them one after another, step k as long as `durs[k % durs.length]` (a random duration or a number, in
+   * beats, before it is put in cycles). `steps`: steps in the body's loop.
    */
-  rhythm?: { dur: RandToken; steps: number };
+  rhythm?: { durs: (RandToken | number)[]; steps: number };
+}
+
+/**
+ * The step lengths for rhythm(), in cycles (k cycles a beat): one random duration as a signal; a loop of them
+ * as cat(), where a random duration is one value per step (segment(1)) and a number is written as text.
+ */
+function durationsCode(durs: (RandToken | number)[], k: number): string {
+  const cell = (d: RandToken | number, alone: boolean) => {
+    if (typeof d === "number") return alone ? fmt(d * k) : str(fmt(d * k));
+    const code = tokenCode(d.map((x) => x * k, "x * " + fmt(k), [k, 0]), false, 0);
+    return alone ? code : code + ".segment(1)";
+  };
+  return durs.length === 1 ? cell(durs[0], true) : "cat(" + durs.map((d) => cell(d, false)).join(", ") + ")";
 }
 
 type Cell = Value | RandToken | SigCell;
@@ -1443,32 +1468,92 @@ function followCode(lfo: LfoSignal): string {
   return rate > 0 ? code + ".fast(" + fmt(rate) + " / getcps())" : code;
 }
 
+/** The most step lengths rhythm() is given in a loop (`cat` of this many items). */
+const MAX_DURATION_LOOP = 64;
+
 /**
- * Random durations never loop. When one random duration (Prand, Pwhite...) sets every event and the events
- * follow one another, the values are written in order, one per step, and rhythm() plays them with a new random
- * duration each time. Otherwise eight random stretches of the part (4 beats each) are written, and randcat picks
- * one of them each cycle.
+ * Random durations never loop. The part is cut into steps, one per time something starts: the events there (a
+ * chord, or synths a routine starts together) or a rest. Each step has its length: a random duration (scaled by
+ * stretch and tempo) or a fixed one. When the steps follow one another and their lengths repeat, the steps are
+ * written in order, one per beat, and rhythm() plays them, each as long as its length: rhythm(d) for one random
+ * duration, rhythm(cat(...)) for a loop of lengths. Otherwise eight random stretches of the part (4 beats each)
+ * are written, and randcat picks one of them each cycle.
  */
 function randomRhythm(part: Part, ctx: Context, label: string, comment: string[]): WrittenPart | null {
-  const evs = part.events;
-  const tok = evs[0].ev.get("__durtoken");
-  const sameToken = tok instanceof RandToken && evs.every((e) => {
-    const t = e.ev.get("__durtoken");
-    return t instanceof RandToken && t.key() === tok.key() && !e.ev.has("__stretchtoken") && numOf(e.ev.get("timingOffset"), 0) === 0;
-  });
-  const stretch = numOf(evs[0].ev.get("stretch"), 1);
-  const contiguous = evs.every((e, i) => i === 0 || (Math.abs(e.t - (evs[i - 1].t + evs[i - 1].delta)) < 1e-6 && numOf(e.ev.get("stretch"), 1) === stretch));
-  if (sameToken && contiguous && evs.length >= 4) {
-    // Event k at beat k, one beat long; its length relative to its duration is kept (legato).
-    const steps = evs.map((e, k) => ({ ...e, t: k, delta: 1, sustain: e.delta > 0 ? e.sustain / e.delta : 1 }));
-    const w = writePart({ ...part, events: steps, end: null }, ctx);
-    if (w) {
-      ctx.note("Line " + part.line + " has random durations: rhythm() plays its events one after another, each with a new random duration (TidalJS's random values repeat after 300 steps).");
-      const dur = stretch === 1 ? tok : tok.map((x) => x * stretch, "x * " + fmt(stretch), [stretch, 0]);
-      return { ...w, label, comment: [...comment, ...w.comment.filter((c) => !comment.includes(c))], rhythm: { dur, steps: w.period } };
+  const steps = rhythmSteps(part);
+  if (steps) {
+    // Events of step k at beat k, one beat long; their length relative to the step is kept (legato).
+    // A synth a routine starts lasts until the routine moves on: its delta, 0 for all but the last started together.
+    const sustainOf = (e: SimEvent, s: RhythmStep) => (e.ev.get("__synth") && e.delta < 1e-9 ? s.length : e.sustain);
+    const placed = steps.flatMap((s, k) => s.events.map((e) => ({ ...e, t: k, delta: 1, sustain: s.length > 0 ? sustainOf(e, s) / s.length : 1 })));
+    const loop = durationLoop(steps.map((s) => s.dur));
+    const w = loop && placed.length ? writePart({ ...part, events: placed, rests: [], end: null }, ctx) : null;
+    if (w && loop) {
+      ctx.note("Line " + part.line + " has random durations: rhythm() plays its " + (steps.some((s) => !s.events.length) ? "events and rests" : "events")
+        + " one after another, each with a new random duration (TidalJS's random values repeat after 300 steps).");
+      return { ...w, label, comment: [...comment, ...w.comment.filter((c) => !comment.includes(c))], rhythm: { durs: loop, steps: w.period } };
     }
   }
   return randomStretches(part, ctx, label, comment);
+}
+
+interface RhythmStep {
+  /** What plays at the step's start (none for a rest). */
+  events: SimEvent[];
+  /** How long the step lasts, in beats, as SuperCollider played it. */
+  length: number;
+  /** Its length as written: a random duration or a number of beats. */
+  dur: RandToken | number;
+}
+
+/** The part's steps, in order; null when a step's length is not one random duration or a fixed one. */
+function rhythmSteps(part: Part): RhythmStep[] | null {
+  const all = [...part.events, ...(part.rests ?? [])].sort((a, b) => a.t - b.t || Number(!!a.rest) - Number(!!b.rest));
+  if (all.some((e) => e.ev.has("__stretchtoken") || e.ev.has("__randgap") || numOf(e.ev.get("timingOffset"), 0) !== 0)) return null;
+  // One group per start time.
+  const groups: SimEvent[][] = [];
+  for (const e of all) {
+    const last = groups[groups.length - 1];
+    if (last && Math.abs(last[0].t - e.t) < 1e-6) last.push(e);
+    else groups.push([e]);
+  }
+  if (groups.length < 4) return null;
+  const steps: RhythmStep[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i];
+    const events = group.filter((e) => !e.rest);
+    // A rest at the same time as an event takes no time of its own.
+    if (events.length && events.length < group.length) return null;
+    // How far the group moves time: its longest delta (a routine's synths started together have 0 but the last).
+    const length = Math.max(...group.map((e) => e.delta));
+    // Each step must start where the one before it ends.
+    if (i + 1 < groups.length && Math.abs(groups[i + 1][0].t - (group[0].t + length)) > 1e-6) return null;
+    const timed = group.find((e) => e.ev.get("__durtoken") instanceof RandToken);
+    let dur: RandToken | number = length;
+    if (timed) {
+      const token = timed.ev.get("__durtoken") as RandToken;
+      if (group.some((e) => { const t = e.ev.get("__durtoken"); return !(t instanceof RandToken) || t.key() !== token.key(); })) return null;
+      // The step's length over the value drawn: stretch and tempo.
+      const drawn = timed.ev.get("__durvalue");
+      if (typeof drawn !== "number" || !(drawn > 0)) return null;
+      const factor = Number((length / drawn).toPrecision(10));
+      dur = factor === 1 ? token : token.map((x) => x * factor, "x * " + fmt(factor), [factor, 0]);
+    }
+    steps.push({ events, length, dur });
+  }
+  return steps;
+}
+
+/** The shortest loop of step lengths, from the first step (the last few may be cut off by the horizon). */
+function durationLoop(durs: (RandToken | number)[]): (RandToken | number)[] | null {
+  const key = (d: RandToken | number) => (d instanceof RandToken ? "r" + d.key() : fmtKey(d));
+  const keys = durs.map(key);
+  for (let q = 1; q <= MAX_DURATION_LOOP && q * 2 <= keys.length; q++) {
+    let ok = true;
+    for (let i = q; i < keys.length && ok; i++) ok = keys[i] === keys[i - q];
+    if (ok) return durs.slice(0, q);
+  }
+  return null;
 }
 
 function randomStretches(part: Part, ctx: Context, label: string, comment: string[]): WrittenPart | null {
