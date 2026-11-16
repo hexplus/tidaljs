@@ -163,9 +163,24 @@ async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
  * The input goes in small slices and each slice waits for the output to be
  * read, so the reader stops it soon after the cap, not after the whole
  * expansion.
+ *
+ * Data after the end of the deflate stream makes the link damaged. Runtimes
+ * disagree about it (Chrome and Node 24 reject it, Node 22 ignores it), so it
+ * is checked here: a deflate stream ends in its last byte, so without that
+ * byte it must fail to inflate. If it still inflates, the last byte was
+ * extra.
  */
 export async function inflateCapped(bytes: Uint8Array, cap: number): Promise<Uint8Array> {
   if (!canDecompress()) throw new ShareError("unsupported");
+  const out = await inflateOnce(bytes, cap);
+  if (bytes.length > 1) {
+    const shorter = await inflateOnce(bytes.subarray(0, bytes.length - 1), cap).then(() => true, () => false);
+    if (shorter) throw new ShareError("damaged");
+  }
+  return out;
+}
+
+async function inflateOnce(bytes: Uint8Array, cap: number): Promise<Uint8Array> {
   const stream = new DecompressionStream("deflate-raw");
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
