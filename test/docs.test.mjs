@@ -30,6 +30,7 @@ t.startRecording = () => {};
 t.stopRecording = () => Promise.resolve();
 t.exportPattern = () => {};
 t.midiOutputs = () => [];
+t._oscSocket = () => null; // oscIn() would connect to the OSC bridge
 
 let passed = 0;
 const ok = (value, msg) => { assert.ok(value, msg); passed++; };

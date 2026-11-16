@@ -2,6 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Content Security Policy (see "Sharing a song" in README.md). The editor runs pattern code with
+      new Function, hence 'unsafe-eval'; the engine loads its audio worklet and clock worker from blob:
+      URLs. samples() may fetch from any https site (and a local http sample server), and OSC output
+      uses a WebSocket bridge, so connect-src stays open: this policy keeps out injected markup,
+      plugins, <base> and form hijacking, it does not sandbox code you choose to play.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' https: wss: ws: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; manifest-src 'self'"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="TidalJS: live code algorithmic music patterns in your browser." />
     <title>TidalJS Live Coding Editor</title>

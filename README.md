@@ -22,7 +22,7 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 
 - **Samples**: load recorded sample banks, such as the [Dirt-Samples](https://github.com/tidalcycles/Dirt-Samples) library, with `samples()`, including pitched banks (one recording every few notes, such as a piano) that `note()` plays in tune; `speed`, `begin`/`end`, `chop`, `striate`, `slice`, `splice`, `loopAt`, `randslice`, `loop` and `legato` work on the recordings
 - **Mini-notation**: subdivisions, alternation, polymeter, euclidean rhythms, probability, repeats, random choice, ranges (`"0 .. 7"`), chords, and patterned modifiers (`"bd*<2 3>"`, `"bd(<3 5>,8)"`)
-- **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `ply`, `iter`, `linger`, `rot`, `off`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`..., with patterned arguments such as `fast("<1 2>")`
+- **Time transformations**: `fast`, `slow`, `rev`, `every`, `whenmod`, `chunk`, `ply`, `iter`, `linger`, `rot`, `off`, `scramble`, `shuffle`, `swing`, `compress`, `palindrome`..., with patterned arguments such as `fast("<1 2>")`; `rhythm` plays the steps one after another with patterned (or random) lengths, never looping
 - **Composition**: `stack`, `cat`, `timeCat`, `wrandcat`, `superimpose`, `jux`, `euclid`, `euclidFull`, `nTake`, `sew`, `stitch`, `wedge`, `mask`, `select`, `squeeze`, `spread`, `pickF`, `fix`...
 - **Tidal's operators**: every control is also a function (`n("0 2")`, `speed(2)`), combined with `.set()` (`#`), `.keep()` (`|<`), `.add()` (`|+`), `.sub()`, `.mul()`, `.div()`, `.mod()`, `.pow()`, each also with the rhythm from the right (`.addRight()`, `+|`), from both sides (`.addBoth()`, `|+|`) or squeezed (`.addSqueeze()`, `||+`); `once`, `qtrigger`
 - **Streams and transitions**: `d1` to `d16` and `p("name", ...)` streams, with mute and solo buttons in the editor (and `mute`/`solo` in code); transitions between versions of a stream: `xfadeIn`, `jumpIn`, `jumpInNext`, `jumpMod`, `clutchIn`, `anticipateIn`, `interpolateIn`, `wait`, `waitT`, `mortal`, `histpan`; `once`, `first`, `only`, `hush`, `panic`; restarts with `qtrigger`, `ctrigger`, `rtrigger`, `ftrigger` and `mtrigger`
@@ -33,10 +33,11 @@ Patterns are immutable: every method returns a new pattern, so `superimpose(x =>
 - **Audio effects**: filters with resonance and envelopes, a peak equaliser, the DJ filter, delay (level, time and feedback, as in Tidal) and reverb per orbit, distortion and `shape`, bit crushing, `coarse`, vowel formants, tremolo, phaser, ring modulation, cut groups, `accelerate`, envelopes (`attack`, `hold`, `decay`, `release`), pitch envelopes (`penv`, and `pitchenv` with SuperCollider-style breakpoints), vibrato, portamento, and SuperDirt's effects: `squiz`, `waveloss`, `krush`, `triode`, `octer`, `fshift`, `leslie` and the spectral `freeze`, `comb`, `smear`, `scram`, `binshift`, `hbrick`, `lbrick`, in SuperDirt's order
 - **Synths in the style of SuperDirt's**: `supersaw`, `supersquare`, `superpwm`, `superhoover`, `superreese`, `superzow`, `superchip`, `superfm`, `superpiano`, `supergong`, `superstatic`, and the drums `superkick`, `super808`, `supergabber`, `superhat`, `supersnare`, `superclap`
 - **Harmony**: notes, Tidal's 70+ scales (with the Arabic maqamat's quarter tones) and every chord of its table, arpeggios, inversions, strummed chords, `toScale`
-- **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, bipolar `sine2` and friends, envelopes `envL`/`envEq`, `brand`, with `range`, `rangex`, `segment`, `smooth`
+- **Signals**: `sine`, `saw`, `tri`, `square`, `rand`, `irand`, `perlin`, bipolar `sine2` and friends, envelopes `envL`/`envEq` and SuperCollider-style breakpoint envelopes in seconds (`envelope`), `brand`, with `range`, `rangex`, `segment`, `smooth`
 - **Output**: synthesised sounds, Web MIDI, OSC over WebSocket, audio recording, JSON and MIDI file export
-- **SuperCollider import**: open a `.scd` file and get TidalJS code: Pbinds, Ppar, Pdef, routines, tempo, and SynthDefs as TidalJS synths with effects (see [Importing SuperCollider code](#importing-supercollider-code))
-- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the palette buttons show the same help), an insert palette for every function (Tab moves between parameters), live update while playing, a library of saved sketches (IndexedDB, or localStorage where it is not available) with export and import of `.js` and `.json` files, reached from the top bar (the open sketch's name, Save with Ctrl+S, and a Sketches menu with the recent sketches, export and import), errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
+- **SuperCollider import**: open a `.scd` file and get TidalJS code: Pbinds, Ppar, Pdef, routines, tempo, SynthDefs as TidalJS synths with effects, effect buses and `Pfx`, JITLib (`Ndef`, `ProxySpace`), buffers as samples, MIDI and OSC in and out, GUI windows as groups of sliders, envelopes and LFOs that move a sound while it plays, and random rhythms (see [Importing SuperCollider code](#importing-supercollider-code))
+- **Live editor** (built with [SibuJS](https://sibujs.dev/) and TypeScript): syntax highlighting, autocomplete, hover help that explains the code under the pointer (what each function, sound, scale, chord and mini-notation symbol does, with an example, a tip and related functions; the palette buttons show the same help), an insert palette for every function (Tab moves between parameters), a Reference tab split into Patterns, Time, Sound, Harmony and Live sections, with a search over all of them (press `/` or Ctrl+K; it matches names, signatures and descriptions, highlights the matches, puts name matches first and suggests a name for typos) and entries that open their extended help with an example to insert, live update while playing, a library of saved sketches (IndexedDB, or localStorage where it is not available) with export and import of `.js` and `.json` files, reached from the top bar (the open sketch's name, Save with Ctrl+S, and a Sketches menu with the recent sketches, export and import), errors and warnings marked in the code, a cycle view of what is playing, error messages that keep the music running, seamless tempo changes, recording
+- **Sharing**: Sketches → Share as a link… copies a link with the song's code, title and tempo inside it (nothing is uploaded); a link opens for review, never plays by itself, and code that does more than music is flagged before its first Play (see [Sharing a song](#sharing-a-song))
 - **Examples**: public-domain songs (Beethoven, Bach, Pachelbel, Grieg, Satie, traditional tunes), Christmas carols (Jingle Bells, Silent Night, Deck the Halls, We Wish You a Merry Christmas, Good King Wenceslas, Carol of the Bells), genre grooves (house, boom bap, bossa nova, jungle), recorded samples from Dirt-Samples, a short demo of each area of the library, and complete pieces made with SuperDirt's synths (rave, polymetric techno, trance, generative ambient, drum and bass, chiptune, gabber, and an arrangement built with `ur`)
 
 ```javascript
@@ -118,10 +119,17 @@ The editor converts a [SuperCollider](https://github.com/supercollider/supercoll
 The importer parses the file and runs it far enough to know what it plays, then writes each part as a TidalJS pattern:
 
 - **What plays**: `Pbind`, `Pmono`, `Ppar`, `Ptpar`, `Pdef`, `Pbindef`, `Pchain` (`<>`), `Pseq` of patterns (sections), `Routine`, `Task` and `fork` with `Synth(...)` and `wait`, events played with `.play`, and functions played with `{ ... }.play`. Each Pbind (or each instrument of a routine) becomes one part.
-- **Value patterns**: `Pseq`, `Pser`, `Pn`, `Pdup`/`Pstutter`, `Pkey`, `Pfunc`, `Pfuncn`, `Pseries`, `Pgeom`, `Pslide`, `Place`, `Ppatlace`, `Pswitch`, `Pif`, `Pseg`, `Pfin`, `Pfindur`, `Psync`, `Pbjorklund`, `Prout`, and arithmetic on patterns. `Pwhite`, `Pexprand`, `Prand`, `Pxrand` and `Pwrand` become TidalJS random signals (`rand.range`, `rand.rangex`, `irand`, `choose`, `wchoose`).
+- **Value patterns**: `Pseq`, `Pser`, `Pn`, `Pdup`/`Pstutter`, `Pkey`, `Pfunc`, `Pfuncn`, `Pseries`, `Pgeom`, `Pslide`, `Place`, `Ppatlace`, `Pswitch`, `Pif`, `Pseg`, `Pfin`, `Pfindur`, `Pconst`, `Psync`, `Pbjorklund`, `Prout`, and arithmetic on patterns. A series that never ends (`Pseries(0, 1, inf)`) keeps growing (`.add(note(sig((t) => Math.floor(t))))`), and a list shuffled again each time (`Pn(Pshuf(list))`) becomes `shuffle`. `Pwhite`, `Pexprand`, `Prand`, `Pxrand` and `Pwrand` become TidalJS random signals (`rand.range`, `rand.rangex`, `irand`, `choose`, `wchoose`).
 - **Events**: rests (`\rest`, `Rest()`), `dur`, `legato`, `sustain`, `stretch`, `amp`/`db`, `pan`, `lag`, `timingOffset`, chords (arrays), and SuperCollider's pitch model (`degree`, `scale`, `root`, `octave`, the transpositions, `note`, `midinote`, `freq`). `Pbind(\type, \dirt, ...)` events keep their SuperDirt controls.
+- **Routing and effects**: `Bus.audio` and `Bus.control`; an effect synth that reads a bus (`In.ar`) puts its effects on the parts that play into that bus, sends included (`Out.ar(\send, sig * 0.3)`), chains of effects too; `Pfx`, `Pfxb` and `Pproto` effects; a control bus set with `bus.set(v)` is that value, and one an LFO synth writes (`Out.kr(bus, SinOsc.kr(0.5).range(200, 2000))`), read with `bus.asMap`, becomes a TidalJS signal (`sine.range(200, 2000)`) at the LFO's rate. Groups only order synths, so they need nothing.
+- **JITLib**: `Ndef`, `NodeProxy`, `ProxySpace` (`~x = ...`, `~x.play`), filter slots (`Ndef(\x)[1] = \filter -> { |in| ... }`), one proxy read inside another (`Ndef.kr(\lfo)`), effect proxies fed with `<<>`, `.set`, and `Tdef`. The last definition of each proxy plays.
+- **Buffers**: files read with `Buffer.read` become TidalJS sample banks (a `samples({...})` call at the top of the code), and synths that play them (`PlayBuf`, `BufRd`, and `TGrains`, `GrainBuf`, `Warp1` played as samples) become `sound("kick snare")` with `speed` from their rate and `begin` from their start.
+- **MIDI and OSC out**: `Pbind(\type, \midi, ...)` and `MIDIOut`'s `noteOn`/`noteOff`, `control` and `program` become `.midi(output)` with `midichan`, `note`, `vel`, `ccn`/`ccv` and `pgm`; `NetAddr.sendMsg("/dirt/play", ...)` is a SuperDirt event and other messages with name-value pairs are sent with `.osc()`; `s.sendMsg("/s_new", ...)` starts a synth.
+- **Live input**: GUI sliders, knobs, buttons, number boxes and menus (`Slider`, `Knob`, `EZSlider`, `NumberBox`, `Button`, `CheckBox`, `PopUpMenu`, `Slider2D`, `RangeSlider`, with their `ControlSpec`) become `slider()` and `toggle()` in the Controls panel, named after the `StaticText` next to them or a button's first state; each `Window` becomes a group of the panel with its rows (`HLayout`, `VLayout`, `GridLayout`, or controls placed with `Rect`), written as `controlLayout()`. `MIDIdef.cc` becomes `midicc()`, `MIDIdef.bend` `midibend()`, `MIDIdef.touch` `miditouch()`, `MIDIdef.polytouch` `keytouch()` (each held key's own pressure) or `miditouch()`, `MIDIdef.noteOn` functions that start a synth become `midikeys()` (a pitch-bend function that bends the held synths sets its bend range), and the values an `OSCdef` reads become `oscIn()`; an `OSCdef` that starts a synth becomes `oscplay()`, which plays it for each message with that message's values. What their functions change (`synth.set`, a proxy's `set`, a bus's `set`, `Pdefn`...) follows the player, during the note too. The mouse (`MouseX`, `MouseY`, `MouseButton`) becomes a slider or switch.
+- **Changes during a note**: an LFO (even one whose speed or range other LFOs move) or an envelope (`EnvGen`, `Line`, `XLine`) inside a SynthDef that moves a filter, the pan, the level or the pitch becomes `.followNote(control, signal)`, and a control bus or proxy an LFO or an envelope writes becomes `.follow(control, signal)`, so the value moves while the note sounds, as in SuperCollider. A random value drawn per note (`Rand`, `ExpRand`, `IRand`) becomes a random value per event.
+- **Synths from code**: a synth started in a routine ends where the routine releases it (`x.release`, `x.free`, `x.set(\gate, 0)`); `x.set(\freq, 400)` on a running synth goes on with the new values (`.tie()`: the same voice, no new attack), and so does `Pmono`. Random values in code that runs again and again (`rrand`, `.choose`, `.rand` in a routine, a `Pfunc` or a `Prout`) become TidalJS random signals; in code that runs once they are one draw, as in SuperCollider.
 - **Tempo**: `TempoClock(...)`, `TempoClock.default.tempo = ...` and `.play(clock)`. One cycle is the loop most parts share (4 beats when it fits), and `setTempo` or `setCPS` keeps the tempo exact.
-- **SynthDefs**: TidalJS's ports (`superhoover`, `supergabber`) are used when the name matches; other SynthDefs become the closest TidalJS synth (by name, such as kick or hat, or by their oscillators: detuned saws are a `supersaw`). The filters, peak equaliser, reverb, distortion and pan after the oscillators become effects (`lpf`, `resonance`, `hpf`, `bpf`, `peak`, `freeverb`, `shape`, `pan`), with their envelopes (`lpenv`, `peakenv`...); `Env.perc`, `Env.adsr`, `Env.asr` and `Env.linen` become `attack`, `hold`, `decay`, `sustainlevel` and `release`; pitch envelopes become `penv` or `pitchenv`, and an LFO sweeping the pitch (`SinOsc.kr(1).exprange(100, 2e3)`) becomes a vibrato (`vib`, `vibmod`). An argument that drives one of them becomes that control, so `\cutoff` in a Pbind becomes `.lpf()`. Array arguments expand into channels as in SuperCollider: two channels that differ play as two layers, panned left and right. Levels follow SuperCollider's (`amp` and the gains in the SynthDef), and a synth that nothing stops (`{ ... }.play`) is a note as long as each cycle.
+- **SynthDefs**: TidalJS's ports (`superhoover`, `supergabber`) are used when the name matches; other SynthDefs become the closest TidalJS synth (by name, such as kick or hat, or by their oscillators: detuned saws are a `supersaw`, a sine whose frequency another sine moves (FM, or `PMOsc`) is a `superfm` with its ratio as `semitone` and its index as `voice`). The filters, peak equaliser, reverb, distortion and pan after the oscillators become effects (`lpf`, `resonance`, `hpf`, `bpf`, `peak`, `freeverb`, `shape`, `pan`), with their envelopes (`lpenv`, `peakenv`...); `Env.perc`, `Env.adsr`, `Env.asr` and `Env.linen` become `attack`, `hold`, `decay`, `sustainlevel` and `release`; pitch envelopes become `penv` or `pitchenv`, and an LFO sweeping the pitch (`SinOsc.kr(1).exprange(100, 2e3)`) becomes a vibrato (`vib`, `vibmod`). An argument that drives one of them becomes that control, so `\cutoff` in a Pbind becomes `.lpf()`. Array arguments expand into channels as in SuperCollider: two channels that differ play as two layers, panned left and right. Levels follow SuperCollider's (`amp` and the gains in the SynthDef), and a synth that nothing stops (`{ ... }.play`) is a note as long as each cycle.
 
 Each part loops over its shortest period: its rhythm is a `struct` with weighted steps (`"x@4 x@3 x"`), and each control a mini-notation sequence over its own period. Notes on what could not be converted exactly are written at the top of the code. The test suite converts a gabber track (two SynthDefs and a Ppar of two Pbinds on a TempoClock) and checks that all 336 events of the first minute play at the same times with the same parameters as in SuperCollider.
 
@@ -157,6 +165,21 @@ const kick = sound("superkick")
 
 stack([pluck, kick])
 ```
+
+### Sharing a song
+
+**Sketches → Share as a link…** copies a link to the song in the editor: its code, title and tempo. The song is packed into the link's fragment (`#song=1.d.…`, compressed with deflate and written in base64url), which browsers never send to a server, so nothing is uploaded and anyone with the link can read the song. Songs up to 30,000 characters of code can be shared; a link longer than 8,000 characters gets a warning, because some chat apps cut long links. When the clipboard is not available, the dialog shows the link selected, ready for Ctrl+C.
+
+Code in the editor is JavaScript that runs in your browser when you press Play, so a link from someone else is treated as untrusted:
+
+- **Nothing runs by itself.** Opening a link shows the song for review: title, tempo, the whole code as text, the sites it may load files from, and anything risky the scan found. Only **Open in editor** puts it in the editor (music that was playing stops), and only Play runs it. If the editor holds unsaved code, you are asked before it is replaced; saved sketches are never touched.
+- **The link leaves the address bar** as soon as the page reads it, so a reload does not open it again.
+- **Strict decoding.** The link must have the right version, only base64url characters and at most 60,000 of them, and it may decompress to at most 128 KB: decompression stops as soon as it passes that, so a small link cannot expand into a huge one. The data must be exactly a title (text, at most 200 characters, cleaned of control, invisible and bidirectional characters and cut to 80), the code (text, at most 30,000 characters) and a tempo (a number from 0.05 to 10). Anything else is refused with a plain message.
+- **Text only.** The title and the code are shown as text, never as HTML. The review shows invisible and bidirectional characters in the code as `⟦U+202E⟧`, so they cannot make the code look different from what runs.
+- **A check before the first Play.** The scan looks for what a music pattern never needs: network access (`fetch`, `XMLHttpRequest`, `WebSocket`, `sendBeacon`...), running other code (`eval`, `Function`, `import()`, `setTimeout`), reaching into JavaScript's objects (`constructor`, `prototype`, `globalThis`), the page (`document`, `window`), saved data (`localStorage`, `indexedDB`, `cookie`), leaving the page (`location`, `open()`), other browser features (`navigator`, `postMessage`, `Worker`), pop-ups, and ways to hide those names: `\u` and `\x` escapes, names glued or decoded at run time (`"fe" + "tch"`, `.join("")`, `fromCharCode`, `atob`), lookups by a name in text (`obj["name"]`), invisible characters, very long lines and code pushed far below empty lines. If anything is found, the first Play lists it and asks again. The check runs on the code as it is when you press Play, also after a reload.
+- **It is a check, not a guarantee.** JavaScript has too many ways to reach a feature for any scan to catch them all. Play shared code only from people you trust, and read it first.
+
+The page also sets a Content Security Policy (in `index.html`): no plugins (`object-src 'none'`), no `<base>` or form hijacking (`base-uri 'none'`, `form-action 'none'`), no frames, scripts only from the page itself. It cannot sandbox code you choose to play: the engine runs pattern code with `new Function` (`'unsafe-eval'`) and loads its audio worklet from a `blob:` URL, `samples()` may fetch from any https site (or a local http sample server) and OSC output uses a WebSocket bridge, so network access stays open. That is why the review and the check above exist.
 
 ## Usage Examples
 
@@ -475,6 +498,7 @@ The M and S buttons above the cycle view mute and solo each stream; in code, `mu
 | `almostAlways(f)` | 90% of events | `.almostAlways(x => x.lpf(900))` |
 | `almostNever(f)` | 10% of events | `.almostNever(x => x.crush(4))` |
 | `sometimesBy(p, f)` | Apply f with probability p | `.sometimesBy(0.3, x => x.add(note(12)))` |
+| `rhythm(durations)` | Play one step after another from cycle 0, never looping: step k lasts `durations` cycles (a number or a pattern read at cycle k, at least 1/256) and plays what the pattern plays at cycle k (a chord stays a chord, a rest is a silent step) | `note("c4 e4 g4").slow(3).rhythm(choose([0.25, 0.5]))` |
 
 ### Audio effects
 
@@ -571,6 +595,7 @@ Signals are continuous patterns. They have no events of their own; events that u
 | `segment(n)` | Sample n times per cycle | `saw.segment(8)` |
 | `smooth()` | Glide between the values of a numeric pattern | `.gain(fit(0, [0, 1], "0 1").smooth())` |
 | `setBus(k, v)` / `bus(k)` | A value you can change while playing | `.lpf(bus("cut"))` |
+| `envelope(levels, times, curves)` | SuperCollider's `Env`: levels, the times in seconds between them, and a curve per segment (a number, `"lin"`, `"exp"`, `"step"`, `"hold"`, `"sin"`, `"wel"`, `"sqr"`, `"cub"`; one or a list). Read at cycle / cps seconds: the first level before 0, the last after the end. With `followNote` it restarts at each note | `.followNote("lpf", envelope([200, 4000, 300], [0.01, 0.4]))` |
 
 ### Sound shaping
 
@@ -586,6 +611,45 @@ Signals are continuous patterns. They have no events of their own; events that u
 | `room(x)`, `size(x)` | Reverb amount and room size | `.room(0.4).size(0.9)` |
 | `orbit(n)` | Each orbit has one delay and one reverb, set by its events: put parts with different effects on different orbits | `.orbit(1)` |
 | `nudge(s)` | Shift timing in seconds | `.nudge(0.01)` |
+| `follow(ctrl, sig)` | Change a control during each note (onset through release), reading the signal at absolute cycles: `lpf`, `hpf`, `bpf`, `resonance`, `hpq`, `bpq`, `pan`, `gain`, `amp`, `freq`, `note`, `speed`, `peak`, `peakq`, `peakgain`, `djf`, `tremolorate`, `tremolodepth`, `phaserrate`, `phaserdepth`, `ring`, `ringf`, `leslie`, `lrate`, `lsize`, `vib` (the speed of a vibrato). A signal of a live input (`slider`, `toggle`, `midicc`, `midibend`, `miditouch`, `oscIn`, `bus`) also moves the notes already sounding when the input changes | `.follow("lpf", sine.range(300, 3000).slow(4))` |
+| `followNote(ctrl, sig)` | The same, with the signal's time starting at 0 at each note's onset (an LFO that restarts with every note) | `.followNote("pan", sine.range(-1, 1).fast(4))` |
+| `tie(id)` | Monophonic slur (SuperCollider's `Pmono`): a note with the same tie as a synth voice still sounding (same sound and orbit) takes over that voice, with no new attack: see below for what it changes | `.legato(1).tie(1).portamento(0.05)` |
+
+A tied note changes, from its start: the pitch (gliding over `portamento`), the length and `release`; `lpf`, `hpf`, `bpf` and their `resonance`/`hpq`/`bpq`; `gain`, `amp` and `pan`; `shape`, `crush`, `distort`/`distortion`, `triode`, `krush` and `kcutoff`; `vowel`; `tremolorate`, `tremolodepth`, `phaserrate`, `phaserdepth`, `ring`, `ringf`, `leslie`, `lrate`, `lsize`, `vib`, `vibmod`; `peak`, `peakq`, `peakgain` and `djf`; the AudioWorklet effects the voice started with (`coarse`, `waveloss`, `squiz`, `fshift`/`fshiftnote`, `octer`, the spectral effects, `freeverb`/`freeroom`/`freedamp`); the synth's own `detune`, `voice`, `rate`, `lfo` and `semitone` where they drive running nodes (`supersaw`, `supersquare`, `superreese`, `superpwm`, `superzow`, `superchip`, `superfm`, `superfb`); its orbit's `delay`, `delaytime`, `delayfeedback`, `lock`, `room`, `size` and `dry` (as every event of the orbit does); and its own `follow()`s. A tied voice is built with those effects even when its first note has none of them (set so they change nothing), so a later note can turn them on; a control a note leaves out keeps its value. Still fixed for the voice's life: `attack`, `decay` and `sustainlevel`, the filter and pitch envelopes (`lpenv`..., `penv`, `pitchenv`), `accelerate`, `begin`/`end`/`loop`, `n` and the sound, the AudioWorklet effects it started without, and the other synths' own parameters. Samples ignore `tie`.
+
+### Live input
+
+Each of these is a signal: use it wherever a pattern of numbers goes, like `sine`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `slider(name, value, min = 0, max = 1, step = 0)` | A slider in the Controls panel (under the cycle view). Running the code again keeps its value; one the code no longer uses disappears. Values are remembered in the browser | `.lpf(slider("cutoff", 800, 200, 4000))` |
+| `toggle(name, on = false)` | A switch in the Controls panel: 0 or 1 | `.gain(toggle("hats", true))` |
+| `midicc(cc, channel)` | The last value of a MIDI control change, 0 to 1, on a channel (0 to 15) or any channel | `.lpf(midicc(74).range(200, 4000))` |
+| `midibend(channel)` | The last pitch bend, -1 to 1 (0 in the middle), on a channel or any channel | `.follow("lpf", midibend().range(300, 3000))` |
+| `miditouch(channel)` | The last aftertouch, 0 to 1: channel pressure, or the pressure of a key (the last one of any key) | `.follow("gain", miditouch().range(0.7, 1.1))` |
+| `keytouch()` | In a `midikeys` template, the pressure of that voice's own key (polyphonic aftertouch), 0 to 1, so each held note follows its key; until its key is pressed harder the note keeps its own value. 0 outside `midikeys`. (`miditouch()` in a template likewise leaves a note its own value until channel pressure comes after its key went down) | `midikeys(sound("supersaw").follow("amp", keytouch().range(0.1, 0.4)))` |
+| `midikeys(template, channel, bendRange = 0)` | Play a MIDI keyboard: each key plays the template's first event of the current cycle with `note` = the key and `amp` = (its amp or the default) × velocity / 127, held until the key is let go. With `bendRange` (semitones; `channel` may be `null` for any channel), the pitch-bend wheel bends the held keys, and a key pressed with the wheel off centre starts bent (synths only). Returns `silence`, so it fits in a `stack` | `midikeys(sound("superpiano").amp(0.3), null, 2)` |
+| `oscIn(address, index = 0)` | The last number received on an OSC address (argument `index`), through the OSC bridge | `.lpf(oscIn("/fader1").range(200, 4000))` |
+| `oscplay(address, template)` | Each OSC message on the address plays the template's first event of the current cycle once, at its own length. The message's numbers are kept first, so `oscIn` of the same address in the template reads that message. Returns `silence` | `oscplay("/hit", sound("superpiano").freq(oscIn("/hit", 1)))` |
+| `controlLayout(title, rows)` | Arrange the Controls panel: a titled group whose rows are lists of slider and toggle names, side by side; one group per call, in order; controls no layout names come after the groups. A statement on its own (it plays nothing); a new run replaces the layouts only if it plays | `controlLayout("Synth", [["cutoff", "res"], ["on"]])` |
+
+`follow()` and `followNote()` on one of these inputs keep listening while the note sounds: moving a slider, a MIDI knob or the wheel, an OSC fader or calling `setBus` re-lays the automation of the sounding notes (held MIDI keys and tied voices too) from that moment, at most every 20 ms.
+
+MIDI input listens to every input the browser sees (the browser asks for permission the first time). OSC input uses the same WebSocket bridge as `.osc()` (`setOscUrl`). TidalJS does not ship a bridge; for `oscIn` the bridge must **send every OSC packet it receives over UDP back to the browser as one binary WebSocket message**, unchanged: an OSC message (address, type tags, arguments) or a bundle (`#bundle`, time tag, sized elements, nested bundles allowed). Arguments of type `i`, `f`, `d`, `h`, `T`/`F` give numbers (`s`, `b` and the others are read and skipped). Text frames are ignored. For example, with Node and the `ws` package:
+
+```javascript
+// bridge.mjs: WebSocket on 8080 <-> UDP (send to 57120, listen on 57121)
+import dgram from "node:dgram";
+import { WebSocketServer } from "ws";
+const udp = dgram.createSocket("udp4");
+udp.bind(57121);
+const wss = new WebSocketServer({ port: 8080 });
+wss.on("connection", (ws) => ws.on("message", (data) => udp.send(data, 57120, "127.0.0.1")));
+udp.on("message", (packet) => {
+  for (const ws of wss.clients) if (ws.readyState === 1) ws.send(packet, { binary: true });
+});
+```
 
 ### Output
 
@@ -595,7 +659,7 @@ Signals are continuous patterns. They have no events of their own; events that u
 | `.vel()`, `.ccn()`, `.ccv()`, `.pgm()`, `.midichan()` | MIDI velocity, control change, program change and channel |
 | `midiOutputs()` | Names of the available MIDI outputs |
 | `.osc(address)` | Send OSC bundles (SuperDirt `/dirt/play` format) over a WebSocket |
-| `setOscUrl(url)` | Address of the WebSocket-to-UDP bridge (default `ws://localhost:8080`) |
+| `setOscUrl(url)` | Address of the WebSocket-to-UDP bridge (default `ws://localhost:8080`), also used by `oscIn()` |
 | `record()`, `stopRecording()` | Record the audio output and download it |
 | `exportPattern(p, cycles, format)` | Download cycles of a pattern as `"json"` or `"midi"` |
 
@@ -623,7 +687,7 @@ SuperDirt-style synths:
 | `superzow` | Phasing saws | `superclap` | Synth clap |
 | `superchip` | Chiptune pulse | `superpiano` | Additive piano |
 | `superfm` | Two-operator FM | `supergong` | Gong |
-| `superstatic` | Crackle | | |
+| `superstatic` | Crackle | `superfb` | Feedback sine (SinOscFB) |
 
 `.voice()`, `.detune()`, `.semitone()`, `.rate()` and `.lfo()` change them, and `.penv()`/`.pdecay()` the pitch fall of the drums.
 
@@ -697,11 +761,13 @@ TidalJS runs in a browser and is written in JavaScript, so some things differ:
 
 The importer runs the language parts of a file, not the server, so:
 
-- A SynthDef is not run: it is read as a graph and matched to a TidalJS synth with effects. Only `superhoover` and `supergabber` are the same SynthDefs; anything else (FM networks, granular synthesis, buffers, feedback, multichannel tricks) plays the closest TidalJS sound, and the comment above the part says which.
-- JITLib (`Ndef`, `ProxySpace`), buffers and `PlayBuf`, MIDI, OSC, buses and groups, GUIs and `Pfx` effects are not converted (a note says so). Load sample banks with `samples()` for instruments that play recordings.
-- Random values drawn in code (`rrand`, `.choose`, `.scramble`, `Array.rand`), random durations and `Pshuf` keep one fixed draw. Random values in a Pbind's other keys stay random.
-- A part that never repeats (an endless `Pseries`, random durations) loops its first 16 beats; a finite pattern loops in TidalJS, as Tidal patterns do. `Pmono` plays a note per event. A synth started with `Synth(...)` that would never be released lasts until the next one.
-- Values are written with six significant digits.
+- A SynthDef is not run: it is read as a graph and matched to a TidalJS synth with effects. Only `superhoover` and `supergabber` are the same SynthDefs; two-operator FM becomes `superfm` with the same ratio and index, but larger FM networks, feedback (`LocalIn`/`LocalOut`, whose feedback is left out), granular synthesis (played as samples) and more than two channels play the closest TidalJS sound, and the comment above the part says which.
+- Effects run on each sound, as TidalJS has no buses: an effect synth on a bus becomes the effects of each part that plays into it (`lpf`, `freeverb`...), a send puts the whole sound through the effect (a reverb's mix is scaled by the send level), and when a part and its effect both have, say, a low-pass filter, the part's own is kept. A part that plays into a bus nothing reads is silent in SuperCollider and plays dry here.
+- Changes during a note follow the LFO's shape (sine, saw, triangle, square, noise) and range, or the envelope's levels, times and curves (`envelope()`). An envelope with a release node holds its sustain level, as TidalJS does not know when a note is let go. An LFO whose speed or range another LFO moves becomes a `sig()` function of time: its speed is integrated exactly for a sine, saw, triangle or square that moves it (a noise LFO, or an LFO moving the LFO that moves it, gives its average speed), and a vibrato whose speed an LFO moves becomes `.followNote("vib", ...)`.
+- Sound files must be reachable from the browser: the `samples()` call keeps the paths of the SuperCollider code, which you may need to change to URLs. Buffer lengths are not known before the files load, so a start given in frames plays from the beginning (a start given as a fraction of `BufFrames` works).
+- Live input is read where its functions change something TidalJS plays. A slider moves linearly over its range (an exponential `ControlSpec` is noted); a window's position, size, colours and fonts are left out, only its title and the order of its controls are kept. Polyphonic aftertouch that changes the held notes becomes each key's own pressure (`keytouch()` in the `midikeys` template); used for anything else, it is the pressure of the last key (`miditouch`).
+- Random durations play with `rhythm()`: the events one after another, each with a new random duration (TidalJS's random draws, not SuperCollider's; they repeat after 300 steps, as Tidal's random values repeat after 300 cycles). When rests come between the notes, eight random 4-beat stretches drawn from the SuperCollider pattern are written instead, and `randcat` picks one each cycle. Values drawn in code that runs once keep that draw, as in SuperCollider. A finite pattern loops in TidalJS, as Tidal patterns do.
+- Values are written with six significant digits; loop lengths are written as exact fractions (`.fast(8 / 3)`).
 
 ### Compared with SuperCollider and SuperDirt
 
@@ -737,7 +803,7 @@ git clone https://github.com/hexplus/tidaljs.git
 cd tidaljs
 npm install
 npm run dev        # editor with hot reload
-npm test           # engine tests (tidal.js), help checks (every help and editor example runs), library and SuperCollider importer tests
+npm test           # engine tests (tidal.js), help checks (every help and editor example runs), library, SuperCollider importer, Reference and share link tests
 npm run build      # type-check and build into dist/
 npm run lint       # SibuJS lint rules
 ```
@@ -753,22 +819,24 @@ Every push and pull request runs the engine tests, the help checks, the type-che
 | `src/main.ts`, `src/App.ts` | Mounts the app and lays out the page. |
 | `src/session.ts` | App state in signals, and audio control: play, stop, live update, recording. |
 | `src/library.ts` | The sketch library: storage (IndexedDB or localStorage), export and import. |
+| `src/share.ts` | Share links: encoding and strict decoding of `#song=...`, and the scan of shared code for risky features. No DOM; the dialogs are in `src/components/Share.ts`. |
 | `src/supercollider/` | The SuperCollider importer: lexer and parser of sclang, an interpreter that runs patterns, routines and SynthDef graphs, the SynthDef analysis, and the writer of TidalJS code. |
 | `src/engine.ts` | Loads `tidal.js` and types the parts of it the app uses. |
 | `src/components/` | Top bar (with the sketch bar), insert palette, cycle view, status line, sidebar (examples, library and reference). |
 | `src/editor/` | The code editor: highlighting, problem markers, autocomplete, tab stops, hover help. |
-| `src/data/` | Examples, insert-palette snippets, function signatures, the extended help (`docs.ts`) and the Reference content. |
+| `src/data/` | Examples, insert-palette snippets, function signatures, the extended help (`docs.ts`), the Reference content and its sections (`reference.ts`), and the Reference search (`referenceSearch.ts`, `referenceDocs.ts`). |
 | `test/engine.test.mjs` | Engine tests, run in Node with a fake audio context. |
 | `test/docs.test.mjs` | Checks the help in `src/data/docs.ts` (everything has a doc, every example runs) and plays every example of the Examples tab. |
 | `test/supercollider.test.mjs` | Tests the SuperCollider importer: the language, and conversions played in the engine and compared with what SuperCollider plays. |
 | `test/library.test.mjs` | Tests the sketch library: export and import files, merging, the localStorage store. |
+| `test/reference.test.mjs` | Tests the Reference tab's sections and search: ranking, highlight ranges, excerpts and suggestions. |
+| `test/share.test.mjs` | Tests share links: round trips, forged, damaged and oversized links (a decompression bomb too), title cleaning and the scan of risky code. |
 
 ### Areas for contribution
 
 - A visual pattern editor: draw steps on a grid and get the mini-notation
 - Recording a session (code and audio) to replay it
 - A MIDI input mapped to buses (`bus()`), like Tidal's control buses
-- Sharing a sketch as a link
 - Documentation and tutorials
 - Performance optimisations
 - Mobile browsers

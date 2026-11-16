@@ -323,6 +323,24 @@ export const DOCS: Record<string, Doc> = {
         ['setBus'],
     ),
     setBus: D('Sets the value that bus(name) reads. Run it on its own (select the line and press Ctrl+Enter) to change the sound live.', 'setBus("cut", 1200)', undefined, ['bus']),
+    slider: D(
+        'Adds a slider to the Controls panel (next to the cycle view) and returns a signal of its current value, so you can change a control with the mouse or the keyboard while the music plays. slider(name, value, min, max, step): min and max default to 0 and 1, and step 0 allows any value.',
+        'sound("saw*8").note("c2 c3").lpf(slider("cutoff", 800, 200, 4000))',
+        'Running the code again keeps where the slider is (only a new range changes it), and a slider the code no longer uses disappears. The values are remembered in this browser.',
+        ['toggle', 'bus', 'midicc'],
+    ),
+    toggle: D(
+        'Adds a switch to the Controls panel and returns a signal of 0 (off) or 1 (on). toggle(name, on) starts on when on is true. Multiply by it, or use it as a gain, to bring parts in and out.',
+        'stack([\n  sound("bd*4"),\n  sound("hh*8").gain(toggle("hats", true))\n])',
+        'As with slider, running the code again keeps the switch as it is.',
+        ['slider', 'bus'],
+    ),
+    controlLayout: D(
+        'Arranges the Controls panel like a GUI window: controlLayout(title, rows) shows a titled group whose rows are lists of slider and toggle names, side by side (they wrap on a narrow screen). Each call adds a group, in order; controls no layout names are shown after the groups.',
+        'controlLayout("Synth", [["cutoff", "res"], ["on"]])\nsound("saw*8").note("c2 c3")\n  .lpf(slider("cutoff", 800, 200, 4000))\n  .resonance(slider("res", 0.2))\n  .gain(toggle("on", true))',
+        'It is a statement of its own, before or after the pattern, and plays nothing. A name that is not a slider or toggle of the code is skipped. As with the controls, a new run replaces the layouts only if it plays.',
+        ['slider', 'toggle'],
+    ),
 
     // ---------------- Notes and harmony ----------------
     note: D(
@@ -427,13 +445,55 @@ export const DOCS: Record<string, Doc> = {
     pgm: D('Sends a MIDI program change, 0 to 127, to switch the instrument preset.', 'sound("arpy").note("c").pgm(5).midi(0)', undefined, ['midi']),
     midichan: D('The MIDI channel, 0 to 15 (channels 1 to 16 in most devices).', 'sound("arpy*2").note("c e").midi(0).midichan(9)', undefined, ['midi']),
     midiOutputs: D('Returns the names of the MIDI outputs the browser can see, for .midi(name).', 'midiOutputs()', undefined, ['midi']),
+    midicc: D(
+        'A signal of the last value of a MIDI control change (a knob or fader of a controller), from 0 to 1. midicc(cc, channel) listens to controller cc on MIDI channel 0 to 15, or on any channel when the channel is left out. Every MIDI input is listened to.',
+        'sound("saw*8").note("c2 c3").lpf(midicc(74).range(200, 4000))',
+        'The browser asks for permission to use MIDI the first time. Before the controller moves, the value is 0.',
+        ['midikeys', 'midibend', 'slider', 'range'],
+    ),
+    midibend: D(
+        'A signal of the last pitch bend (the wheel) of a MIDI controller, from -1 (down) to 1 (up), 0 in the middle. midibend(channel) listens on one MIDI channel (0 to 15), or on any channel when it is left out.',
+        'sound("supersaw").note("c2").legato(1).follow("lpf", midibend().range(300, 3000))',
+        'To bend the notes of a keyboard, give midikeys() a bend range instead. Before the wheel moves, the value is 0.',
+        ['midikeys', 'miditouch', 'midicc'],
+    ),
+    miditouch: D(
+        'A signal of the last aftertouch of a MIDI keyboard (how hard a key is pressed after it went down), from 0 to 1: channel pressure, and also the pressure of single keys (polyphonic aftertouch, the last one of any key). miditouch(channel) listens on one MIDI channel, or on any.',
+        'sound("supersaw").note("c2").legato(1).follow("gain", miditouch().range(0.7, 1.1))',
+        'Before a key is pressed, the value is 0. In a midikeys() template, a note keeps its own value until pressure comes after its key went down. For the pressure of each key on its own note, use keytouch() in a midikeys() template.',
+        ['keytouch', 'midibend', 'midikeys', 'midicc'],
+    ),
+    keytouch: D(
+        'A signal of the pressure of one key (polyphonic aftertouch), from 0 to 1, for use in a midikeys() template: each held key reads its own pressure, so pressing one key harder changes only its note. Outside a midikeys() voice it is 0.',
+        'midikeys(sound("supersaw").follow("amp", keytouch().range(0.1, 0.4)))',
+        'Until its key is pressed harder, a note keeps its own value (the template\'s, or its velocity\'s amp); each new press starts again. With follow(), the note changes while the key is held.',
+        ['miditouch', 'midikeys', 'follow'],
+    ),
+    midikeys: D(
+        'Plays a MIDI keyboard: each key pressed plays the sound and controls of the template (its first event in the current cycle), with the key as note and amp scaled by how hard it is played, and holds the note until the key is let go. midikeys(template, channel, bendRange) listens on one MIDI channel (0 to 15), or on all of them when the channel is left out or null; with a bend range (in semitones) the pitch-bend wheel bends the held keys by up to that much. It returns silence, so it can sit in a stack.',
+        'stack([\n  midikeys(sound("superpiano").amp(0.3).lpf(3000), null, 2),\n  sound("bd*4")\n])',
+        'amp is the template\'s amp (or the synth\'s default) times velocity / 127. A key pressed while the wheel is off centre starts bent; samples do not bend. The browser asks for permission to use MIDI the first time.',
+        ['midicc', 'midibend', 'midi', 'amp'],
+    ),
     osc: D(
         'Sends each event as an OSC message through a WebSocket bridge, for example to SuperDirt (the sound engine of TidalCycles) or other music software. The default address is /dirt/play.',
         'sound("bd sn").osc()',
         'Set the bridge with setOscUrl() first.',
         ['setOscUrl', 'midi'],
     ),
-    setOscUrl: D('Sets the WebSocket URL of the OSC bridge that .osc() sends to.', 'setOscUrl("ws://localhost:8080")', undefined, ['osc']),
+    setOscUrl: D('Sets the WebSocket URL of the OSC bridge that .osc() sends to and oscIn() listens on.', 'setOscUrl("ws://localhost:8080")', undefined, ['osc', 'oscIn']),
+    oscIn: D(
+        'A signal of the last number received on an OSC address, from apps such as TouchOSC or Open Stage Control. oscIn(address, index) reads argument index (0 by default) of the messages (or bundles) the OSC bridge passes on from UDP.',
+        'sound("saw*8").note("c2 c3").lpf(oscIn("/fader1").range(200, 4000))',
+        'It connects to the bridge set with setOscUrl(); the bridge must send the OSC packets it receives back as binary WebSocket messages (see the README). Before a message arrives, the value is 0.',
+        ['setOscUrl', 'oscplay', 'osc', 'midicc'],
+    ),
+    oscplay: D(
+        'Plays a note for each OSC message on an address, as midikeys() does for each key: oscplay(address, template) plays the template\'s first event of the current cycle once, at its own length (legato and sustain work as usual). The message\'s numbers are kept first, so oscIn() of the same address in the template reads that very message. It returns silence, so it can sit in a stack.',
+        'stack([\n  oscplay("/hit", sound("superpiano").freq(oscIn("/hit", 1).range(200, 800)).legato(1)),\n  sound("bd*4")\n])',
+        'It listens through the bridge set with setOscUrl(), as oscIn() does.',
+        ['oscIn', 'midikeys', 'setOscUrl'],
+    ),
     record: D('Starts recording the audio output, like the Record button.', 'record()', undefined, ['stopRecording']),
     stopRecording: D('Stops recording and downloads the audio file.', 'stopRecording()', undefined, ['record']),
     exportPattern: D(
@@ -813,6 +873,30 @@ Object.assign(DOCS, {
         'It replaces penv and a synth\'s own pitch sweep. It is set when the code runs, so it cannot be a pattern.',
         ['penv', 'accelerate', 'portamento'],
     ),
+    follow: D(
+        'Changes a control while each note sounds, from its start through its release, instead of setting it once at the start: the signal is read at the cycle each moment falls on, so sine.range(200, 2000).slow(4) sweeps the filter inside long notes too. It works on lpf, hpf and bpf (cutoffs), resonance, hpq and bpq, pan, gain and amp, the peak equaliser (peak, peakq, peakgain), djf, tremolorate and tremolodepth, phaserrate and phaserdepth, ring and ringf, leslie, lrate and lsize, vib (the speed of a vibrato), and the pitch: freq, note and speed (relative to the note, so they add to portamento and vibrato). The signal\'s value at the start replaces the control\'s own.',
+        'sound("supersaw").note("<c2 eb2>").legato(1).follow("lpf", sine.range(300, 3000).fast(2))',
+        'Chain several: .follow("lpf", a).follow("pan", b); the last one for a control wins. A followed cutoff replaces its filter envelope (lpenv...). A signal of a live input (slider, toggle, midicc, midibend, miditouch, oscIn, bus) changes the notes already sounding when it moves. MIDI and OSC get the value at the start.',
+        ['followNote', 'lpf', 'range'],
+    ),
+    followNote: D(
+        'Like follow(), with the signal\'s time starting at 0 when each note starts (counted in cycles), so an LFO restarts with every note, as an LFO inside a SuperCollider synth does.',
+        'sound("saw").note("c3 g3").legato(1).followNote("pan", sine.range(-1, 1).fast(4))',
+        'For a rate in Hz, speed the signal up by the rate over the tempo: sine.fast(5 / getcps()) turns 5 times a second. envelope() gives a breakpoint envelope in seconds that starts again with each note.',
+        ['follow', 'envelope', 'pan'],
+    ),
+    envelope: D(
+        'A signal shaped like SuperCollider\'s Env(levels, times, curves): the levels, the times in seconds between them, and the curve of each segment (0 or "lin" straight, a number as in SuperCollider, "exp", "step", "hold", "sin", "wel", "sqr" or "cub"; one curve, or a list with one per segment). Before 0 it is the first level, after the last segment the last one; cycle t is read at t / cps seconds.',
+        'sound("supersaw").note("c2 g2").legato(1)\n  .followNote("lpf", envelope([200, 4000, 300], [0.01, 0.4], -4))',
+        'With followNote() it starts again with each note; with follow() it runs from cycle 0, so .late() moves it: follow("pan", envelope([-1, 1], [8]).late(2)). "exp" needs levels of one sign and not 0 (else it is straight).',
+        ['followNote', 'follow', 'pitchenv'],
+    ),
+    rhythm: D(
+        'Plays the pattern one step at a time from cycle 0, never looping: each step starts where the one before ends, lasts the value of durations (a number or any pattern or signal, read at the step\'s number: step k at cycle k) in cycles, and plays what the pattern plays at cycle k (every event, so a chord stays a chord; a rest is a silent step).',
+        'note("c4 e4 g4").slow(3).s("superpiano").rhythm(choose([0.25, 0.5]))',
+        'Like a SuperCollider Pbind with a random \\dur. Steps last at least 1/256 cycle; the first two million are kept. The step lengths are worked out once, so a slider in durations only changes steps not reached yet.',
+        ['segment', 'choose', 'legato'],
+    ),
     sig: D('Tidal\'s sig: a signal from a function of time in cycles, sampled at the start of each event.', 'sound("arpy*8").pan(sig(t => Math.sin(t * Math.PI)))', undefined, ['sine', 'saw']),
     perlinWith: D('Tidal\'s perlinWith: Perlin noise (0 to 1) driven by another pattern instead of time, so the noise can move faster or slower.', 'sound("hh*8").gain(perlinWith(saw.mul(4)))', undefined, ['perlin', 'perlin2']),
     perlin2: D('Tidal\'s perlin2: two-dimensional Perlin noise (0 to 1), moving with time along one axis and with the given pattern along the other.', 'sound("arpy*8").pan(perlin2(sine.mul(4)))', undefined, ['perlin', 'perlin2With']),
@@ -841,6 +925,12 @@ Object.assign(DOCS, {
     vibmod: D('The depth of the vibrato in semitones each way (up to 48, four octaves: a slow vib with a large vibmod is a siren-like sweep). Has an effect together with vib().', 'sound("saw").note("c3").legato(1).vib(6).vibmod("<0.2 1>")', undefined, ['vib']),
     portamento: D('Glides into each note from the previous note of the same sound (in the same orbit), over this many seconds.', 'sound("supersaw*4").note("c3 c4 g3 eb4").legato(1).portamento(0.08)', 'Notes keep their own voices, so long overlapping notes play together while the new one glides.', ['pitchenv']),
     glide: D('The same as portamento().', undefined, undefined, ['portamento']),
+    tie: D(
+        'A monophonic slur, as SuperCollider\'s Pmono or synth.set(): an event whose tie equals that of a synth voice still sounding (same sound and orbit) starts no new voice. The running voice takes the new pitch (gliding over portamento seconds, if set), its filters, pan, gain, effects (shape, crush, distort, vowel, tremolo, phaser, ring, leslie, vibrato, the peak equaliser, djf...), the synth\'s own detune, voice, rate, lfo and semitone, and the orbit\'s delay and reverb, and lasts until the new event ends, with no new attack. With no voice sounding, a new one starts.',
+        'sound("supersaw*4").note("c3 eb3 g3 bb3").legato(1).lpf("400 800 1600 3200").tie(1).portamento(0.05)',
+        'Give the notes overlapping or touching lengths (legato 1) so the voice is still sounding. Controls an event leaves out keep their value. Fixed for the voice: the attack, decay and sustain level, filter and pitch envelopes, accelerate, begin, end and loop, and the AudioWorklet effects (coarse, squiz...) it started without. Notes with different ties are separate voices; samples ignore tie.',
+        ['portamento', 'legato', 'mono'],
+    ),
 
     // The peak equaliser
     peak: D('A peak (bell) equaliser around this frequency in Hz: peakgain boosts it (or cuts it, when negative) and peakq sets how narrow the band is.', 'sound("supersaw*4").note("c2").peak(sine.range(200, 3000).slow(4)).peakgain(15).peakq(2)', 'Like SuperCollider\'s BPeakEQ; its rq is 1 / peakq.', ['peakgain', 'peakq', 'peakenv']),
@@ -848,7 +938,7 @@ Object.assign(DOCS, {
     peakgain: D('How much the peak equaliser boosts its band, in dB (negative values cut it). Default 6.', 'sound("saw*4").note("c2").peak(1500).peakgain("<12 -12>")', undefined, ['peak']),
 
     // Synth parameters
-    voice: D('A timbre parameter of the SuperDirt-style synths, 0 to 1: the side voices of supersaw, the pulse width of superchip, the brightness of superfm, superpiano and supergong, the click of superkick, the density of superstatic.', 'sound("superfm*4").note("c3 e3").voice("<0.1 0.6>")', undefined, ['detune', 'supersaw']),
+    voice: D('A timbre parameter of the SuperDirt-style synths, 0 to 1: the side voices of supersaw, the pulse width of superchip, the brightness of superfm, superpiano and supergong, the feedback of superfb, the click of superkick, the density of superstatic.', 'sound("superfm*4").note("c3 e3").voice("<0.1 0.6>")', undefined, ['detune', 'supersaw']),
     detune: D('How far the voices of a SuperDirt-style synth are detuned, in semitones (supersaw, supersquare, superreese, superzow, superpwm, superhoover).', 'sound("supersaw").note("c3").legato(1).detune("<0.05 0.5>")', undefined, ['voice']),
     semitone: D('The interval of superfm\'s modulator above the note, in semitones (12 by default, an octave).', 'sound("superfm*4").note("c3").semitone("<12 7 19>")', undefined, ['voice']),
     rate: D('The speed of a SuperDirt-style synth\'s modulation in Hz: the pulse-width sweep of superpwm, the phasing of superzow, the vibrato of superchip.', 'sound("superpwm").note("c3").legato(1).rate("<0.5 4>")', undefined, ['lfo']),
@@ -935,7 +1025,7 @@ Object.assign(DOCS, {
 
 // Tidal's *Take controls: one for every numeric control (nTake has its own entry).
 for (const name of CONTROL_NAMES) {
-    if (['s', 'sound', 'vowel', 'unit', 'nrpn', 'n'].includes(name)) continue;
+    if (['s', 'sound', 'vowel', 'unit', 'nrpn', 'n', 'tie'].includes(name)) continue;
     DOCS[name + 'Take'] = D(
         `Tidal's ${name}Take: each played event takes the next value of the list as its ${name}, counted under the name across cycles and code changes.`,
         undefined,
@@ -993,6 +1083,7 @@ export const SOUND_DOCS: Record<string, Doc> = {
     superzow: D('Phasing saws that sweep (rate, lfo), with a small rise in pitch at the start.', 'sound("superzow*2").note("c3 g3").legato(1)', undefined, ['rate', 'lfo']),
     superchip: D('A chiptune pulse wave: voice sets the pulse width, rate and lfo a vibrato.', 'sound("superchip*8").note("c4 e4 g4 c5").voice("<0.125 0.5>")', undefined, ['voice']),
     superfm: D('Two-operator FM: bright bells, basses and electric pianos. voice is the modulation index, semitone the modulator\'s interval above the note.', 'sound("superfm*4").note("c3 e3 g3 b3").voice(0.4).semitone(12)', undefined, ['voice', 'semitone']),
+    superfb: D('A feedback sine, as SuperCollider\'s SinOscFB: the sine\'s phase is pushed by its own output, so voice turns it from a pure sine (0) through brighter tones to a saw-like buzz (1, a feedback of 1.5).', 'sound("superfb*4").note("c2 c3 g2 bb2").legato(0.9).voice("<0 0.4 0.8 1>")', 'It is computed sample by sample in an AudioWorklet; where that is not available it plays a sine.', ['superfm', 'voice', 'sine']),
     superstatic: D('Crackle: random clicks through a band-pass at the note\'s frequency; voice sets how many.', 'sound("superstatic").legato(1).voice(0.3)', undefined, ['noise']),
     superpiano: D('An additive piano: stretched partials that fade, the higher ones faster, with a hammer thump. voice sets the brightness.', 'sound("superpiano").note("<c4\'maj e4\'min>").voice(0.6)', undefined, ['arpy']),
     supergong: D('A gong: inharmonic partials beating slowly, with a long decay. voice sets the brightness.', 'sound("supergong").note("c3").slow(2)', undefined, ['superfm']),

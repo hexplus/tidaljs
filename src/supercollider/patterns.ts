@@ -164,7 +164,7 @@ export class Pshuf extends Pattern {
     this.repeats = repeats;
   }
   *embed(inval: Value, ctx: Ctx): Gen {
-    ctx.host.note("Pshuf shuffles its list once, at random: this is one shuffle, fixed.");
+    // As SuperCollider: one shuffle each time the pattern starts (the emitter turns Pn(Pshuf(...)) into shuffle).
     const order = this.items.slice();
     for (let i = order.length - 1; i > 0; i--) {
       const j = Math.floor(ctx.host.rng() * (i + 1));
@@ -699,6 +699,63 @@ export class Pfin extends Pattern {
   }
 }
 
+/** Pconst(sum, pattern): values that add up to sum; the last one is cut to fit. */
+export class Pconst extends Pattern {
+  readonly name = "Pconst";
+  sum: number;
+  pattern: Value;
+  tolerance: number;
+  constructor(sum: number, pattern: Value, tolerance = 0.001) {
+    super();
+    this.sum = sum;
+    this.pattern = pattern;
+    this.tolerance = tolerance;
+  }
+  *embed(inval: Value, ctx: Ctx): Gen {
+    const s = new Stream(this.pattern, ctx);
+    let total = 0;
+    for (;;) {
+      const v = s.next(inval);
+      if (v === DONE || typeof v !== "number") {
+        // As SuperCollider: a stream that ends early is padded to the sum.
+        if (this.sum - total > this.tolerance) inval = yield this.sum - total;
+        return inval;
+      }
+      if (total + v >= this.sum - this.tolerance) {
+        inval = yield this.sum - total;
+        return inval;
+      }
+      total += v;
+      inval = yield v;
+    }
+  }
+}
+
+/** Pfx and Pfxb: the events of a pattern go through an effect synth (it reads its input with In.ar). */
+export class Pfx extends Pattern {
+  readonly name: string;
+  pattern: Value;
+  fx: Value;
+  constructor(name: string, pattern: Value, fx: Value) {
+    super();
+    this.name = name;
+    this.pattern = pattern;
+    this.fx = fx;
+  }
+  *embed(inval: Value, ctx: Ctx): Gen {
+    const s = new Stream(this.pattern, ctx);
+    for (;;) {
+      const ev = s.next(inval);
+      if (ev === DONE) return inval;
+      if (!(ev instanceof SCEvent)) { inval = yield ev; continue; }
+      const out = ev.copy();
+      const before = out.get("__fx");
+      out.set("__fx", [...(Array.isArray(before) ? before : []), this.fx]);
+      inval = yield out;
+    }
+  }
+}
+
 export class Pif extends Pattern {
   readonly name = "Pif";
   cond: Value;
@@ -776,7 +833,13 @@ export class Pbind extends Pattern {
         }
         const name = key instanceof Sym ? key.name : String(key);
         if (v instanceof RandToken && FIXED_KEYS.has(name)) {
-          ctx.host.note("A random " + name + " is drawn once: TidalJS repeats one draw of it.");
+          if (name === "dur" || name === "delta" || name === "stretch") {
+            ev.set("__randtime", true);
+            // The random duration itself, for TidalJS's rhythm().
+            ev.set(name === "stretch" ? "__stretchtoken" : "__durtoken", v);
+          }
+          else if (!["slider", "toggle", "midicc", "oscin"].includes(v.kind)) ctx.host.note("A random " + name + " is drawn for each event.");
+          else ctx.host.note("A live " + name + " (a slider, MIDI or OSC value) takes its starting value: TidalJS's rhythm cannot follow it.");
           v = v.realize(ctx.host.rng);
         }
         ev.set(name, v);

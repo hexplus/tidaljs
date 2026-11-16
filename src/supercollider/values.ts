@@ -37,6 +37,7 @@ export class SCEvent {
     this.map = new Map(entries ?? []);
   }
   get(key: string): Value | undefined { return this.map.get(key); }
+  delete(key: string) { this.map.delete(key); }
   has(key: string) { return this.map.has(key); }
   set(key: string, value: Value) { this.map.set(key, value); }
   copy() { return new SCEvent(this.map); }
@@ -136,10 +137,143 @@ export class SynthDefV {
   name: string;
   fn: SCFunc | null;
   line: number;
-  constructor(name: string, fn: SCFunc | null, line: number) {
+  /** A JITLib filter (\filter -> { |in| ... }): its first argument is the input signal. */
+  filter: boolean;
+  constructor(name: string, fn: SCFunc | null, line: number, filter = false) {
     this.name = name;
     this.fn = fn;
     this.line = line;
+    this.filter = filter;
+  }
+}
+
+/** A bus: Bus.audio or Bus.control. A control bus can hold a value (bus.set) or be written by a synth. */
+export class BusV {
+  rate: "audio" | "control";
+  index: number;
+  channels: number;
+  value: Value;
+  constructor(rate: BusV["rate"], index: number, channels: number) {
+    this.rate = rate;
+    this.index = index;
+    this.channels = channels;
+    this.value = null;
+  }
+}
+
+/** A buffer: Buffer.read (a sound file, which becomes a TidalJS sample bank) or Buffer.alloc. */
+export class BufferV {
+  path: string | null;
+  bufnum: number;
+  bank: string;
+  constructor(path: string | null, bufnum: number, bank: string) {
+    this.path = path;
+    this.bufnum = bufnum;
+    this.bank = bank;
+  }
+}
+
+/** A JITLib proxy (Ndef, or ~x in a ProxySpace): its source, filters, settings and whether it plays. */
+export class ProxyV {
+  key: string;
+  /** Source slots: 0 is the source; other slots add layers (proxy[1] = { ... }). */
+  slots = new Map<number, Value>();
+  /** Filter slots: index -> the filter's function. */
+  filters = new Map<number, SCFunc>();
+  /** proxy.set(\key, value) and map: arguments of its synth. */
+  settings = new Map<string, Value>();
+  playing = false;
+  line = 0;
+  constructor(key: string) {
+    this.key = key;
+  }
+  get source(): Value {
+    return this.slots.get(0) ?? null;
+  }
+}
+
+/** A GUI control (Slider, Knob, Button, EZSlider...): it becomes a TidalJS slider or toggle. */
+export class WidgetV {
+  kind: "slider" | "toggle";
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  exp: boolean;
+  action: SCFunc | null = null;
+  line: number;
+  /** Set when the label was given (EZSlider's label, a StaticText next to it, a Button's state): kept by a layout's StaticText otherwise. */
+  named = false;
+  /** Its window (a GUI window's controls become one group of the Controls panel), and where it sits in it. */
+  window: WindowV | null = null;
+  bounds: [number, number, number, number] | null = null;
+  /** A slider's step (PopUpMenu, a Button with several states: 1); 0 moves freely. */
+  step = 0;
+  /** Slider2D and RangeSlider: the second slider (y, or the high end), read with .y or .hi. */
+  pair: WidgetV | null = null;
+  constructor(kind: WidgetV["kind"], label: string, value: number, min: number, max: number, exp: boolean, line: number) {
+    this.kind = kind;
+    this.label = label;
+    this.value = value;
+    this.min = min;
+    this.max = max;
+    this.exp = exp;
+    this.line = line;
+  }
+}
+
+/** A GUI window (Window, View): its title, and how its controls are laid out (rows of controls and labels). */
+export class WindowV {
+  title: string;
+  /** A layout given with .layout_ (HLayout, VLayout, GridLayout): nested rows and columns. */
+  layout: LayoutV | null = null;
+  /** Controls placed in it with bounds (Slider(w, Rect(...))), in order. */
+  children: (WidgetV | TextV | WindowV)[] = [];
+  /** A View inside a window: its window, and where it sits. */
+  parent: WindowV | null = null;
+  bounds: [number, number, number, number] | null = null;
+  line: number;
+  constructor(title: string, line: number) {
+    this.title = title;
+    this.line = line;
+  }
+}
+
+/** HLayout(...), VLayout(...), GridLayout.rows(...): its items (controls, labels, nested layouts, nil for space). */
+export class LayoutV {
+  kind: "h" | "v" | "grid";
+  items: Value[];
+  constructor(kind: LayoutV["kind"], items: Value[]) {
+    this.kind = kind;
+    this.items = items;
+  }
+}
+
+/** A StaticText: a label. */
+export class TextV {
+  text: string;
+  bounds: [number, number, number, number] | null = null;
+  window: WindowV | null = null;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
+/** A MIDI output: MIDIOut(0) or MIDIOut.newByName(device, port). */
+export class MidiOutV {
+  selector: number | string;
+  constructor(selector: number | string) {
+    this.selector = selector;
+  }
+}
+
+/** An OSC address: NetAddr(host, port). */
+export class NetAddrV {
+  host: string;
+  port: number;
+  constructor(host: string, port: number) {
+    this.host = host;
+    this.port = port;
   }
 }
 
@@ -157,6 +291,8 @@ export class RoutineV {
 export class SynthV {
   name: string;
   args: SCEvent;
+  /** The event it played (to end it on release or free), when it plays in a routine. */
+  played: SCEvent | null = null;
   constructor(name: string, args: SCEvent) {
     this.name = name;
     this.args = args;
@@ -169,7 +305,11 @@ export class SynthV {
  * are recorded as a JavaScript function of x.
  */
 export class RandToken {
-  kind: "white" | "iwhite" | "exp" | "choose" | "wchoose";
+  /**
+   * Random kinds become TidalJS random signals; the input kinds read what the player does live:
+   * slider and toggle (GUI controls), midicc, midinote, midivel, midibend, miditouch and keytouch (MIDI input), oscin (OSC input).
+   */
+  kind: "white" | "iwhite" | "exp" | "choose" | "wchoose" | "slider" | "toggle" | "midicc" | "midinote" | "midivel" | "midibend" | "miditouch" | "keytouch" | "oscin";
   args: Value[];
   /** Operators applied to the value; `lin` is [a, b] when the operator is a * x + b. */
   ops: { fn: (x: number) => number; js: string; lin?: [number, number] }[];
@@ -207,8 +347,23 @@ export class RandToken {
         v = list[k];
         break;
       }
+      // Live inputs: their starting value.
+      case "slider": v = a[1] as number; break;
+      case "toggle": v = a[1] === true || a[1] === 1 ? 1 : 0; break;
+      case "midicc": v = 0; break;
+      case "midinote": v = 60; break;
+      case "midivel": v = 127; break;
+      case "midibend": v = 8192; break;
+      case "miditouch": case "keytouch": v = 0; break;
+      case "oscin": v = 0; break;
     }
     for (const op of this.ops) if (typeof v === "number") v = op.fn(v);
+    return v;
+  }
+  /** Its operators applied to an input value (what a live input gives at x). */
+  at(x: number): number {
+    let v = x;
+    for (const op of this.ops) v = op.fn(v);
     return v;
   }
 }
@@ -217,6 +372,7 @@ export type Value =
   | number | string | boolean | null
   | Sym | Value[] | SCFunc | SCEvent | SCClass | RestV | ClockV | ScaleV | Opaque | Assoc
   | GNode | EnvSpec | SynthDefV | RoutineV | SynthV | RandToken
+  | BusV | BufferV | ProxyV | MidiOutV | NetAddrV | WidgetV | WindowV | LayoutV | TextV
   | PatternLike;
 
 /** Patterns implement this (see patterns.ts). */

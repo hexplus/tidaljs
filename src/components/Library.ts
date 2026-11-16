@@ -4,7 +4,9 @@ import {
   type Sketch, type StorageKind, type Store,
 } from "../library.ts";
 import { confirmDialog } from "./ConfirmDialog.ts";
+import { DEFAULT_CODE, EXAMPLES } from "../data/examples.ts";
 import type { Session } from "../session.ts";
+import type { SharedSong } from "../share.ts";
 
 export type Library = ReturnType<typeof createLibrary>;
 
@@ -119,6 +121,31 @@ export function createLibrary(session: Session) {
     }
   }
 
+  /**
+   * Opens a song from a shared link in the editor, as a new unsaved sketch.
+   * Asks first when that would lose code nobody saved: not for an empty
+   * editor, the starting code or an unchanged example. Never saves anything.
+   * Resolves false when the person keeps their code.
+   */
+  async function openShared(song: SharedSong): Promise<boolean> {
+    const text = editor.getValue();
+    const replaceable = !text.trim() || text === DEFAULT_CODE || EXAMPLES.some((e) => e.code === text);
+    if (dirty() && !replaceable) {
+      const sure = await confirmDialog({
+        title: "Replace the code in the editor?",
+        message: 'The code in the editor is not saved. Opening "' + song.title + '" replaces it, and your code will be lost. Save it first if you want to keep it.',
+        confirmText: "Replace it",
+        cancelText: "Keep my code",
+        danger: true,
+      });
+      if (!sure) return false;
+    }
+    setCurrent(null);
+    setTitle(song.title);
+    session.openSharedCode(song.code, song.title, song.cps);
+    return true;
+  }
+
   /** Starts an empty sketch. */
   async function newSketch() {
     if (dirty() && editor.getValue().trim() && !(await discardChanges("Start a new sketch?", "Discard and start"))) return;
@@ -191,7 +218,7 @@ export function createLibrary(session: Session) {
 
   return {
     sketches, current, title, setTitle, kind, dirty,
-    save, open, rename, remove, newSketch, exportCurrent, exportAll, importFile, chooseFile,
+    save, open, openShared, rename, remove, newSketch, exportCurrent, exportAll, importFile, chooseFile,
     chooseSuperCollider: () => chooseFile(".scd,.sc,.txt,text/plain"),
   };
 }

@@ -7,18 +7,26 @@
  */
 import type { Node } from "./parser.ts";
 import {
-  DONE, Pattern, Pdraw, Pbind, Pbinop, Pbjorklund, Pbrown, Pchain, Pcollect, PdefRef, Pdup, Pfin, Pfindur, Pfunc,
-  Pif, Pkey, Plazy, Plist, Pmath, Pn, Ppar, Ppatlace, Place, Prand, Pseg, Pseq, Pser, Pseries, Pshuf, Pslide, Pswitch,
-  Psync, Punop, Pwhite, Stream, mod, type Host,
+  DONE, Pattern, Pdraw, Pbind, Pbinop, Pbjorklund, Pbrown, Pchain, Pcollect, Pconst, PdefRef, Pdup, Pfin, Pfindur,
+  Pfunc, Pfx, Pif, Pkey, Plazy, Plist, Pmath, Pn, Ppar, Ppatlace, Place, Prand, Pseg, Pseq, Pser, Pseries, Pshuf, Pslide,
+  Pswitch, Psync, Punop, Pwhite, Stream, mod, type Host,
 } from "./patterns.ts";
 import {
-  Assoc, ClockV, EnvSpec, GNode, Opaque, RandToken, RestV, RoutineV, SCClass, SCEvent, SCFunc, ScaleV, Scope, Sym,
-  SynthDefV, SynthV, describe, isPattern, seededRandom, type Value,
+  Assoc, BufferV, BusV, ClockV, EnvSpec, GNode, MidiOutV, NetAddrV, Opaque, ProxyV, RandToken, RestV, RoutineV, SCClass,
+  SCEvent, SCFunc, ScaleV, Scope, Sym, SynthDefV, SynthV, WidgetV, WindowV, LayoutV, TextV, describe, isPattern, seededRandom, type Value,
 } from "./values.ts";
+
+/** A SynthDef's graph: its main output, its controls, and every Out with its bus. */
+export interface Graph {
+  output: Value;
+  controls: Map<string, GNode>;
+  outs: { bus: Value; channels: Value }[];
+  mainBus: Value;
+}
 
 /** Something the program plays. */
 export interface PlayRecord {
-  kind: "pattern" | "routine" | "synth" | "event";
+  kind: "pattern" | "routine" | "synth" | "event" | "midikeys" | "oscplay";
   pattern?: Value;
   routine?: RoutineV;
   synth?: SynthV;
@@ -27,6 +35,12 @@ export interface PlayRecord {
   start: number;
   /** A routine that loops forever (it ran until the horizon). */
   endless?: boolean;
+  /** midikeys: the MIDI channel its notes come from (null: any). */
+  channel?: number | null;
+  /** midikeys: how far the pitch-bend wheel bends the held notes, in semitones (0: not at all). */
+  bendRange?: number;
+  /** oscplay: the OSC address whose messages start the synth. */
+  path?: string;
   clock: ClockV;
   line: number;
   label: string;
@@ -171,12 +185,31 @@ export const UGEN_INPUTS: Record<string, string[]> = {
   DelayC: ["in", "maxdelaytime", "delaytime", "mul", "add"], Pan2: ["in", "pos", "level"], LinPan2: ["in", "pos", "level"],
   Balance2: ["left", "right", "pos", "level"], Splay: ["inArray", "spread", "level", "center", "levelComp"], Out: ["bus", "channelsArray"],
   OffsetOut: ["bus", "channelsArray"], ReplaceOut: ["bus", "channelsArray"], Line: ["start", "end", "dur", "mul", "add", "doneAction"],
-  XLine: ["start", "end", "dur", "mul", "add", "doneAction"], EnvGen: ["envelope", "gate", "levelScale", "levelBias", "timeScale", "doneAction"],
+  XLine: ["start", "end", "dur", "mul", "add", "doneAction"],
+  MouseX: ["minval", "maxval", "warp", "lag"], MouseY: ["minval", "maxval", "warp", "lag"], MouseButton: ["minval", "maxval", "lag"],
+  EnvGen: ["envelope", "gate", "levelScale", "levelBias", "timeScale", "doneAction"],
   Decay: ["in", "decayTime", "mul", "add"], Decay2: ["in", "attackTime", "decayTime", "mul", "add"], Lag: ["in", "lagTime", "mul", "add"],
   Klank: ["specificationsArrayRef", "input", "freqscale", "freqoffset", "decayscale"], Formant: ["fundfreq", "formfreq", "bwfreq", "mul", "add"],
   Decimator: ["in", "rate", "bits", "mul", "add"], PlayBuf: ["numChannels", "bufnum", "rate", "trigger", "startPos", "loop", "doneAction"],
   Rand: ["lo", "hi"], ExpRand: ["lo", "hi"], IRand: ["lo", "hi"], TRand: ["lo", "hi", "trig"], Mix: ["array"],
+  In: ["bus", "numChannels"], InFeedback: ["bus", "numChannels"], LocalIn: ["numChannels", "default"], LocalOut: ["channelsArray"],
+  XFade2: ["inA", "inB", "pan", "level"], LinXFade2: ["inA", "inB", "pan", "level"],
+  SinOscFB: ["freq", "feedback", "mul", "add"], BufFrames: ["bufnum"], BufDur: ["bufnum"], BufSamples: ["bufnum"],
+  GrainSin: ["numChannels", "trigger", "dur", "freq", "pan", "envbufnum", "maxGrains", "mul", "add"],
+  GrainFM: ["numChannels", "trigger", "dur", "carfreq", "modfreq", "index", "pan", "envbufnum", "maxGrains", "mul", "add"],
+  GrainBuf: ["numChannels", "trigger", "dur", "sndbuf", "rate", "pos", "interp", "pan", "envbufnum", "maxGrains", "mul", "add"],
+  TGrains: ["numChannels", "trigger", "bufnum", "rate", "centerPos", "dur", "pan", "amp", "interp"],
+  Warp1: ["numChannels", "bufnum", "pointer", "freqScale", "windowSize", "envbufnum", "overlaps", "windowRandRatio", "interp", "mul", "add"],
+  BufRd: ["numChannels", "bufnum", "phase", "loop", "interpolation"],
 };
+
+/** GUI classes: they make no sound, so they are left out (their values keep their starting values). */
+const GUI_CLASSES = new Set([
+  "Window", "Slider", "Knob", "Button", "View", "CompositeView", "UserView", "EZSlider", "EZKnob", "EZNumber", "NumberBox",
+  "StaticText", "TextField", "Slider2D", "RangeSlider", "MultiSliderView", "PopUpMenu", "ListView", "CheckBox", "FreqScope",
+  "Stethoscope", "ServerMeter", "ServerMeterView", "HLayout", "VLayout", "GridLayout", "QWindow", "SCWindow", "Pen",
+  "Color", "Font", "Rect", "Point", "LevelIndicator", "EnvelopeView", "SoundFileView", "ScopeView", "QtGUI", "GUI",
+]);
 
 const PATTERN_CLASSES = new Set([
   "Pseq", "Pser", "Prand", "Pxrand", "Pwrand", "Pshuf", "Pwhite", "Pexprand", "Pbrown", "Pgbrown", "Pseries", "Pgeom", "Pn", "Pdup",
@@ -205,8 +238,41 @@ export class Interpreter implements Host {
   private collecting: Value[] | null = null;
   /** Whether the bounds of the Pwhite being made were written as floats (1.0), as SuperCollider tells. */
   private floatArgs = false;
-  /** While a SynthDef's function runs: the outputs it writes. */
-  private graph: { outputs: Value[] } | null = null;
+  /** While a SynthDef's function runs: the outputs it writes (and to which bus). */
+  private graph: { outputs: { bus: Value; channels: Value }[] } | null = null;
+  /** Buses (audio buses after the 16 hardware channels) and buffers. */
+  readonly buses: BusV[] = [];
+  private audioBuses = 16;
+  private controlBuses = 0;
+  readonly buffers: BufferV[] = [];
+  /** JITLib proxies (Ndef, NodeProxy, ~x in a ProxySpace) and Tdefs. */
+  readonly proxies = new Map<string, ProxyV>();
+  private proxySpace = false;
+  private readonly tdefs = new Map<string, Value>();
+  /** Synths started from code: the event each one plays, to end it on release, free or set(\gate, 0). */
+  private readonly synthPlays = new Map<SynthV, { ev: SCEvent; time: number; inRoutine: boolean; line: number }>();
+  /** MIDI notes started with noteOn in a routine and not ended yet. */
+  private readonly midiNotes = new Map<string, { ev: SCEvent; time: number }>();
+  /** True while patterns are played for the conversion: random values in code stay random there. */
+  inPattern = false;
+  /** GUI controls, and the functions MIDI and OSC input call. */
+  private readonly widgets: WidgetV[] = [];
+  private readonly inputs: { kind: "cc" | "noteOn" | "bend" | "touch" | "polytouch" | "osc"; fn: SCFunc; num: Value; chan: Value; path: string; line: number; order?: string }[] = [];
+  /** GUI windows and views: their controls become groups of the Controls panel (controlLayout). */
+  readonly windows: WindowV[] = [];
+  /** Slider2D and RangeSlider: the words after the label of their two sliders. */
+  private readonly pairParts = new WeakMap<WidgetV, [string, string]>();
+  /** While a MIDI note function runs for the conversion: the synths it starts (they become midikeys). */
+  private capture: SynthV[] | null = null;
+  /** The synths MIDI note functions start (midikeys), and while a pitch-bend function runs, how far it bends them. */
+  private keySynths = new Set<SynthV>();
+  private bendSeen: number[] | null = null;
+  /** The synth a note function keeps, and the copy of it that becomes the midikeys template. */
+  private keyCopies = new Map<SynthV, SynthV>();
+  /** While a polyphonic aftertouch function runs: whether it changed the held notes (each key's own pressure). */
+  private polyTouch: { keys: boolean } | null = null;
+  /** Synths in routines get a tie id (1 to 8), so a synth that changes (synth.set) continues its note. */
+  private tieCount = 0;
 
   note(text: string) {
     this.notes.add(text);
@@ -230,6 +296,8 @@ export class Interpreter implements Host {
         this.note("Line " + node.line + " could not be run: " + (err instanceof Error ? err.message : String(err)));
       }
     }
+    this.finishInputs();
+    this.finishProxies();
   }
 
   // ------------------------------------------------------------ evaluation
@@ -244,7 +312,7 @@ export class Interpreter implements Host {
       case "bool": return node.v;
       case "nil": return null;
       case "var": return this.lookup(node.name, scope);
-      case "env": return this.envir.get(node.name) ?? null;
+      case "env": return this.proxySpace ? this.proxy(node.name) : this.envir.get(node.name) ?? null;
       case "class": return new SCClass(node.name);
       case "array": {
         const out: Value[] = [];
@@ -287,8 +355,18 @@ export class Interpreter implements Host {
       case "binop": {
         // Short circuits.
         if (node.op === "??") {
+          // a ?? b, a ?? { b }: b (the function's value) when a is nil.
           const a = this.eval(node.a, scope);
-          return a === null ? this.eval(node.b, scope) : a;
+          if (a !== null) return a;
+          const b = this.eval(node.b, scope);
+          return b instanceof SCFunc ? this.call(b, []) : b;
+        }
+        if (node.op === "!?") {
+          // a !? { |x| ... }: the function of a when a is not nil.
+          const a = this.eval(node.a, scope);
+          if (a === null) return null;
+          const b = this.eval(node.b, scope);
+          return b instanceof SCFunc ? this.call(b, [a]) : b;
         }
         return this.binop(node.op, this.eval(node.a, scope), this.eval(node.b, scope));
       }
@@ -347,7 +425,8 @@ export class Interpreter implements Host {
 
   private assign(target: Node, value: Value, scope: Scope) {
     if (target.t === "env") {
-      this.envir.set(target.name, value);
+      if (this.proxySpace) this.setProxySource(this.proxy(target.name), 0, value, target.line);
+      else this.envir.set(target.name, value);
       return;
     }
     if (target.t === "var") {
@@ -382,6 +461,9 @@ export class Interpreter implements Host {
 
   binop(op: string, a: Value, b: Value): Value {
     if (op === "<>") return new Pchain([a, b]);
+    // JITLib routing: fx <<> source and source <>> fx feed the source into the effect's \in.
+    if (op === "<<>" && a instanceof ProxyV) { a.settings.set("in", b); return a; }
+    if (op === "<>>" && b instanceof ProxyV) { b.settings.set("in", a); return b; }
     if (op === "->") return new Assoc(a, b);
     if (op === "!") return this.send(a, "dup", [b]);
     if (op === "?") return a === null ? b : a;
@@ -408,13 +490,13 @@ export class Interpreter implements Host {
     }
     if (a instanceof RandToken && typeof b === "number") {
       const js = OP_JS[op];
-      if (!js) return a.realize(this.rng);
+      if (!js) return this.binop(op, a.realize(this.rng), b);
       const lin: [number, number] | undefined = op === "*" ? [b, 0] : op === "/" ? [1 / b, 0] : op === "+" ? [1, b] : op === "-" ? [1, -b] : undefined;
       return a.map((x) => numOp(op, x, b) as number, js("x", fmtJs(b)), lin);
     }
     if (typeof a === "number" && b instanceof RandToken) {
       const js = OP_JS[op];
-      if (!js) return b.realize(this.rng);
+      if (!js) return this.binop(op, a, b.realize(this.rng));
       const lin: [number, number] | undefined = op === "*" ? [a, 0] : op === "+" ? [1, a] : op === "-" ? [-1, a] : undefined;
       return b.map((x) => numOp(op, a, x) as number, js(fmtJs(a), "x"), lin);
     }
@@ -429,8 +511,8 @@ export class Interpreter implements Host {
     if (typeof a === "number" && typeof b === "number") {
       const r = numOp(op, a, b);
       if (r !== null) return r;
-      if (op === "rrand") return this.drawn("rrand", a + this.rng() * (b - a));
-      if (op === "exprand") return this.drawn("exprand", a * Math.pow(b / a, this.rng()));
+      if (op === "rrand") return this.rrand(a, b);
+      if (op === "exprand") return this.random("exp", [a, b], "exprand", () => a * Math.pow(b / a, this.rng()));
     }
     if (a instanceof Opaque || b instanceof Opaque) return a instanceof Opaque ? a : b;
     if ((typeof a === "string" || a instanceof Sym) && (typeof b === "string" || b instanceof Sym)) {
@@ -443,8 +525,26 @@ export class Interpreter implements Host {
   }
 
   private drawn(what: string, v: number) {
-    this.note(what + " and other random calls in code are drawn once when the code runs: the TidalJS code keeps one draw.");
+    this.note(what + " and other random calls run once, when the file runs, are drawn once as in SuperCollider: the TidalJS code keeps that draw.");
     return v;
+  }
+
+  /** Code that runs again and again (a routine, a Pfunc, a Prout): random values there become TidalJS random signals. */
+  private get repeating(): boolean {
+    return (this.routine !== null || this.inPattern || this.collecting !== null) && this.graph === null;
+  }
+
+  /** A random value: a random signal where the code repeats, else one draw (as SuperCollider draws it once). */
+  private random(kind: RandToken["kind"], args: Value[], what: string, draw: () => Value): Value {
+    if (this.repeating) return new RandToken(kind, args);
+    this.drawn(what, 0);
+    return draw();
+  }
+
+  private rrand(a: number, b: number): Value {
+    const ints = Number.isInteger(a) && Number.isInteger(b);
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    return this.random(ints ? "iwhite" : "white", [lo, hi], "rrand", () => (ints ? lo + Math.floor(this.rng() * (hi - lo + 1)) : lo + this.rng() * (hi - lo)));
   }
 
   // ------------------------------------------------------------ methods
@@ -483,7 +583,21 @@ export class Interpreter implements Host {
     if (recv instanceof ScaleV) return this.scaleSend(recv, method, args);
     if (recv instanceof Assoc) return method === "key" ? recv.key : method === "value" ? recv.value : null;
     if (recv instanceof RestV) return method === "dur" ? recv.dur : recv;
-    if (recv instanceof SynthV) return recv;
+    if (recv instanceof SynthV) return this.synthSend(recv, method, args, line);
+    if (recv instanceof BusV) return this.busSend(recv, method, args);
+    if (recv instanceof BufferV) return this.bufferSend(recv, method, line);
+    if (recv instanceof ProxyV) return this.proxySend(recv, method, args, kwargs, line);
+    if (recv instanceof MidiOutV) return this.midiSend(recv, method, args, line);
+    if (recv instanceof NetAddrV) return this.oscSend(method, args, line, false);
+    if (recv instanceof WidgetV) return this.widgetSend(recv, method, args);
+    if (recv instanceof WindowV) return this.windowSend(recv, method, args);
+    if (recv instanceof LayoutV) return this.layoutSend(recv, method, args);
+    if (recv instanceof TextV) {
+      if (method === "string_" || method === "object_") recv.text = describeText(args[0] ?? null);
+      if (method === "string" || method === "object") return recv.text;
+      if (method === "bounds_") recv.bounds = rectOf(args[0] ?? null);
+      return recv;
+    }
     if (recv instanceof Opaque) return this.opaqueSend(recv, method, args, line);
     return null;
   }
@@ -496,7 +610,15 @@ export class Interpreter implements Host {
       return recv;
     }
     if (method === "tempo" && recv.desc === "the server") return 1;
-    void line;
+    if (recv.desc === "the server") {
+      if (method === "sendMsg" || method === "sendBundle" || method === "listSendMsg" || method === "listSendBundle") return this.oscSend(method, args, line, true);
+      if (["meter", "scope", "plotTree", "makeGui", "makeWindow", "freqscope", "volume"].includes(method)) this.gui();
+    }
+    if (recv.desc === "a ProxySpace") {
+      if (method === "push") this.proxySpace = true;
+      if (method === "pop" || method === "clear") this.proxySpace = method !== "pop" && this.proxySpace;
+      return recv;
+    }
     return new Opaque(recv.desc + "." + method);
   }
 
@@ -519,10 +641,14 @@ export class Interpreter implements Host {
       case "linexp": return linexp(x, args);
       case "explin": { const [a, b, c, d] = args.map((v) => num(v, 0)); return Math.log(x / a) / Math.log(b / a) * (d - c) + c; }
       case "expexp": { const [a, b, c, d] = args.map((v) => num(v, 1)); return Math.pow(d / c, Math.log(x / a) / Math.log(b / a)) * c; }
-      case "rand": return this.drawn("rand", Number.isInteger(x) ? Math.floor(this.rng() * x) : this.rng() * x);
-      case "rand2": return this.drawn("rand2", (this.rng() * 2 - 1) * x);
-      case "rrand": return this.drawn("rrand", Number.isInteger(x) && Number.isInteger(num(args[0], 0)) ? x + Math.floor(this.rng() * (num(args[0], 0) - x + 1)) : x + this.rng() * (num(args[0], 0) - x));
-      case "exprand": return this.drawn("exprand", x * Math.pow(num(args[0], 1) / x, this.rng()));
+      case "rand": return Number.isInteger(x)
+        ? this.random("iwhite", [0, x - 1], "rand", () => Math.floor(this.rng() * x))
+        : this.random("white", [0, x], "rand", () => this.rng() * x);
+      case "rand2": return Number.isInteger(x)
+        ? this.random("iwhite", [-x, x], "rand2", () => -x + Math.floor(this.rng() * (2 * x + 1)))
+        : this.random("white", [-x, x], "rand2", () => (this.rng() * 2 - 1) * x);
+      case "rrand": return this.rrand(x, num(args[0], 0));
+      case "exprand": { const hi = num(args[0], 1); return this.random("exp", [x, hi], "exprand", () => x * Math.pow(hi / x, this.rng())); }
       case "coin": return this.drawn("coin", this.rng() < x ? 1 : 0) === 1;
       case "even": return mod(x, 2) === 0;
       case "odd": return mod(x, 2) === 1;
@@ -576,7 +702,8 @@ export class Interpreter implements Host {
     switch (method) {
       case "size": return arr.length;
       case "at": {
-        const i = args[0];
+        let i = args[0];
+        if (i instanceof RandToken) i = i.realize(this.rng);
         if (Array.isArray(i)) return i.map((k) => arr[num(k, 0)] ?? null);
         return arr[num(i, 0)] ?? null;
       }
@@ -586,7 +713,12 @@ export class Interpreter implements Host {
       case "atAll": return asList(args[0]).map((k) => arr[num(k, 0)] ?? null);
       case "first": return arr[0] ?? null;
       case "last": return arr[arr.length - 1] ?? null;
-      case "put": arr[num(args[0], 0)] = args[1] ?? null; return arr;
+      case "put": {
+        // An index from a live input (a MIDI note) takes its starting value, as at() does.
+        const i = args[0] instanceof RandToken ? args[0].realize(this.rng) : args[0];
+        arr[num(i ?? null, 0)] = args[1] ?? null;
+        return arr;
+      }
       case "add": arr.push(args[0] ?? null); return arr;
       case "addAll": arr.push(...asList(args[0])); return arr;
       case "insert": arr.splice(num(args[0], 0), 0, args[1] ?? null); return arr;
@@ -629,10 +761,15 @@ export class Interpreter implements Host {
         for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(this.rng() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
         return out;
       }
-      case "choose": return this.drawn("choose", 0) === 0 ? arr[Math.floor(this.rng() * arr.length)] ?? null : null;
+      case "choose": {
+        const simple = arr.length > 0 && arr.every((v) => typeof v === "number" || v instanceof Sym || typeof v === "string");
+        if (!simple) return this.drawn("choose", 0) === 0 ? arr[Math.floor(this.rng() * arr.length)] ?? null : null;
+        return this.random("choose", [arr.slice()], "choose", () => arr[Math.floor(this.rng() * arr.length)] ?? null);
+      }
       case "wchoose": {
-        this.drawn("wchoose", 0);
-        return new RandToken("wchoose", [arr, asList(args[0]).map((w) => num(w, 0))]).realize(this.rng);
+        const token = new RandToken("wchoose", [arr.slice(), asList(args[0]).map((w) => num(w, 0))]);
+        const simple = arr.every((v) => typeof v === "number" || v instanceof Sym || typeof v === "string");
+        return simple ? this.random("wchoose", token.args, "wchoose", () => token.realize(this.rng)) : (this.drawn("wchoose", 0), token.realize(this.rng));
       }
       case "collect": return arr.map((v, i) => (fn ? this.call(fn, [v, i]) : v));
       case "do": arr.forEach((v, i) => { if (fn) this.call(fn, [v, i]); }); return arr;
@@ -656,6 +793,7 @@ export class Interpreter implements Host {
       case "clipExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => arr[Math.min(i, arr.length - 1)]); }
       case "foldExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => this.arraySend(arr, "foldAt", [i], {}, line)); }
       case "pyramid": { const out: Value[] = []; for (let i = 1; i <= arr.length; i++) out.push(...arr.slice(0, i)); return out; }
+      case "asSpec": return this.spec(arr[0] ?? 0, arr[1] ?? 1, arr[2] ?? new Sym("lin"), arr[4] ?? null);
       case "join": return arr.map(describeText).join(typeof args[0] === "string" ? args[0] : "");
       case "asStream": case "iter": return new Pseq(arr, 1);
       case "keysValuesDo": case "pairsDo": {
@@ -744,6 +882,15 @@ export class Interpreter implements Host {
   }
 
   private symSend(sym: Sym, method: string, args: Value[], kwargs: Record<string, Value>): Value {
+    if (method === "asSpec") {
+      const specs: Record<string, [number, number, string]> = {
+        freq: [20, 20000, "exp"], lofreq: [0.1, 100, "exp"], midfreq: [25, 4200, "exp"], widefreq: [0.1, 20000, "exp"], amp: [0, 1, "amp"],
+        pan: [-1, 1, "lin"], bipolar: [-1, 1, "lin"], unipolar: [0, 1, "lin"], midi: [0, 127, "lin"], midinote: [0, 127, "lin"],
+        midivelocity: [1, 127, "lin"], db: [-100, 0, "db"], delay: [0.0001, 1, "exp"], rate: [0.125, 8, "exp"], detune: [-20, 20, "lin"], phase: [0, 6.283185, "lin"],
+      };
+      const sp = specs[sym.name] ?? [0, 1, "lin"];
+      return this.spec(sp[0], sp[1], new Sym(sp[2]), null);
+    }
     // \name.kr(default): a NamedControl in a SynthDef.
     if (method === "kr" || method === "ar" || method === "ir" || method === "tr") {
       const def = args[0] ?? kwargs.val ?? 0;
@@ -779,6 +926,16 @@ export class Interpreter implements Host {
         return ev;
       }
       case "use": return args[0] instanceof SCFunc ? this.call(args[0], []) : null;
+      case "map": case "unmap": {
+        // A ControlSpec maps 0..1 to its range.
+        if (!ev.has("__spec")) break;
+        const lo = ev.get("minval") ?? 0, hi = ev.get("maxval") ?? 1;
+        const exp = ev.get("warp") instanceof Sym && (ev.get("warp") as Sym).name === "exp";
+        return method === "map"
+          ? this.send(args[0] ?? 0, exp ? "linexp" : "linlin", [0, 1, lo, hi])
+          : this.send(args[0] ?? 0, exp ? "explin" : "linlin", [lo, hi, 0, 1]);
+      }
+      case "asSpec": return ev;
     }
     if (method.endsWith("_")) {
       ev.set(method.slice(0, -1), args[0] ?? null);
@@ -838,6 +995,7 @@ export class Interpreter implements Host {
   }
 
   private tokenSend(t: RandToken, method: string, args: Value[]): Value {
+    if (method === "wait" || method === "yield" || method === "sleep") return this.advance(t);
     if (UNARY[method] && args.length === 0) {
       const [fn, js] = UNARY[method];
       return t.map(fn, js("x"));
@@ -845,7 +1003,11 @@ export class Interpreter implements Host {
     if (args.every((a) => typeof a === "number")) {
       const nums = args as number[];
       switch (method) {
-        case "linlin": return t.map((x) => linlin(x, nums), `(x - ${nums[0]}) / (${nums[1]} - ${nums[0]}) * (${nums[3]} - ${nums[2]}) + ${nums[2]}`);
+        case "linlin": {
+          // A straight line (without the clipping at the ends, which live inputs never pass).
+          const k = (nums[3] - nums[2]) / (nums[1] - nums[0] || 1);
+          return t.map((x) => linlin(x, nums), `(x - ${nums[0]}) / (${nums[1]} - ${nums[0]}) * (${nums[3]} - ${nums[2]}) + ${nums[2]}`, [k, nums[2] - nums[0] * k]);
+        }
         case "linexp": return t.map((x) => linexp(x, nums), `${nums[2]} * (${nums[3]} / ${nums[2]}) ** ((x - ${nums[0]}) / (${nums[1]} - ${nums[0]}))`);
         case "round": return t.map((x) => numOp("round", x, nums[0] ?? 1) as number, `Math.round(x / ${nums[0] ?? 1}) * ${nums[0] ?? 1}`);
         case "clip": return t.map((x) => Math.max(nums[0], Math.min(nums[1], x)), `Math.max(${nums[0]}, Math.min(${nums[1]}, x))`);
@@ -986,10 +1148,16 @@ export class Interpreter implements Host {
         return this.defaultClock;
       }
       case "SystemClock": case "AppClock": return method === "play" || method === "sched" ? this.clockSend(new ClockV(1, true), "play", args) : new ClockV(1, true);
-      case "Routine": case "Task": case "Tdef": {
+      case "Routine": case "Task": {
         const fn = args.find((a) => a instanceof SCFunc);
-        if (name === "Tdef" && !(fn instanceof SCFunc)) return new Opaque("Tdef");
         return fn instanceof SCFunc ? new RoutineV(fn, line) : null;
+      }
+      case "Tdef": {
+        // Tdef(\name, { ... }) defines (the last definition wins), Tdef(\name) refers to it.
+        const key = describeText(args[0] ?? null);
+        const fn = args.find((a) => a instanceof SCFunc);
+        if (fn instanceof SCFunc) this.tdefs.set(key, new RoutineV(fn, line));
+        return this.tdefs.get(key) ?? new Opaque("Tdef");
       }
       case "Scale": {
         if (method === "new") {
@@ -1002,7 +1170,9 @@ export class Interpreter implements Host {
       case "Env": return this.makeEnv(method, args, kwargs);
       case "Server": return new Opaque("the server");
       case "Out": case "OffsetOut": case "ReplaceOut": case "XOut": {
-        if (this.graph) this.graph.outputs.push(args[1] ?? kwargs.channelsArray ?? null);
+        // XOut(bus, xfade, channels): the others are Out(bus, channels).
+        const channels = name === "XOut" ? args[2] ?? kwargs.channelsArray ?? null : args[1] ?? kwargs.channelsArray ?? null;
+        if (this.graph) this.graph.outputs.push({ bus: args[0] ?? kwargs.bus ?? 0, channels });
         return 0;
       }
       case "Mix": {
@@ -1011,19 +1181,99 @@ export class Interpreter implements Host {
       }
       case "NamedControl": return new GNode("control", describeText(args[0] ?? null), { default: args[1] ?? 0 }, method);
       case "Rand": case "ExpRand": case "IRand": return new GNode("rand", name, { lo: args[0] ?? 0, hi: args[1] ?? 1 }, "ir");
-      case "MIDIClient": case "MIDIOut": case "MIDIIn": case "MIDIdef": case "MIDIFunc":
-        this.note("MIDI is not converted.");
+      case "MIDIClient": return new Opaque("MIDIClient");
+      case "MIDIOut": {
+        if (method === "newByName") return new MidiOutV(describeText(args[0] ?? null));
+        return new MidiOutV(num(args[0] ?? kwargs.port, 0));
+      }
+      case "MIDIIn": {
+        // MIDIIn.connectAll; the old MIDIIn.control = { |src, chan, num, val| } and noteOn = { |src, chan, num, vel| }.
+        const fn = args[0];
+        const kinds: Record<string, "cc" | "noteOn" | "bend" | "touch" | "polytouch"> = { control_: "cc", noteOn_: "noteOn", bend_: "bend", touch_: "touch", polytouch_: "polytouch" };
+        if (kinds[method] && fn instanceof SCFunc) {
+          const kind = kinds[method];
+          this.inputs.push({ kind, fn, num: null, chan: null, path: "", line, order: kind === "bend" || kind === "touch" ? "src,chan,val" : "src,chan,num,val" });
+        }
+        return new Opaque("MIDIIn");
+      }
+      case "MIDIdef": case "MIDIFunc": case "CCResponder": case "NoteOnResponder": {
+        // MIDIdef.cc(\key, func, ccNum, chan), MIDIFunc.cc(func, ccNum, chan); noteOn alike.
+        const rest = name === "MIDIdef" ? args.slice(1) : args;
+        let type = method;
+        if (method === "new" || method === "") type = name === "CCResponder" ? "cc" : name === "NoteOnResponder" ? "noteOn" : describeText(rest[4] ?? kwargs.msgType ?? new Sym("noteOn"));
+        if (type === "control") type = "cc";
+        const fn = rest[0] ?? kwargs.func;
+        if (fn instanceof SCFunc && (type === "cc" || type === "noteOn" || type === "polytouch")) {
+          this.inputs.push({ kind: type, fn, num: rest[1] ?? kwargs.ccNum ?? kwargs.noteNum ?? kwargs.msgNum ?? null, chan: rest[2] ?? kwargs.chan ?? null, path: "", line });
+        } else if (fn instanceof SCFunc && (type === "bend" || type === "touch")) {
+          // MIDIdef.bend(\key, func, chan): no message number.
+          this.inputs.push({ kind: type, fn, num: null, chan: rest[1] ?? kwargs.chan ?? null, path: "", line });
+        } else if (type !== "noteOff" && type !== "freeAll" && type !== "free") {
+          this.note("MIDI " + type + " input is left out: TidalJS reads control changes (midicc), notes (midikeys), pitch bend (midibend) and aftertouch (miditouch).");
+        }
         return new Opaque(name);
-      case "Buffer":
-        this.note("Buffers (sound files) are not loaded: load samples with samples() in TidalJS.");
-        return new Opaque("a buffer");
-      case "Ndef": case "ProxySpace": case "NodeProxy":
-        this.note(name + " (JITLib proxies) is not converted.");
+      }
+      case "MIDIresponder": return new Opaque(name);
+      case "OSCdef": case "OSCFunc": case "OSCresponder": case "OSCresponderNode": {
+        // OSCdef(\key, func, path), OSCFunc(func, path): the values it reads become oscIn(path, index).
+        const rest = name === "OSCdef" ? args.slice(1) : args;
+        const fn = rest[0] ?? kwargs.func;
+        const path = describeText(rest[1] ?? kwargs.path ?? null);
+        if (fn instanceof SCFunc && path) this.inputs.push({ kind: "osc", fn, num: null, chan: null, path: path.startsWith("/") ? path : "/" + path, line });
         return new Opaque(name);
-      case "Quarks": case "Window": case "Slider": case "Button": case "View": case "ServerOptions": case "OSCdef": case "OSCFunc": case "NetAddr":
-      case "Platform": case "CmdPeriod": case "Document": case "Bus": case "Group": case "FreqScope": case "Stethoscope":
+      }
+      case "NetAddr": {
+        if (method === "localAddr") return new NetAddrV("127.0.0.1", 57120);
+        return new NetAddrV(describeText(args[0] ?? kwargs.hostname ?? "127.0.0.1"), num(args[1] ?? kwargs.port, 57120));
+      }
+      case "Bus": {
+        const rate = method === "control" ? "control" : "audio";
+        const channels = num(args[1] ?? kwargs.numChannels, 1);
+        const index = rate === "audio" ? this.audioBuses : this.controlBuses;
+        if (rate === "audio") this.audioBuses += channels;
+        else this.controlBuses += channels;
+        const bus = new BusV(rate, index, channels);
+        this.buses.push(bus);
+        return bus;
+      }
+      case "Buffer": {
+        if (["read", "readChannel", "cueSoundFile", "readNoUpdate", "readWithInfo"].includes(method)) {
+          const path = describeText(args[1] ?? kwargs.path ?? null);
+          return this.buffer(path);
+        }
+        return this.buffer(null);
+      }
+      case "BufRateScale": return 1;
+      case "BufSampleRate": case "SampleRate": return 44100;
+      case "BufChannels": return 2;
+      case "Ndef": {
+        const key = describeText(args[0] ?? kwargs.key ?? null);
+        const proxy = this.proxy(key);
+        if (method === "ar" || method === "kr") return this.proxySignal(proxy);
+        const source = args[1] ?? kwargs.object;
+        if (source !== undefined) this.setProxySource(proxy, 0, source, line);
+        return proxy;
+      }
+      case "NodeProxy": {
+        const proxy = this.proxy("nodeproxy" + line);
+        if (args[1] !== undefined && !(args[1] instanceof Opaque)) this.setProxySource(proxy, 0, args[1], line);
+        return proxy;
+      }
+      case "ProxySpace": {
+        if (method === "push") this.proxySpace = true;
+        if (method === "pop") this.proxySpace = false;
+        return new Opaque("a ProxySpace");
+      }
+      case "Group": case "ParGroup": case "RootNode":
+        // Groups only order synths on the server; the order is kept by the effects (In.ar) here.
+        return new Opaque("a group");
+      case "Platform": return new Opaque("Platform." + method);
+      case "Quarks": case "ServerOptions": case "CmdPeriod": case "Document": case "ServerTree": case "ServerBoot":
         return new Opaque(name);
     }
+    if (name === "ControlSpec") return this.spec(args[0] ?? 0, args[1] ?? 1, args[2] ?? new Sym("lin"), args[4] ?? null);
+    const gui = this.guiClass(name, method, args, kwargs, line);
+    if (gui !== undefined) return gui;
     // A UGen: Saw.ar(...), LPF.ar(...)
     if (["ar", "kr", "ir", "new"].includes(method) && (UGEN_INPUTS[name] || this.graph)) {
       const names = UGEN_INPUTS[name] ?? [];
@@ -1199,7 +1449,7 @@ export class Interpreter implements Host {
       case "Pbind": return new Pbind(toPairs(a, kw), line);
       case "Pmono": case "PmonoArtic": {
         const instrument = a[0] ?? kw.instrument ?? new Sym("default");
-        this.note(name + " plays one synth that changes; TidalJS plays a note per event (legato 1).");
+        if (name === "PmonoArtic") this.note("PmonoArtic's articulations are slurred: every note continues the synth (tie).");
         return new Pbind([[new Sym("instrument"), instrument], [new Sym("legato"), 1], ...toPairs(a.slice(1), kw)], line, true);
       }
       case "Ppar": case "Pgpar": {
@@ -1218,17 +1468,756 @@ export class Interpreter implements Host {
       case "Pfset": return a[1] ?? null;
       case "Pfindur": return new Pfindur(num(arg(0, "dur", 4), 4), arg(1, "pattern", null));
       case "Psync": return new Psync(arg(0, "pattern", null), num(arg(1, "quant", 1), 1), num(arg(2, "maxdur", 0), 0));
-      case "Pconst": {
-        this.note("Pconst is not modelled: its pattern plays as it is.");
-        return arg(1, "pattern", null);
+      case "Pconst": return new Pconst(num(arg(0, "sum", 1), 1), arg(1, "pattern", null), num(arg(2, "tollerance", 0.001), 0.001));
+      case "Pfx": case "Pfxb": {
+        // Pfx(pattern, \fx, args...): the pattern's events go through the effect synth.
+        const fx = new SynthV(describeText(arg(1, "fxname", null)), new SCEvent(toPairs(a.slice(2), {}).map(([k, v]) => [describeText(k), v])));
+        return new Pfx(name, arg(0, "pattern", null), fx);
       }
-      case "Pfx": case "Pfxb": case "Pproto": {
-        this.note(name + " effects are not converted: its pattern plays dry.");
-        return a[0] ?? null;
-      }
+      case "Pproto": return this.pproto(arg(0, "makeFunction", null), arg(1, "pattern", null));
     }
     this.note(name + " is not supported.");
     return new Pn(null, 0);
+  }
+
+  /** Pproto(makeFunction, pattern): its \\on events start effect synths (applied to the pattern), \\audioBus events make buses. */
+  private pproto(make: Value, pattern: Value): Value {
+    if (!(make instanceof SCFunc)) return pattern;
+    const before = new Map(this.envir);
+    this.call(make, []);
+    let out = pattern;
+    for (const [key, value] of this.envir) {
+      if (before.get(key) === value || !(value instanceof SCEvent)) continue;
+      const type = value.get("type");
+      const typeName = type instanceof Sym ? type.name : "";
+      if (typeName === "audioBus" || typeName === "controlBus") {
+        this.envir.set(key, this.classSend("Bus", typeName === "audioBus" ? "audio" : "control", [null, value.get("channels") ?? 2], {}, 0));
+      } else if (typeName === "on" || typeName === "note") {
+        const args = value.copy();
+        const instrument = describeText(args.get("instrument") ?? new Sym("default"));
+        args.map.delete("type");
+        args.map.delete("instrument");
+        out = new Pfx("Pproto", out, new SynthV(instrument, args));
+      }
+    }
+    return out;
+  }
+
+  /** Notes once what happens to GUIs. */
+  private gui() {
+    this.note("GUI sliders, knobs, buttons and menus become TidalJS sliders and toggles; each window becomes a group of the Controls panel, laid out as in SuperCollider (controlLayout).");
+  }
+
+  /** GUI classes: windows, views, layouts, labels and controls; other GUI classes are left out. Undefined when the class is not a GUI one. */
+  private guiClass(name: string, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value | undefined {
+    const creating = method === "new" || method === "";
+    switch (name) {
+      case "Rect": return creating ? [num(args[0] ?? kwargs.left, 0), num(args[1] ?? kwargs.top, 0), num(args[2] ?? kwargs.width, 0), num(args[3] ?? kwargs.height, 0)] : new Opaque("Rect." + method);
+      case "Window": case "QWindow": case "SCWindow": {
+        if (!creating) return new Opaque(name + "." + method);
+        const w = new WindowV(describeText(args[0] ?? kwargs.name ?? null), line);
+        this.windows.push(w);
+        return w;
+      }
+      case "View": case "CompositeView": case "UserView": case "ScrollView": case "HLayoutView": case "VLayoutView": {
+        if (!creating) return new Opaque(name + "." + method);
+        const v = new WindowV("", line);
+        const parent = args[0] ?? kwargs.parent ?? null;
+        if (parent instanceof WindowV) { v.parent = parent; parent.children.push(v); }
+        v.bounds = rectOf(args[1] ?? kwargs.bounds ?? null);
+        if (name === "HLayoutView" || name === "VLayoutView") v.layout = new LayoutV(name === "HLayoutView" ? "h" : "v", []);
+        this.windows.push(v);
+        return v;
+      }
+      case "HLayout": case "VLayout": return new LayoutV(name === "HLayout" ? "h" : "v", args.slice());
+      case "GridLayout": {
+        if (method === "rows") return new LayoutV("grid", args.map((r) => (Array.isArray(r) ? r.slice() : [r])));
+        if (method === "columns") {
+          const cols = args.map((c) => (Array.isArray(c) ? c : [c]));
+          const n = Math.max(0, ...cols.map((c) => c.length));
+          return new LayoutV("grid", Array.from({ length: n }, (_, i) => cols.map((c) => c[i] ?? null)));
+        }
+        return new LayoutV("grid", []);
+      }
+      case "StaticText": {
+        const t = new TextV("");
+        const parent = args[0] ?? kwargs.parent ?? null;
+        t.bounds = rectOf(args[1] ?? kwargs.bounds ?? null);
+        if (parent instanceof WindowV) { t.window = parent; parent.children.push(t); }
+        return t;
+      }
+      case "Slider": case "Knob": case "Button": case "EZSlider": case "EZKnob": case "EZNumber": case "NumberBox": case "CheckBox":
+      case "PopUpMenu": case "EZPopUpMenu": case "Slider2D": case "RangeSlider": case "EZRanger": case "ListView":
+        if (!creating) return new Opaque(name + "." + method);
+        this.gui();
+        return this.widget(name, args, kwargs, line);
+    }
+    if (GUI_CLASSES.has(name)) {
+      this.gui();
+      return new Opaque(name);
+    }
+    return undefined;
+  }
+
+  private windowSend(w: WindowV, method: string, args: Value[]): Value {
+    switch (method) {
+      case "layout_": if (args[0] instanceof LayoutV) w.layout = args[0]; return w;
+      case "layout": return w.layout;
+      case "name_": w.title = describeText(args[0] ?? null); return w;
+      case "name": return w.title;
+      case "bounds_": w.bounds = rectOf(args[0] ?? null); return w;
+      case "addFlowLayout": w.layout = new LayoutV("h", []); return w;
+      case "decorator_": if (!w.layout) w.layout = new LayoutV("h", []); return w;
+      case "children": return w.children;
+    }
+    // view, front, alwaysOnTop_, background_, onClose_, refresh...: the window itself.
+    return w;
+  }
+
+  private layoutSend(l: LayoutV, method: string, args: Value[]): Value {
+    switch (method) {
+      case "add": case "addSpanning": {
+        const item = args[0] ?? null;
+        if (l.kind === "grid" && typeof args[1] === "number") {
+          const row = args[1], col = num(args[2] ?? 0, 0);
+          while (l.items.length <= row) l.items.push([]);
+          const r = l.items[row] as Value[];
+          r[col] = item;
+        } else l.items.push(item);
+        return l;
+      }
+      case "insert": l.items.splice(num(args[1] ?? 0, 0), 0, args[0] ?? null); return l;
+    }
+    return l;
+  }
+
+  /** A ControlSpec, as an event with minval, maxval and warp. */
+  private spec(lo: Value, hi: Value, warp: Value, def: Value): SCEvent {
+    const w = warp instanceof Sym ? warp.name : typeof warp === "string" ? warp : "lin";
+    return new SCEvent([["__spec", true], ["minval", num(lo, 0)], ["maxval", num(hi, 1)], ["warp", new Sym(w)], ["default", typeof def === "number" ? def : num(lo, 0)]]);
+  }
+
+  /** Slider, Knob, Button, EZSlider, PopUpMenu...: a TidalJS slider or toggle with the GUI's range, label and value. */
+  private widget(name: string, args: Value[], kwargs: Record<string, Value>, line: number): WidgetV {
+    const n = this.widgets.length + 1;
+    let w: WidgetV;
+    const labelArg = args[2] ?? kwargs.label ?? null;
+    const named = typeof labelArg === "string" || labelArg instanceof Sym;
+    const specOf = (sp: Value): SCEvent => {
+      if (sp instanceof Sym || Array.isArray(sp)) sp = this.send(sp, "asSpec", []);
+      return sp instanceof SCEvent ? sp : this.spec(0, 1, new Sym("lin"), null);
+    };
+    if (name === "Button") w = new WidgetV("toggle", "button" + n, 0, 0, 1, false, line);
+    else if (name === "CheckBox") {
+      w = new WidgetV("toggle", named ? describeText(labelArg) : "checkbox" + n, 0, 0, 1, false, line);
+      w.named = named;
+    } else if (name === "PopUpMenu" || name === "ListView" || name === "EZPopUpMenu") {
+      w = new WidgetV("slider", name === "EZPopUpMenu" && named ? describeText(labelArg) : "menu" + n, 0, 0, 1, false, line);
+      w.step = 1;
+      w.named = name === "EZPopUpMenu" && named;
+      const items = name === "EZPopUpMenu" ? args[3] ?? kwargs.items : null;
+      if (Array.isArray(items)) w.max = Math.max(0, items.length - 1);
+    } else if (name === "Slider2D" || name === "RangeSlider" || name === "EZRanger") {
+      const ranger = name !== "Slider2D";
+      const base = name === "EZRanger" && named ? describeText(labelArg) : (ranger ? "range" : "xy") + n;
+      const parts: [string, string] = ranger ? ["lo", "hi"] : ["x", "y"];
+      const spec = name === "EZRanger" ? specOf(args[3] ?? kwargs.controlSpec ?? null) : this.spec(0, 1, new Sym("lin"), null);
+      const lo = num(spec.get("minval"), 0), hi = num(spec.get("maxval"), 1);
+      const init = name === "EZRanger" ? args[5] ?? kwargs.initVal : null;
+      w = new WidgetV("slider", base + " " + parts[0], Array.isArray(init) ? num(init[0] ?? null, lo) : lo, lo, hi, false, line);
+      w.pair = new WidgetV("slider", base + " " + parts[1], Array.isArray(init) ? num(init[1] ?? null, hi) : ranger ? hi : lo, lo, hi, false, line);
+      w.named = name === "EZRanger" && named;
+      this.pairParts.set(w, parts);
+      if (name === "EZRanger") { const action = args[4] ?? kwargs.action; if (action instanceof SCFunc) w.action = action; }
+    } else if (name.startsWith("EZ")) {
+      // EZSlider(parent, bounds, label, controlSpec, action, initVal)
+      const spec = specOf(args[3] ?? kwargs.controlSpec ?? null);
+      const lo = num(spec.get("minval"), 0), hi = num(spec.get("maxval"), 1);
+      const exp = spec.get("warp") instanceof Sym && (spec.get("warp") as Sym).name === "exp";
+      w = new WidgetV("slider", named ? describeText(labelArg) : (name === "EZKnob" ? "knob" : "slider") + n, num(args[5] ?? kwargs.initVal, num(spec.get("default"), lo)), lo, hi, exp, line);
+      w.named = named;
+      const action = args[4] ?? kwargs.action;
+      if (action instanceof SCFunc) w.action = action;
+    } else w = new WidgetV("slider", (name === "Knob" ? "knob" : name === "NumberBox" ? "number" : "slider") + n, 0, 0, 1, false, line);
+    // Its window and where it sits: Slider(parent, bounds).
+    const parent = args[0] ?? kwargs.parent ?? null;
+    if (parent instanceof WindowV) { w.window = parent; parent.children.push(w); }
+    w.bounds = rectOf(args[1] ?? kwargs.bounds ?? null);
+    this.widgets.push(w);
+    return w;
+  }
+
+  private widgetSend(w: WidgetV, method: string, args: Value[]): Value {
+    const read = (x: WidgetV) => (this.widgetToken ? this.widgetToken(x) : this.repeating ? this.liveToken(x) : x.value);
+    switch (method) {
+      case "action_": if (args[0] instanceof SCFunc) w.action = args[0]; return w;
+      case "value_": case "valueAction_": case "x_": case "lo_": case "activex_": case "activeLo_":
+        w.value = num(args[0], w.value); return w;
+      case "y_": case "hi_": case "activey_": case "activeHi_": if (w.pair) w.pair.value = num(args[0], w.pair.value); return w;
+      case "setXY": case "setSpan": case "setSpanActive": case "setXYActive":
+        w.value = num(args[0], w.value);
+        if (w.pair) w.pair.value = num(args[1] ?? null, w.pair.value);
+        return w;
+      case "value": case "x": case "lo": return read(w);
+      case "y": case "hi": return w.pair ? read(w.pair) : 0;
+      case "range": return w.pair ? this.binop("-", read(w.pair), read(w)) : 0;
+      case "label_": case "string_":
+        w.label = describeText(args[0] ?? null) || w.label;
+        w.named = true;
+        return w;
+      case "clipLo_": w.min = num(args[0], w.min); return w;
+      case "clipHi_": w.max = num(args[0], w.max); return w;
+      case "step_": w.step = Math.max(0, num(args[0], 0)); return w;
+      case "items_": {
+        if (Array.isArray(args[0])) { w.max = Math.max(0, args[0].length - 1); w.step = 1; w.kind = "slider"; }
+        return w;
+      }
+      case "states_": {
+        // [["Off"], ["On"]]: a switch named after its first state; more states: a slider over them.
+        const states = Array.isArray(args[0]) ? args[0] : [];
+        const first = Array.isArray(states[0]) ? states[0][0] : states[0];
+        if (!w.named && (typeof first === "string" || first instanceof Sym) && describeText(first).trim()) {
+          w.label = describeText(first).trim();
+          w.named = true;
+        }
+        if (states.length > 2) { w.kind = "slider"; w.min = 0; w.max = states.length - 1; w.step = 1; }
+        return w;
+      }
+      case "bounds_": w.bounds = rectOf(args[0] ?? null); return w;
+    }
+    return w;
+  }
+
+  /** A widget read where the code repeats (a Pfunc, a routine): its live value, a TidalJS slider or toggle. */
+  private liveToken(x: WidgetV): RandToken {
+    return x.kind === "toggle" ? new RandToken("toggle", [x.label, x.value !== 0]) : new RandToken("slider", [x.label, x.value, x.min, x.max, x.step]);
+  }
+
+  /** Set while the GUI's actions run for the conversion: what a widget's value becomes. */
+  private widgetToken: ((w: WidgetV) => Value) | null = null;
+
+  /**
+   * After the program: the GUI actions, MIDI and OSC functions run once with live values (sliders, midicc,
+   * midibend, miditouch, oscIn), so what they change (synth.set, a proxy's set, Pdefn...) follows the player.
+   * MIDI note functions that start synths become midikeys; OSC functions that start synths become oscplay.
+   */
+  private finishInputs() {
+    const run = (fn: SCFunc, args: Value[], line: number) => {
+      try {
+        this.call(fn, args);
+      } catch (err) {
+        if (!(err instanceof Horizon || err instanceof TooMuchWork)) this.note("Line " + line + ": an input function could not be run: " + (err instanceof Error ? err.message : String(err)));
+      }
+    };
+    this.labelWidgets();
+    for (const w of this.widgets) {
+      if (!w.action) continue;
+      const label = w.label;
+      this.widgetToken = (x) => this.liveToken(x);
+      run(w.action, [w], w.line);
+      this.widgetToken = null;
+      if (w.exp) this.note("The GUI control " + label + " moves exponentially in SuperCollider; its TidalJS slider moves in a straight line over the same range.");
+    }
+    // Note functions first: a pitch-bend function bends the synths they start.
+    const keyRecords: PlayRecord[] = [];
+    for (const input of this.inputs) {
+      if (input.kind !== "noteOn") continue;
+      const chan = typeof input.chan === "number" ? input.chan : null;
+      const vel = new RandToken("midivel", []), note = new RandToken("midinote", []);
+      this.capture = [];
+      run(input.fn, input.order ? [null, chan ?? 0, note, vel] : [vel, note, chan ?? 0, null], input.line);
+      const synths = this.capture;
+      this.capture = null;
+      for (const synth of synths) {
+        this.keySynths.add(synth);
+        const rec: PlayRecord = { kind: "midikeys", synth, start: 0, clock: this.defaultClock, line: input.line, label: synth.name, channel: chan };
+        this.played.push(rec);
+        keyRecords.push(rec);
+      }
+      if (synths.length === 0) this.note("Line " + input.line + ": a MIDI note function that starts no synth is left out (TidalJS plays MIDI keys with midikeys).");
+    }
+    for (const input of this.inputs) {
+      const chan = typeof input.chan === "number" ? input.chan : null;
+      if (input.kind === "cc") {
+        const ccNum = typeof input.num === "number" ? input.num : 0;
+        if (typeof input.num !== "number") this.note("A MIDI function for every controller reads controller 0 here (midicc takes one controller).");
+        const val = new RandToken("midicc", [ccNum, chan]);
+        run(input.fn, input.order ? [null, chan ?? 0, ccNum, val] : [val, ccNum, chan ?? 0, null], input.line);
+      } else if (input.kind === "bend") {
+        // MIDIdef.bend: { |val, chan, src| }; the wheel's value is 0 to 16383 (8192 in the middle).
+        const val = new RandToken("midibend", [chan]);
+        this.bendSeen = [];
+        run(input.fn, input.order ? [null, chan ?? 0, val] : [val, chan ?? 0, null], input.line);
+        const ranges = this.bendSeen;
+        this.bendSeen = null;
+        if (ranges.length) {
+          const range = Math.max(...ranges);
+          for (const rec of keyRecords) if (chan === null || rec.channel === null || rec.channel === chan) rec.bendRange = range;
+        }
+      } else if (input.kind === "touch" || input.kind === "polytouch") {
+        // MIDIdef.touch: { |val, chan, src| }; polytouch: { |val, num, chan, src| }. Both become miditouch (0 to 127 here).
+        const val = new RandToken("miditouch", [chan]);
+        if (input.kind === "touch") run(input.fn, input.order ? [null, chan ?? 0, val] : [val, chan ?? 0, null], input.line);
+        else {
+          const note = new RandToken("midinote", []);
+          this.polyTouch = { keys: false };
+          run(input.fn, input.order ? [null, chan ?? 0, note, val] : [val, note, chan ?? 0, null], input.line);
+          const keys = this.polyTouch.keys;
+          this.polyTouch = null;
+          if (!keys) this.note("Line " + input.line + ": polyphonic aftertouch that does not change the held notes becomes miditouch, the pressure of the last key pressed.");
+        }
+      } else if (input.kind === "osc") {
+        const msg: Value[] = [new Sym(input.path), ...Array.from({ length: 8 }, (_, i) => new RandToken("oscin", [input.path, i]))];
+        this.capture = [];
+        run(input.fn, [msg, 0, new NetAddrV("127.0.0.1", 57120), 57120], input.line);
+        for (const synth of this.capture) {
+          this.played.push({ kind: "oscplay", synth, start: 0, clock: this.defaultClock, line: input.line, label: synth.name, path: input.path });
+        }
+        this.capture = null;
+      }
+    }
+  }
+
+  /**
+   * Labels for the GUI's controls that have none: the StaticText next to (or above) each one, in a layout or
+   * by position. Then names are made unique, as TidalJS controls are found by name.
+   */
+  private labelWidgets() {
+    const label = (w: WidgetV, text: string) => {
+      const t = text.trim().replace(/[:=]\s*$/, "").trim();
+      if (!t || w.named) return;
+      const parts = this.pairParts.get(w);
+      w.label = parts ? t + " " + parts[0] : t;
+      if (w.pair && parts) w.pair.label = t + " " + parts[1];
+      w.named = true;
+    };
+    const inLayout = (l: LayoutV, seen: Set<unknown>) => {
+      if (seen.has(l)) return;
+      seen.add(l);
+      const lists: Value[][] = l.kind === "grid" ? l.items.map((r) => (Array.isArray(r) ? r : [r])) : [l.items];
+      for (const list of lists) {
+        const items = list.map(guiItem);
+        items.forEach((item, i) => {
+          if (item instanceof TextV) {
+            const next = items[i + 1];
+            if (next instanceof WidgetV) label(next, item.text);
+          } else if (item instanceof LayoutV) inLayout(item, seen);
+          else if (item instanceof WindowV && item.layout) inLayout(item.layout, seen);
+        });
+      }
+    };
+    const seen = new Set<unknown>();
+    for (const win of this.windows) {
+      if (win.layout) inLayout(win.layout, seen);
+      // Placed by bounds: the label on the left in the same row, or just above.
+      const texts = win.children.filter((c): c is TextV => c instanceof TextV && c.bounds !== null && c.text.trim() !== "");
+      for (const w of win.children) {
+        if (!(w instanceof WidgetV) || w.named || !w.bounds) continue;
+        const [x, y, , h] = w.bounds;
+        let best: TextV | null = null;
+        let dist = Infinity;
+        for (const t of texts) {
+          const [tx, ty, tw, th] = t.bounds!;
+          const left = Math.abs(ty + th / 2 - (y + h / 2)) <= Math.max(h, th) / 2 && tx + tw <= x + 4;
+          const above = ty + th <= y + 4 && ty + th >= y - 40 && tx < x + Math.max(40, tw) && tx + tw > x - 4;
+          if (!left && !above) continue;
+          // Not when another control sits between the label and this one.
+          const between = left && win.children.some((o) => o !== w && o instanceof WidgetV && o.bounds !== null
+            && o.bounds[0] >= tx + tw - 4 && o.bounds[0] + o.bounds[2] <= x + 4 && Math.abs(o.bounds[1] - y) < Math.max(h, o.bounds[3]) / 2);
+          if (between) continue;
+          const d = left ? x - (tx + tw) : y - (ty + th) + 1;
+          if (d < dist) { dist = d; best = t; }
+        }
+        if (best) label(w, best.text);
+      }
+    }
+    // Unique names.
+    const used = new Map<string, number>();
+    for (const w of this.widgets.flatMap((x) => (x.pair ? [x, x.pair] : [x]))) {
+      const n = (used.get(w.label) ?? 0) + 1;
+      used.set(w.label, n);
+      if (n > 1) w.label = w.label + " " + n;
+    }
+  }
+
+  /**
+   * The GUI's windows as groups of TidalJS's Controls panel: a title and rows of control names, as SuperCollider
+   * lays them out (an HLayout is a row, a VLayout stacks rows, controls placed with bounds make rows by height).
+   */
+  windowLayouts(): { title: string; rows: string[][] }[] {
+    const names = (w: WidgetV) => (w.pair ? [w.label, w.pair.label] : [w.label]);
+    const rowsOf = (item: Value, depth: number): string[][] => {
+      item = guiItem(item);
+      if (depth > 20) return [];
+      if (item instanceof WidgetV) return [names(item)];
+      if (item instanceof WindowV) return windowRows(item, depth + 1);
+      if (item instanceof LayoutV) {
+        if (item.kind === "h") return [item.items.flatMap((x) => rowsOf(x, depth + 1).flat())].filter((r) => r.length);
+        if (item.kind === "v") return item.items.flatMap((x) => rowsOf(x, depth + 1));
+        return item.items.map((r) => (Array.isArray(r) ? r : [r]).flatMap((x) => rowsOf(x, depth + 1).flat())).filter((r) => r.length);
+      }
+      return [];
+    };
+    const contains = (l: LayoutV | null, v: WindowV, depth = 0): boolean => !!l && depth < 20 && l.items.some((x) => {
+      const y = guiItem(x);
+      return y === v || (y instanceof LayoutV && contains(y, v, depth + 1)) || (Array.isArray(y) && y.some((z) => guiItem(z) === v));
+    });
+    const windowRows = (win: WindowV, depth: number): string[][] => {
+      const rows: string[][] = win.layout ? rowsOf(win.layout, depth) : [];
+      const listed = new Set(rows.flat());
+      const free = win.children.filter((c): c is WidgetV => c instanceof WidgetV && !listed.has(c.label));
+      if (win.layout && win.layout.items.length === 0) {
+        // A flow layout (addFlowLayout, FlowLayout): the controls one after another, wrapping.
+        if (free.length) rows.push(free.flatMap(names));
+      } else {
+        const placed = free.filter((w) => w.bounds).sort((a, b) => a.bounds![1] - b.bounds![1] || a.bounds![0] - b.bounds![0]);
+        let current: WidgetV[] = [];
+        let top = -Infinity, height = 0;
+        const flush = () => { if (current.length) rows.push(current.sort((a, b) => a.bounds![0] - b.bounds![0]).flatMap(names)); };
+        for (const w of placed) {
+          const [, y, , h] = w.bounds!;
+          if (current.length && Math.abs(y - top) < Math.max(height, h, 1) / 2) current.push(w);
+          else {
+            flush();
+            current = [w];
+            top = y;
+            height = h;
+          }
+        }
+        flush();
+        const rest = free.filter((w) => !w.bounds);
+        if (rest.length) rows.push(rest.flatMap(names));
+      }
+      for (const v of win.children) if (v instanceof WindowV && !contains(win.layout, v)) rows.push(...windowRows(v, depth + 1));
+      return rows;
+    };
+    const out: { title: string; rows: string[][] }[] = [];
+    for (const win of this.windows) {
+      if (win.parent) continue;
+      const rows = windowRows(win, 0).filter((r) => r.length);
+      if (rows.length) out.push({ title: win.title.trim() || "Controls", rows });
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------ buses, buffers, MIDI and OSC
+
+  private buffer(path: string | null): BufferV {
+    const bufnum = this.buffers.length;
+    const base = path ? path.split(/[\\/]/).pop()!.replace(/\.[^.]*$/, "") : "buffer" + bufnum;
+    let bank = base.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "buffer";
+    if (/^[0-9]/.test(bank)) bank = "b" + bank;
+    const taken = new Set(this.buffers.map((b) => b.bank));
+    for (let i = 2, base2 = bank; taken.has(bank); i++) bank = base2 + i;
+    const buf = new BufferV(path, bufnum, bank);
+    this.buffers.push(buf);
+    return buf;
+  }
+
+  private busSend(b: BusV, method: string, args: Value[]): Value {
+    switch (method) {
+      case "index": return b.index;
+      case "numChannels": return b.channels;
+      case "rate": return new Sym(b.rate);
+      case "set": case "setSynchronous": case "setn": case "value_":
+        b.value = Array.isArray(args[0]) ? args[0][0] ?? null : args[0] ?? null;
+        return b;
+      case "get": case "getSynchronous": case "value": return b.value;
+      case "asMap": case "asBus": return b;
+      case "ar": case "kr": return new GNode("ugen", "In", { bus: b, numChannels: b.channels }, method);
+      case "subBus": return new BusV(b.rate, b.index + num(args[0], 0), num(args[1], 1));
+    }
+    return b;
+  }
+
+  private bufferSend(b: BufferV, method: string, line: number): Value {
+    switch (method) {
+      case "bufnum": return b.bufnum;
+      case "path": return b.path;
+      case "numChannels": return 2;
+      case "sampleRate": return 44100;
+      case "numFrames": case "duration":
+        this.note("Buffer lengths are not known before the files load: a buffer is taken as 1 second long.");
+        return method === "duration" ? 1 : 44100;
+      case "play": {
+        // b.play: the whole file, once.
+        this.recordEvent(new SCEvent([["instrument", new Sym("__buffer")], ["buf", b], ["__synth", true], ["__top", !this.routine]]), line);
+        return new Opaque("a synth");
+      }
+    }
+    return b;
+  }
+
+  private midiSend(m: MidiOutV, method: string, args: Value[], line: number): Value {
+    const chan = num(args[0], 0);
+    const base = (): SCEvent => new SCEvent([["type", new Sym("midi")], ["midiout", m], ["chan", chan], ["instrument", new Sym("__midi")], ["__synth", true]]);
+    const key = (n: Value) => String(m.selector) + ":" + chan + ":" + describeText(n);
+    switch (method) {
+      case "noteOn": {
+        const ev = base();
+        ev.set("midinote", args[1] ?? 60);
+        ev.set("amp", this.binop("/", args[2] ?? 64, 127));
+        const stored = this.recordEvent(ev, line);
+        if (this.routine) this.midiNotes.set(key(args[1] ?? 60), { ev: stored, time: this.routine.time });
+        return m;
+      }
+      case "noteOff": {
+        const on = this.midiNotes.get(key(args[1] ?? 60));
+        if (on && this.routine) {
+          on.ev.set("sustain", this.routine.time - on.time);
+          this.midiNotes.delete(key(args[1] ?? 60));
+        }
+        return m;
+      }
+      case "control": {
+        const ev = base();
+        ev.set("midicmd", new Sym("control"));
+        ev.set("ctlNum", args[1] ?? 0);
+        ev.set("control", args[2] ?? 0);
+        this.recordEvent(ev, line);
+        return m;
+      }
+      case "program": {
+        const ev = base();
+        ev.set("midicmd", new Sym("program"));
+        ev.set("progNum", args[1] ?? 0);
+        this.recordEvent(ev, line);
+        return m;
+      }
+      case "bend": case "touch": case "polyTouch": case "sysex":
+        this.note("MIDI " + method + " messages are not converted: TidalJS sends notes, control changes and program changes.");
+        return m;
+    }
+    return m;
+  }
+
+  /** sendMsg and sendBundle, to a NetAddr or to the server. */
+  private oscSend(method: string, args: Value[], line: number, server: boolean): Value {
+    const messages: Value[][] = [];
+    if (method === "sendMsg") messages.push(args);
+    else if (method === "listSendMsg") messages.push(asList(args[0] ?? []));
+    else if (method === "sendBundle") for (const m of args.slice(1)) messages.push(asList(m));
+    else if (method === "listSendBundle") for (const m of asList(args[1] ?? [])) messages.push(asList(m));
+    else return null;
+    for (const msg of messages) this.oscMessage(describeText(msg[0] ?? null), msg.slice(1), line, server);
+    return null;
+  }
+
+  private oscMessage(path: string, list: Value[], line: number, server: boolean) {
+    const pairs = (from: Value[]): [string, Value][] | null => {
+      if (from.length % 2 !== 0) return null;
+      const out: [string, Value][] = [];
+      for (let i = 0; i < from.length; i += 2) {
+        if (!(from[i] instanceof Sym) && typeof from[i] !== "string") return null;
+        out.push([describeText(from[i]), from[i + 1]]);
+      }
+      return out;
+    };
+    if (path === "/s_new") {
+      const kv = pairs(list.slice(4)) ?? [];
+      this.recordSynth(new SynthV(describeText(list[0] ?? null), new SCEvent(kv)), line);
+      return;
+    }
+    if (path === "/dirt/play") {
+      const kv = pairs(list);
+      if (!kv) { this.note("An OSC message to /dirt/play without key-value pairs is left out."); return; }
+      const ev = new SCEvent(kv);
+      ev.set("type", new Sym("dirt"));
+      this.recordEvent(ev, line);
+      return;
+    }
+    if (server || /^\/(n_|g_|b_|c_|d_|s_|notify|status|quit|sync|dumpOSC|clearSched)/.test(path)) return;
+    const kv = pairs(list);
+    if (!kv) {
+      this.note("The OSC message " + path + " has values without names: TidalJS sends name-value pairs (.osc()), so it is left out.");
+      return;
+    }
+    const ev = new SCEvent(kv);
+    ev.set("__osc", path);
+    ev.set("instrument", new Sym("__osc" + path));
+    ev.set("__synth", true);
+    this.recordEvent(ev, line);
+  }
+
+  // ------------------------------------------------------------ synths started from code
+
+  private synthSend(s: SynthV, method: string, args: Value[], line: number): Value {
+    const play = this.synthPlays.get(s);
+    const end = () => {
+      if (play && play.inRoutine && this.routine) play.ev.set("sustain", Math.max(0, this.routine.time - play.time));
+      this.synthPlays.delete(s);
+    };
+    switch (method) {
+      case "release": case "free": case "run":
+        if (method !== "run" || args[0] === false) end();
+        return s;
+      case "set": case "setn": case "map": {
+        const list = asList(args.length === 1 ? args[0] : args);
+        const changes: [string, Value][] = [];
+        for (let i = 0; i + 1 < list.length; i += 2) changes.push([describeText(list[i]), list[i + 1]]);
+        if (changes.some(([k, v]) => k === "gate" && v === 0)) { end(); return s; }
+        if (this.bendSeen && this.keySynths.has(s)) {
+          // A pitch-bend function bending the held notes: how many semitones the wheel moves them.
+          for (const [, v] of changes) {
+            if (!(v instanceof RandToken) || v.kind !== "midibend") continue;
+            const mid = v.at(8192), top = v.at(16383), bottom = v.at(0);
+            const ratio = Math.abs(mid - 1) < 1e-6 && top > 0 && bottom > 0;
+            const range = ratio ? 12 * Math.max(Math.abs(Math.log2(top)), Math.abs(Math.log2(bottom))) : Math.max(Math.abs(top - mid), Math.abs(bottom - mid));
+            if (Number.isFinite(range) && range > 0 && range <= 48) this.bendSeen.push(Math.round(range * 1000) / 1000);
+          }
+          return s;
+        }
+        if (!this.capture && this.keySynths.has(s)) {
+          // An input function changing the held notes (aftertouch, a controller): their template follows it.
+          // Polyphonic aftertouch is each key's own pressure (keytouch).
+          const copy = this.keyCopies.get(s) ?? s;
+          for (const [k, v] of changes) {
+            if (!(v instanceof RandToken) || !["miditouch", "midicc", "slider", "toggle", "oscin", "midibend"].includes(v.kind)) continue;
+            const live = this.polyTouch && v.kind === "miditouch" ? new RandToken("keytouch", [], v.ops) : v;
+            if (this.polyTouch && live.kind === "keytouch") this.polyTouch.keys = true;
+            copy.args.set(k, live);
+          }
+          return s;
+        }
+        if (!play) return s;
+        if (!play.inRoutine || !this.routine || this.routine.time === play.time) {
+          // Before the synth has played a moment: it starts with these values.
+          for (const [k, v] of changes) play.ev.set(k, v);
+          return s;
+        }
+        // A running synth that changes: a new note tied to the running one (the same voice goes on with the new values).
+        end();
+        const tie = play.ev.get("__tie");
+        play.ev.set("__tied", true);
+        const next = new SynthV(s.name, s.args.copy());
+        for (const [k, v] of changes) next.args.set(k, v);
+        s.args = next.args;
+        this.recordSynth(s, line, typeof tie === "number" ? tie : undefined);
+        const now = this.synthPlays.get(s);
+        if (now) now.ev.set("__tied", true);
+        return s;
+      }
+      case "nodeID": return 1000;
+    }
+    return s;
+  }
+
+  // ------------------------------------------------------------ JITLib
+
+  private proxy(key: string): ProxyV {
+    let p = this.proxies.get(key);
+    if (!p) {
+      p = new ProxyV(key);
+      this.proxies.set(key, p);
+    }
+    return p;
+  }
+
+  private setProxySource(p: ProxyV, slot: number, value: Value, line: number) {
+    if (!p.line) p.line = line;
+    if (value instanceof Assoc && value.key instanceof Sym) {
+      const role = value.key.name;
+      if ((role === "filter" || role === "filterIn") && value.value instanceof SCFunc) {
+        p.filters.set(slot, value.value);
+        return;
+      }
+      if (role === "pset" || role === "set" || role === "xset") {
+        // \pset -> Pbind(...): the source's arguments change per event; their first values are used.
+        const s = new Stream(value.value, { host: this });
+        const ev = s.next(new SCEvent());
+        if (ev instanceof SCEvent) for (const [k, v] of ev.map) if (!k.startsWith("__")) p.settings.set(k, v);
+        this.note("A \\" + role + " slot of a proxy keeps its first values.");
+        return;
+      }
+      this.note("A \\" + role + " slot of a proxy is not converted.");
+      return;
+    }
+    if (value === null) {
+      p.slots.delete(slot);
+      p.filters.delete(slot);
+      return;
+    }
+    p.slots.set(slot, value);
+  }
+
+  private proxySend(p: ProxyV, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
+    switch (method) {
+      case "play": case "playN": case "monitor": case "send": case "resume":
+        p.playing = true;
+        p.line = p.line || line;
+        return p;
+      case "stop": case "end": case "free": case "pause": p.playing = false; return p;
+      case "clear": p.playing = false; p.slots.clear(); p.filters.clear(); return p;
+      case "source_": this.setProxySource(p, 0, args[0] ?? null, line); return p;
+      case "put": this.setProxySource(p, num(args[0], 0), args[1] ?? null, line); return p;
+      case "add": this.setProxySource(p, p.slots.size ? Math.max(...p.slots.keys()) + 1 : 0, args[0] ?? null, line); return p;
+      case "at": return p.slots.get(num(args[0], 0)) ?? null;
+      case "source": return p.source;
+      case "set": case "xset": case "setn": case "map": case "xmap": case "setRates": {
+        const list = args.length ? args : Object.entries(kwargs).flatMap(([k, v]) => [new Sym(k), v]);
+        for (let i = 0; i + 1 < list.length; i += 2) p.settings.set(describeText(list[i]), list[i + 1]);
+        return p;
+      }
+      case "ar": case "kr": case "value": return this.proxySignal(p);
+      case "numChannels": return 2;
+      case "key": return new Sym(p.key);
+      case "isPlaying": case "isMonitoring": return p.playing;
+    }
+    return p;
+  }
+
+  /** A proxy read as a signal: inside a SynthDef its function's graph; elsewhere the proxy itself (a map). */
+  private proxySignal(p: ProxyV): Value {
+    const src = p.source;
+    if (typeof src === "number" || Array.isArray(src)) return src;
+    if (this.graph && src instanceof SCFunc) return this.call(src, []);
+    if (this.graph && src instanceof ProxyV) return this.proxySignal(src);
+    return p;
+  }
+
+  /** The proxies that play: each becomes a synth (or pattern) with its filters and the effects it is routed into. */
+  private finishProxies() {
+    for (const p of this.proxies.values()) {
+      if (!p.playing) continue;
+      // An effect proxy fed by another one (\in): the source's sound through this proxy's function.
+      const fx: SynthV[] = [];
+      let sound = p;
+      const chain: ProxyV[] = [p];
+      for (let guard = 0; guard < 8; guard++) {
+        const input = sound.settings.get("in");
+        if (!(input instanceof ProxyV) || chain.includes(input)) break;
+        chain.unshift(input);
+        sound = input;
+      }
+      chain.forEach((proxy, i) => {
+        if (i > 0 && proxy.source instanceof SCFunc) fx.push(this.filterDef(proxy.key + "_fx", proxy.source, proxy.line, "in"));
+        [...proxy.filters.entries()].sort((a, b) => a[0] - b[0]).forEach(([slot, fn]) => fx.push(this.filterDef(proxy.key + "_filter" + slot, fn, proxy.line, null)));
+      });
+      for (const [slot, value] of [...sound.slots.entries()].sort((a, b) => a[0] - b[0])) {
+        const label = sound.key + (slot ? "_" + slot : "");
+        if (value instanceof SCFunc) {
+          const def = new SynthDefV(label, value, sound.line);
+          this.synthDefs.set(def.name, def);
+          const ev = new SCEvent([["instrument", new Sym(def.name)], ["__synth", true], ["__top", true], ["__proxy", true]]);
+          for (const [k, v] of sound.settings) if (k !== "in") ev.set(k, v);
+          if (fx.length) ev.set("__fx", fx.slice());
+          this.played.push({ kind: "event", event: ev, start: 0, clock: this.defaultClock, line: p.line, label });
+        } else if (isPattern(value)) {
+          let pattern: Value = value;
+          for (const f of fx) pattern = new Pfx("Pfx", pattern, f);
+          this.played.push({ kind: "pattern", pattern, start: 0, clock: this.defaultClock, line: p.line, label });
+        } else if (value instanceof RoutineV) {
+          this.startRoutine(value, this.defaultClock, true);
+        }
+      }
+    }
+  }
+
+  /** A filter function as an effect synth: its input is its first argument, or the named control. */
+  private filterDef(name: string, fn: SCFunc, line: number, input: string | null): SynthV {
+    const def = new SynthDefV(name, fn, line, input === null);
+    this.synthDefs.set(name, def);
+    return new SynthV(name, new SCEvent());
   }
 
   // ------------------------------------------------------------ playing
@@ -1241,20 +2230,36 @@ export class Interpreter implements Host {
     this.played.push({ kind: "pattern", pattern: p, start: 0, clock, line, label });
   }
 
-  private recordSynth(synth: SynthV, line: number) {
+  private recordSynth(synth: SynthV, line: number, tie?: number) {
+    if (this.capture) {
+      const copy = new SynthV(synth.name, synth.args.copy());
+      this.capture.push(copy);
+      // The synth the code keeps (to bend, press or release it later) stands for the captured one.
+      this.keySynths.add(synth);
+      this.keyCopies.set(synth, copy);
+      return;
+    }
     const ev = synth.args.copy();
     ev.set("instrument", new Sym(synth.name));
     ev.set("__synth", true);
     if (!this.routine) ev.set("__top", true);
-    this.recordEvent(ev, line);
+    else {
+      if (tie === undefined) { this.tieCount = (this.tieCount % 8) + 1; tie = this.tieCount; }
+      ev.set("__tie", tie);
+    }
+    const stored = this.recordEvent(ev, line);
+    this.synthPlays.set(synth, { ev: stored, time: this.routine?.time ?? 0, inRoutine: this.routine !== null, line });
   }
 
-  private recordEvent(ev: SCEvent, line: number) {
+  /** Records an event and returns the stored copy (a synth's release changes it later). */
+  private recordEvent(ev: SCEvent, line: number): SCEvent {
+    const stored = ev.copy();
     if (this.routine) {
-      this.routine.events.push({ time: this.routine.time, event: ev.copy() });
-      return;
+      this.routine.events.push({ time: this.routine.time, event: stored });
+      return stored;
     }
-    this.played.push({ kind: "event", event: ev.copy(), start: 0, clock: this.defaultClock, line, label: describeText(ev.get("instrument") ?? new Sym("default")) });
+    this.played.push({ kind: "event", event: stored, start: 0, clock: this.defaultClock, line, label: describeText(ev.get("instrument") ?? new Sym("default")) });
+    return stored;
   }
 
   /** A routine's events, up to the horizon: they become a played pattern. */
@@ -1291,6 +2296,21 @@ export class Interpreter implements Host {
       if (this.collecting.length >= 2000) throw new StopCollect();
       return x;
     }
+    if (x instanceof RandToken) {
+      const token = x;
+      x = x.realize(this.rng);
+      // A random wait in a routine: the events just played get the random duration (TidalJS's rhythm()).
+      if (this.routine && typeof x === "number") {
+        const now = this.routine.time;
+        for (let i = this.routine.events.length - 1; i >= 0 && Math.abs(this.routine.events[i].time - now) < 1e-9; i--) {
+          const ev = this.routine.events[i].event;
+          if (ev.has("__pattern")) continue;
+          ev.set("__randtime", true);
+          ev.set("__durtoken", token);
+          ev.set("__durvalue", x);
+        }
+      }
+    }
     if (this.routine && typeof x === "number") {
       this.routine.time += x;
       if (this.routine.time >= this.routine.horizon) throw new Horizon();
@@ -1315,22 +2335,28 @@ export class Interpreter implements Host {
   }
 
   /** Runs a SynthDef's function with symbolic signals; returns its output. */
-  graphOf(def: SynthDefV): { output: Value; controls: Map<string, GNode> } | null {
+  graphOf(def: SynthDefV): Graph | null {
     if (!def.fn) return null;
     const controls = new Map<string, GNode>();
     const saved = this.graph;
     this.graph = { outputs: [] };
     try {
-      const args = def.fn.params.map((p) => {
+      const args = def.fn.params.map((p, i) => {
         const init = p.init ? this.eval(p.init, def.fn!.scope) : 0;
-        const c = new GNode("control", p.name, { default: init }, "kr");
+        // A filter's first argument is its input: an audio signal.
+        const c = new GNode("control", p.name, { default: init }, def.filter && i === 0 ? "ar" : "kr");
         controls.set(p.name, c);
         return c;
       });
       const ret = this.call(def.fn, args);
-      const output = this.graph.outputs.length ? this.graph.outputs[this.graph.outputs.length - 1] : ret;
+      const outs = this.graph.outputs;
+      // The main output goes to out (or 0); the others are sends to buses.
+      const isMain = (b: Value) => b === null || b === 0 || (b instanceof GNode && b.kind === "control" && /^(i_)?out(_?bus)?$/i.test(b.name));
+      const main = [...outs].reverse().find((o) => isMain(o.bus)) ?? outs[outs.length - 1];
+      const output = main ? main.channels : ret;
       collectControls(output, controls);
-      return { output, controls };
+      for (const o of outs) { collectControls(o.channels, controls); collectControls(o.bus, controls); }
+      return { output, controls, outs, mainBus: main ? main.bus : 0 };
     } catch (err) {
       this.note("SynthDef \\" + def.name + " could not be analysed: " + (err instanceof Error ? err.message : String(err)));
       return null;
@@ -1444,4 +2470,16 @@ export function degreeToKey(degree: number, scale: Value, stepsPerOctave = 12): 
 function labelOf(p: Pattern): string {
   if (p instanceof PdefRef) return p.key;
   return p.name;
+}
+
+/** Rect(x, y, width, height) as [x, y, width, height], or null. */
+function rectOf(v: Value): [number, number, number, number] | null {
+  if (Array.isArray(v) && v.length === 4 && v.every((x) => typeof x === "number")) return v as [number, number, number, number];
+  return null;
+}
+
+/** An item of a layout: [view, stretch: 1] is the view. */
+function guiItem(v: Value): Value {
+  if (Array.isArray(v) && v.length > 0 && (v[0] instanceof WidgetV || v[0] instanceof TextV || v[0] instanceof LayoutV || v[0] instanceof WindowV)) return v[0];
+  return v;
 }

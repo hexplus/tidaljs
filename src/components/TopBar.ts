@@ -136,7 +136,7 @@ export function TopBar(session: Session, library: Library, showLibrary: () => vo
         GitHubLink(),
       ]),
     ]),
-    SketchBar(library, showLibrary),
+    SketchBar(library, showLibrary, session),
     div("transport", [
       button(
         {

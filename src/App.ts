@@ -1,8 +1,10 @@
 import { div, main, nextTick, onMount, section, signal } from "sibujs";
 import { isWidgetKeyEvent } from "sibujs/widgets";
+import { ControlsPanel } from "./components/Controls.ts";
 import { CycleView } from "./components/CycleView.ts";
 import { Palette } from "./components/Palette.ts";
 import { createLibrary } from "./components/Library.ts";
+import { watchSharedLinks } from "./components/Share.ts";
 import { Sidebar, type Tab } from "./components/Sidebar.ts";
 import { StatusBar } from "./components/StatusBar.ts";
 import { TopBar } from "./components/TopBar.ts";
@@ -13,6 +15,7 @@ export function App() {
   const session = createSession();
   const library = createLibrary(session);
   const [tab, setTab] = signal<Tab>("examples");
+  const palette = Palette(session);
 
   /** Switches the sidebar to the Library tab and brings it into view. */
   const showLibrary = () => {
@@ -27,10 +30,11 @@ export function App() {
   const root = div({ id: "tidaljs" }, [
     TopBar(session, library, showLibrary),
     main("layout", [
-      section("workspace", [Palette(session), session.editor.view, CycleView(session), StatusBar(session)]),
+      section("workspace", [palette.view, session.editor.view, CycleView(session), ControlsPanel(session), StatusBar(session)]),
       Sidebar(session, library, tab, setTab),
     ]),
     ...session.editor.popups,
+    palette.popup,
   ]);
 
   // Ctrl+Enter plays, Ctrl+S saves to the library and Escape stops, wherever the focus is.
@@ -52,6 +56,8 @@ export function App() {
     document.addEventListener("keydown", onKeydown);
     return () => document.removeEventListener("keydown", onKeydown);
   }, root);
+  // A song shared as a link (#song=...): shown for review, never played automatically.
+  onMount(() => watchSharedLinks(session, library), root);
 
   return root;
 }

@@ -10,6 +10,22 @@ export interface ReferenceSection {
     after?: string;
 }
 
+/** A tab of the Reference: sections, by title, in reading order. */
+export interface ReferenceTopic {
+    id: string;
+    label: string;
+    sections: string[];
+}
+
+// The Reference's tabs. Every section of REFERENCE is in exactly one (checked by the tests).
+export const REFERENCE_TOPICS: ReferenceTopic[] = [
+    { id: 'patterns', label: 'Patterns', sections: ['Mini-notation', 'Patterns', 'Composition', 'Tidal operators', 'Stepwise'] },
+    { id: 'time', label: 'Time', sections: ['Time', 'Rearranging', 'Randomness and conditions', 'Signals'] },
+    { id: 'sound', label: 'Sound', sections: ['Sounds', 'Samples', 'Sound shaping', 'Effects'] },
+    { id: 'harmony', label: 'Harmony', sections: ['Harmony'] },
+    { id: 'live', label: 'Live', sections: ['Streams and transitions', 'Tempo and control', 'Live input', 'Output', 'Keys'] },
+];
+
 // The Reference tab. Text in `backticks` is shown as code.
 export const REFERENCE: ReferenceSection[] = [
     {
@@ -17,7 +33,7 @@ export const REFERENCE: ReferenceSection[] = [
         notes: [
             '`bd` kick, `sn` snare, `hh` hi-hat, `oh` open hat, `ch` closed hat, `cp` clap, `cy` cymbal, `arpy` pluck, `sine`, `saw`, `square` synths.',
             '`tri`, `noise`, `pink` are also synths. Use `"bd:2"` or `.n(2)` for variations.',
-            'Synths in the style of SuperDirt\'s: `supersaw`, `supersquare`, `superpwm`, `superhoover`, `superreese`, `superzow`, `superchip`, `superfm`, `superpiano`, `supergong`, `superstatic`, and the drums `superkick`, `super808`, `supergabber`, `superhat`, `supersnare`, `superclap`.',
+            'Synths in the style of SuperDirt\'s: `supersaw`, `supersquare`, `superpwm`, `superhoover`, `superreese`, `superzow`, `superchip`, `superfm`, `superfb`, `superpiano`, `supergong`, `superstatic`, and the drums `superkick`, `super808`, `supergabber`, `superhat`, `supersnare`, `superclap`.',
         ],
         items: [
             ['.voice(x)', 'Timbre, 0 to 1 (side voices, pulse width, brightness, click...)'],
@@ -159,6 +175,7 @@ export const REFERENCE: ReferenceSection[] = [
             ['.inside(n, f) .outside(n, f)', 'Apply f within or across cycles'],
             ['.press() .pressBy(x)', 'Move events onto the off-beat'],
             ['.brak()', 'Breakbeat: every other cycle squashed and shifted'],
+            ['.rhythm(durations)', 'One step after another from cycle 0, each lasting durations cycles, never looping (as a Pbind\'s \\dur)'],
         ],
         after: 'Numeric arguments can be patterns too: `.fast("<1 2>")`, `.ply("2 3")`, `.every("<2 4>", f)`.',
     },
@@ -273,6 +290,7 @@ export const REFERENCE: ReferenceSection[] = [
             ['.smooth()', 'Glide between values'],
             ['sine2 saw2 tri2 square2 ...', 'Waves from -1 to 1'],
             ['envL envLR envEq envEqR', 'Envelopes over the first cycle'],
+            ['envelope([levels], [times], curves)', 'A breakpoint envelope in seconds, as SuperCollider\'s Env (for follow and followNote)'],
             ['brand brandBy(x)', 'Random booleans'],
             ['.rangex(lo, hi) .qfloor() .qceiling()', 'Exponential range, rounding'],
             ['setBus(k, v) / bus(k)', 'Values you change while playing'],
@@ -321,10 +339,29 @@ export const REFERENCE: ReferenceSection[] = [
             ['.pitchenv([levels], [times], curves)', 'Pitch envelope with breakpoints, as SuperCollider\'s Env'],
             ['.vib(hz) .vibmod(st)', 'Vibrato'],
             ['.portamento(s)', 'Glide from the previous note of the sound'],
+            ['.tie(id)', 'Slur into the voice still sounding with the same tie (as Pmono): new pitch, filters, effects and synth controls, no new attack'],
+            ['.follow(ctrl, sig) .followNote(ctrl, sig)', 'Change lpf, pan, gain, note, tremolo... during each note; followNote restarts the signal at each note; live inputs move sounding notes'],
             ['.amp(x) .octave(n) .unit("c")', 'SuperDirt\'s volume, octave, speed unit'],
             ['.echo(n, t, fb)', 'Echoes as events'],
             ['.echoWith(n, t, f) .stutter(n, t)', 'Echoes changed by f; rolls'],
             ['.plyWith(n, f) .ghost()', 'Repeats changed by f; ghost notes'],
+        ],
+    },
+    {
+        title: 'Live input',
+        notes: [
+            'Change the music while it plays from the page, a MIDI controller or an OSC app. Each of these is a signal: use it like `sine`, e.g. `.lpf(slider("cutoff", 800, 200, 4000))`.',
+        ],
+        items: [
+            ['slider(name, value, min, max, step)', 'A slider in the Controls panel; it keeps its value when the code runs again'],
+            ['toggle(name, on)', 'A switch in the Controls panel: 0 or 1'],
+            ['midicc(cc, channel)', 'The last value of a MIDI control change, 0 to 1'],
+            ['controlLayout(title, rows)', 'Arrange the Controls panel: a titled group of rows of slider and toggle names'],
+            ['midibend(channel) miditouch(channel)', 'The last MIDI pitch bend (-1 to 1) and aftertouch (0 to 1)'],
+            ['keytouch()', 'In a midikeys template: the pressure of that voice\'s own key (polyphonic aftertouch), 0 to 1'],
+            ['midikeys(template, channel, bendRange)', 'Play a MIDI keyboard with the sound of a pattern, each key held until let go; the wheel bends by bendRange semitones'],
+            ['oscIn(address, index)', 'The last number received on an OSC address, through the bridge'],
+            ['oscplay(address, template)', 'Play the pattern once for each OSC message on an address'],
         ],
     },
     {

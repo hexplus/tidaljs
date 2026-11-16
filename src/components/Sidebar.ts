@@ -1,15 +1,10 @@
-import { aside, button, code, dd, derived, div, dl, dt, each, effect, h3, input, nextTick, p, signal, span, strong, when } from "sibujs";
+import { aside, button, code, derived, div, each, effect, input, nextTick, p, signal, span, strong, when } from "sibujs";
 import { EXAMPLES, type Example } from "../data/examples.ts";
-import { REFERENCE } from "../data/reference.ts";
 import type { Session } from "../session.ts";
 import { LibraryPanel, type Library } from "./Library.ts";
+import { Reference } from "./Reference.ts";
 
 export type Tab = "examples" | "library" | "reference";
-
-/** Text with `backticks` turned into <code> elements. */
-function rich(text: string): (string | HTMLElement)[] {
-  return text.split("`").map((part, i) => (i % 2 ? code(part) : part));
-}
 
 /** The examples, filtered, with a heading before each group. */
 function ExampleList(session: Session) {
@@ -83,20 +78,6 @@ function ExampleList(session: Session) {
   ];
 }
 
-/** The Reference tab content. */
-function Reference() {
-  const children: HTMLElement[] = [];
-  for (const section of REFERENCE) {
-    children.push(h3(section.title));
-    for (const note of section.notes ?? []) children.push(p(rich(note)));
-    if (section.items) {
-      children.push(dl(section.items.flatMap(([term, description]) => [dt(term), dd(rich(description))])));
-    }
-    if (section.after) children.push(p({ class: "ref-note" }, rich(section.after)));
-  }
-  return children;
-}
-
 /** Examples, Library and Reference, as tabs. The app owns the open tab so the top bar can show the library. */
 export function Sidebar(session: Session, library: Library, tab: () => Tab, setTab: (tab: Tab) => void) {
 
@@ -130,7 +111,7 @@ export function Sidebar(session: Session, library: Library, tab: () => Tab, setT
     ),
     div(
       { class: "tab-panel ref", id: "panelReference", role: "tabpanel", "aria-labelledby": "tabReference", hidden: () => tab() !== "reference" },
-      Reference(),
+      [Reference(session, () => setTab("reference"))],
     ),
   ]);
 }

@@ -7,9 +7,16 @@ import { DEFAULT_CODE, EXAMPLES, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
-import { TidalJS, type StreamInfo, type Tidal } from "./engine.ts";
+import { TidalJS, type ControlLayout, type LiveControl, type StreamInfo, type Tidal } from "./engine.ts";
+import { scanCode, type CodeScan } from "./share.ts";
 
-const KEYS = { code: "tidaljs:code", live: "tidaljs:live", category: "tidaljs:snippetCategory" };
+const KEYS = {
+  code: "tidaljs:code",
+  live: "tidaljs:live",
+  category: "tidaljs:snippetCategory",
+  shared: "tidaljs:sharedUnplayed",
+  controls: "tidaljs:controls",
+};
 const LIVE_DELAY = 700; // ms of quiet before a live update
 const SAVE_DELAY = 300;
 
@@ -80,7 +87,43 @@ export function createSession() {
   effect(() => storage.set(KEYS.live, liveEnabled() ? "on" : "off"));
   effect(() => storage.set(KEYS.category, category()));
 
+  /**
+   * True while the editor holds code opened from a shared link that has not
+   * been played yet. Kept across reloads with the code itself, so reloading
+   * the page does not skip the check before the first Play.
+   */
+  const [sharedUnplayed, setSharedUnplayed] = signal(storage.get(KEYS.shared) === "1");
+  effect(() => storage.set(KEYS.shared, sharedUnplayed() ? "1" : "0"));
+  /**
+   * Asks before the first Play of shared code that the scan flags. Set by the
+   * sharing UI; until then risky shared code does not play.
+   */
+  let confirmRiskyShared: (scan: CodeScan) => Promise<boolean> = async () => false;
+
   let tidal: Tidal | null = null;
+  /** The sliders and toggles (slider(), toggle()) of the code that plays, for the Controls panel. */
+  const [controls, setControls] = signal<LiveControl[]>([]);
+  /** How the code arranges them (controlLayout()), in call order. */
+  const [controlLayouts, setControlLayouts] = signal<ControlLayout[]>([]);
+  /** Their last values by name, kept in this browser (the most recent 100). */
+  const savedControls: Record<string, number> = (() => {
+    try {
+      const parsed = JSON.parse(storage.get(KEYS.controls) || "{}");
+      const out: Record<string, number> = {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [name, value] of Object.entries(parsed)) if (typeof value === "number" && Number.isFinite(value)) out[name] = value;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  })();
+  let controlsTimer: ReturnType<typeof setTimeout> | undefined;
+  const saveControls = () => {
+    const names = Object.keys(savedControls);
+    for (const name of names.slice(0, Math.max(0, names.length - 100))) delete savedControls[name];
+    storage.set(KEYS.controls, JSON.stringify(savedControls));
+  };
   let lastRunCode: string | null = null;
   let loadingSamples = false;
   let liveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -127,8 +170,26 @@ export function createSession() {
     }
     instance.setCPS(tempo());
     instance.onError = (err) => report("error", "Runtime error: " + err.message + " (pattern stopped)");
+    // Sliders and toggles start where they were left in this browser.
+    instance.restoreControls(savedControls);
+    instance.onControls((list, layouts) => {
+      setControls(list);
+      // Only a new arrangement replaces the groups (moving a slider keeps them as they are).
+      if (JSON.stringify(layouts) !== JSON.stringify(controlLayouts())) setControlLayouts(layouts);
+      for (const c of list) {
+        delete savedControls[c.name]; // moves it to the end: the most recent
+        savedControls[c.name] = c.value;
+      }
+      clearTimeout(controlsTimer);
+      controlsTimer = setTimeout(saveControls, SAVE_DELAY);
+    });
     tidal = instance;
     return tidal;
+  }
+
+  /** Sets a slider or toggle of the Controls panel. */
+  function setControl(name: string, value: number | boolean) {
+    tidal?.setControl(name, value);
   }
 
   /**
@@ -213,8 +274,25 @@ export function createSession() {
     syncPlaying();
   }
 
+  /**
+   * Before the first Play of shared code: scans the code as it is now (it may
+   * have been edited) and, if anything is flagged, asks for confirmation.
+   * Returns true when the code may run.
+   */
+  async function checkShared(): Promise<boolean> {
+    if (!sharedUnplayed()) return true;
+    const scan = scanCode(editor.getValue());
+    if (scan.risks.length && !(await confirmRiskyShared(scan))) {
+      report("warn", "Not played. The shared code is still in the editor: change it or press Play again when you are sure.");
+      return false;
+    }
+    setSharedUnplayed(false);
+    return true;
+  }
+
   async function play() {
     clearTimeout(liveTimer);
+    if (!(await checkShared())) return;
     const engine = await ensureTidal();
     if (!engine) return;
     runCode(engine, false);
@@ -233,7 +311,8 @@ export function createSession() {
   function scheduleLiveUpdate() {
     clearTimeout(liveTimer);
     const engine = tidal;
-    if (!liveEnabled() || !engine || !engine.isPlaying) return;
+    // Shared code waits for a Play (and its check) before any live update runs it.
+    if (!liveEnabled() || !engine || !engine.isPlaying || sharedUnplayed()) return;
     liveTimer = setTimeout(() => {
       if (engine.isPlaying && editor.getValue() !== lastRunCode) runCode(engine, true);
     }, LIVE_DELAY);
@@ -269,6 +348,7 @@ export function createSession() {
   }
 
   function loadExample(example: Example) {
+    setSharedUnplayed(false);
     editor.setValue(example.code);
     setCurrentExample(example);
     setEdits((n) => n + 1);
@@ -279,12 +359,29 @@ export function createSession() {
 
   /** Puts code in the editor (a saved sketch or an imported file); plays it if music is playing. */
   function openCode(code: string, title: string, cps?: number) {
+    setSharedUnplayed(false);
     editor.setValue(code);
     setCurrentExample(exampleFor(code, null));
     setEdits((n) => n + 1);
     if (cps !== undefined && !/setCPS|setcps|setTempo/.test(code)) changeTempo(cps);
     if (tidal?.isPlaying) void play();
     else report("", 'Opened "' + title + '". Press Play or Ctrl+Enter.');
+  }
+
+  /**
+   * Puts code from a shared link in the editor. It never plays here: the music
+   * stops (so live update cannot run it either), and the first Play checks it.
+   */
+  function openSharedCode(code: string, title: string, cps: number) {
+    clearTimeout(liveTimer);
+    if (tidal?.isPlaying) tidal.stopAll();
+    syncPlaying();
+    setSharedUnplayed(true);
+    editor.setValue(code);
+    setCurrentExample(exampleFor(code, null));
+    setEdits((n) => n + 1);
+    if (!/setCPS|setcps|setTempo/.test(code)) changeTempo(cps);
+    report("warn", 'Opened "' + title + '" from a link. Read the code before you press Play: it runs in your browser.');
   }
 
   /** Shows a message in the status line. */
@@ -314,10 +411,20 @@ export function createSession() {
     changeTempo,
     loadExample,
     openCode,
+    openSharedCode,
+    /** True while shared code waits for its first Play. */
+    sharedUnplayed,
+    /** Sets the confirmation asked before the first Play of shared code that the scan flags. */
+    setRiskyConfirm(fn: (scan: CodeScan) => Promise<boolean>) {
+      confirmRiskyShared = fn;
+    },
     notify,
     edits,
     examplesLoaded,
     patternsChanged,
+    controls,
+    controlLayouts,
+    setControl,
     /** The engine once audio has started, for the cycle view. */
     engine: () => tidal,
   };

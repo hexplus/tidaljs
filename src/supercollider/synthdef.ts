@@ -6,7 +6,7 @@
  * a Pbind key like \cutoff becomes .lpf().
  */
 import { EnvSpec, GNode, Sym, type SynthDefV, type Value } from "./values.ts";
-import type { Interpreter } from "./interpreter.ts";
+import type { Graph, Interpreter } from "./interpreter.ts";
 
 /** How an argument of the SynthDef drives a TidalJS control. */
 export interface Role {
@@ -19,6 +19,20 @@ export interface Fixed {
   control: string;
   value: Value;
   arg?: string;
+  /** An LFO inside the synth moves this control during each note (followNote). */
+  lfo?: LfoSignal;
+  /** An envelope (EnvGen, Line, XLine) inside the synth moves this control during each note (followNote). */
+  env?: EnvSignal;
+  /** TidalJS code for the value: a live input (MouseX: a slider) or a random value per note (Rand); `during`: it changes during the note (follow). */
+  code?: string;
+  during?: boolean;
+}
+
+/** An envelope as a TidalJS envelope(levels, times, curves): times in seconds. */
+export interface EnvSignal {
+  levels: number[];
+  times: number[];
+  curves: (number | string)[];
 }
 
 export interface SynthInfo {
@@ -39,6 +53,18 @@ export interface SynthInfo {
   channels: Fixed[][] | null;
   /** No envelope ends the sound: it plays until it is freed. */
   endless: boolean;
+  /**
+   * An effect: the signal comes in (In.ar(bus), a JITLib filter's input or \in.ar) instead of from oscillators.
+   * `bus` is what In reads (a bus, a number or a control); null for a filter's input.
+   */
+  input: { bus: Value } | null;
+  /** A sample player (PlayBuf, TGrains, GrainBuf, Warp1, BufRd): the buffer it plays (a control, a buffer or a number). */
+  sample: { buf: Value; grains: boolean } | null;
+  /** Where the main output goes (0, a bus, or the out control), and the other outputs (sends to buses) with their level. */
+  mainBus: Value;
+  sends: { bus: Value; gain: number }[];
+  /** Every output is a control-rate signal (Out.kr): an LFO that writes a control bus, not a sound. */
+  control: Value | null;
   summary: string;
   notes: string[];
 }
@@ -47,7 +73,7 @@ export interface SynthInfo {
 export const TIDAL_SOUNDS = new Set([
   "bd", "sn", "hh", "oh", "ch", "cp", "cy", "arpy", "sine", "saw", "square", "tri", "noise", "pink",
   "supersaw", "supersquare", "superpwm", "superhoover", "superreese", "superzow", "superchip", "superfm", "superpiano",
-  "supergong", "superstatic", "superkick", "super808", "supergabber", "superhat", "supersnare", "superclap",
+  "supergong", "superstatic", "superkick", "super808", "supergabber", "superhat", "supersnare", "superclap", "superfb",
 ]);
 
 const PORTS: [RegExp, string][] = [[/hoover/i, "superhoover"], [/gabber/i, "supergabber"]];
@@ -64,7 +90,26 @@ const OSC_SOUND: Record<string, string> = {
   SinOsc: "sine", FSinOsc: "sine", LFPar: "sine", LFCub: "sine", LFTri: "tri", PMOsc: "superfm",
   WhiteNoise: "noise", ClipNoise: "noise", GrayNoise: "noise", PinkNoise: "pink", BrownNoise: "pink",
   Klank: "superfm", Ringz: "superfm", Formant: "superfm", Impulse: "noise", Dust: "superstatic",
+  // A sine fed back into its phase: TidalJS's superfb.
+  SinOscFB: "superfb", GrainSin: "sine", GrainFM: "superfm",
 };
+
+/** Controls TidalJS can change during a note (follow, followNote). */
+export const FOLLOWABLE = new Set(["lpf", "hpf", "bpf", "resonance", "hpq", "bpq", "pan", "gain", "amp", "freq", "note", "speed", "vib"]);
+
+/** UGens that play a buffer: they become a TidalJS sample bank. */
+const SAMPLE_PLAYERS = new Set(["PlayBuf", "TGrains", "GrainBuf", "Warp1", "BufRd"]);
+
+/** Fixed controls an effect synth hands on to the sounds that go through it (not their pitch, length or level). */
+const EFFECT_CONTROLS = new Set([
+  "lpf", "resonance", "hpf", "hpq", "bpf", "bpq", "peak", "peakq", "peakgain", "freeverb", "freeroom", "freedamp", "room", "size",
+  "delay", "delaytime", "delayfeedback", "shape", "crush", "pan", "lpenv", "lpattack", "lpdecay", "lpsustain", "lprelease",
+  "hpenv", "hpattack", "hpdecay", "hpsustain", "hprelease", "bpenv", "bpattack", "bpdecay", "bpsustain", "bprelease",
+  "peakenv", "peakattack", "peakdecay", "peaksustain", "peakrelease",
+]);
+export function isEffectControl(control: string): boolean {
+  return EFFECT_CONTROLS.has(control);
+}
 
 const DRIVE = new Set(["tanh", "distort", "softclip", "atan", "clip2"]);
 
@@ -73,7 +118,7 @@ export const SOUND_LEVEL: Record<string, number> = {
   bd: 0.95, sn: 0.6, hh: 0.35, cp: 0.55, oh: 0.3, ch: 0.35, cy: 0.25, arpy: 0.35, sine: 0.45, saw: 0.3, square: 0.25,
   tri: 0.45, noise: 0.25, pink: 0.35, supersaw: 0.3, supersquare: 0.22, superpwm: 0.35, superreese: 0.35, superzow: 0.3,
   superchip: 0.3, superfm: 0.4, superstatic: 0.6, superpiano: 0.45, supergong: 0.35, superkick: 0.9, super808: 0.9,
-  superhat: 0.3, supersnare: 0.55, superclap: 0.6,
+  superhat: 0.3, supersnare: 0.55, superclap: 0.6, superfb: 0.45,
 };
 
 /** Low-frequency oscillators that can move a pitch (a vibrato). */
@@ -116,7 +161,9 @@ function linear(v: Value): Linear | null {
 function audio(v: Value): boolean {
   if (Array.isArray(v)) return v.some(audio);
   if (!(v instanceof GNode)) return false;
-  if (v.kind === "control" || v.kind === "env" || v.kind === "rand") return false;
+  // An audio-rate control is a signal coming in (a filter's input, \in.ar).
+  if (v.kind === "control") return v.rate === "ar";
+  if (v.kind === "env" || v.kind === "rand") return false;
   if (v.kind === "ugen") {
     if (v.name === "EnvGen" || v.name === "Line" || v.name === "XLine") return false;
     if (v.rate === "kr" || v.rate === "ir") return false;
@@ -152,10 +199,24 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
     return info;
   }
   const out = graph.output;
+  // Only control-rate outputs (Out.kr): an LFO for a control bus.
+  if (graph.outs.length > 0 && graph.outs.every((o) => !audio(o.channels))) {
+    const info = emptyInfo(port);
+    info.control = first(out);
+    info.mainBus = graph.mainBus;
+    for (const [name, c] of graph.controls) info.defaults.set(name, c.inputs.default ?? 0);
+    info.summary = "a control signal";
+    return info;
+  }
   // Multichannel output: each channel is analysed; when they differ, both are written.
   const stereo = Array.isArray(out) && out.length >= 2 && !port;
   const left = analyseChannel(def, graph, stereo ? (out as Value[])[0] : out, port);
-  if (stereo) {
+  left.mainBus = graph.mainBus;
+  for (const o of graph.outs) {
+    if (o.bus === graph.mainBus && o.channels === graph.output) continue;
+    left.sends.push({ bus: o.bus, gain: gainOf(o.channels) / (gainOf(graph.output) || 1) });
+  }
+  if (stereo && !left.input) {
     const right = analyseChannel(def, graph, (out as Value[])[1], port);
     if (left.sound !== right.sound || JSON.stringify(left.fixed) !== JSON.stringify(right.fixed)) {
       left.channels = [left.fixed, right.fixed];
@@ -165,10 +226,10 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
       // The same signal on both channels: TidalJS's centre pan is 3 dB down, so it is made up.
       left.ampScale *= Math.SQRT2;
     }
-    if ((out as Value[]).length > 2) left.notes.push("\\" + def.name + " has more than two channels: the first two are used");
+    if ((out as Value[]).length > 2) left.notes.push("\\" + def.name + " has more than two channels: as on a stereo system, only the first two (left and right) are heard");
   }
   // The level when the events do not set amp.
-  if (!left.port) {
+  if (!left.port && !left.input) {
     const ampDefault = left.roles.has("amp") ? numOr(first(left.defaults.get("amp") ?? 1), 1) : 1;
     const amp = round(ampDefault * left.ampScale);
     const where = left.channels ? left.channels : [left.fixed];
@@ -180,11 +241,44 @@ export function analyseSynthDef(interp: Interpreter, def: SynthDefV): SynthInfo 
 function emptyInfo(port: [RegExp, string] | undefined): SynthInfo {
   return {
     sound: port ? port[1] : "saw", port: !!port, fixed: [], roles: new Map(), defaults: new Map(), ampScale: 1,
-    unmapped: new Set(), summary: "", notes: [], channels: null, endless: false,
+    unmapped: new Set(), summary: "", notes: [], channels: null, endless: false, input: null, sample: null,
+    mainBus: 0, sends: [], control: null,
   };
 }
 
-function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<string, GNode> }, output: Value, port: [RegExp, string] | undefined): SynthInfo {
+/** The constant level of an output: the numbers it is multiplied by. */
+function gainOf(v: Value): number {
+  v = first(v);
+  if (typeof v === "number") return v;
+  if (v instanceof GNode && v.kind === "binop" && v.name === "*") {
+    if (typeof v.inputs.b === "number") return v.inputs.b * gainOf(v.inputs.a);
+    if (typeof v.inputs.a === "number") return v.inputs.a * gainOf(v.inputs.b);
+    const d = (x: Value) => (x instanceof GNode && x.kind === "control" && typeof first(x.inputs.default ?? null) === "number" ? first(x.inputs.default) as number : null);
+    const k = d(v.inputs.b) ?? d(v.inputs.a);
+    if (k !== null) return k;
+  }
+  return 1;
+}
+
+/** Is this where an effect's signal comes in? In.ar(bus), or an audio-rate control (a filter's input, \in.ar). */
+function inputOf(v: Value): { bus: Value } | null {
+  v = first(v);
+  if (v instanceof GNode && v.kind === "ugen" && (v.name === "In" || v.name === "InFeedback")) return { bus: v.inputs.bus ?? 0 };
+  if (v instanceof GNode && v.kind === "control" && v.rate === "ar") return { bus: null };
+  return null;
+}
+
+/** The dry signal of an effect's mix (the input, scaled by constants), or null. */
+function dryInput(v: Value): boolean {
+  v = first(v);
+  if (inputOf(v)) return true;
+  if (v instanceof GNode && v.kind === "binop" && v.name === "*") {
+    return (typeof v.inputs.b === "number" && dryInput(v.inputs.a)) || (typeof v.inputs.a === "number" && dryInput(v.inputs.b));
+  }
+  return false;
+}
+
+function analyseChannel(def: SynthDefV, graph: Graph, output: Value, port: [RegExp, string] | undefined): SynthInfo {
   const info = emptyInfo(port);
   for (const [name, c] of graph.controls) info.defaults.set(name, c.inputs.default ?? 0);
   let gain = 1;
@@ -214,6 +308,58 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
       if (typeof d === "number") fix(control, round(fn(l.a * d + l.b)), l.ctrl.name);
       return;
     }
+    // An LFO (it restarts with each note): followed during the note.
+    const lfo = lfoSignalOf(v, (x) => {
+      const l = linear(x);
+      const d = l ? info.defaults.get(l.ctrl.name) : undefined;
+      return l && typeof first(d ?? null) === "number" ? l.a * (first(d ?? null) as number) + l.b : null;
+    });
+    if (lfo && FOLLOWABLE.has(control)) {
+      info.fixed.push({ control, value: round(fn(lfo.exp ? Math.sqrt(lfo.lo * lfo.hi) : (lfo.lo + lfo.hi) / 2)), lfo: mapSignal(lfo, fn) });
+      return;
+    }
+    const resolve = (x: Value) => {
+      const l = linear(x);
+      const d = l ? info.defaults.get(l.ctrl.name) : undefined;
+      return l && typeof first(d ?? null) === "number" ? l.a * (first(d ?? null) as number) + l.b : null;
+    };
+    // An envelope, Line or XLine (it restarts with each note): followed during the note.
+    const env = envSignalOf(v, resolve);
+    if (env && FOLLOWABLE.has(control)) {
+      const levels = env.levels.map((l) => round(fn(l)));
+      if (levels.every(Number.isFinite)) {
+        info.fixed.push({ control, value: levels[0], env: { ...env, levels } });
+        return;
+      }
+    }
+    // The mouse (MouseX, MouseY, MouseButton): a slider or a switch of the Controls panel.
+    const mouse = mouseOf(v);
+    if (mouse) {
+      const lo = fn(mouse.lo), hi = fn(mouse.hi);
+      if (Number.isFinite(lo) && Number.isFinite(hi)) {
+        const a = round(Math.min(lo, hi)), b = round(Math.max(lo, hi));
+        const code = mouse.name === "MouseButton"
+          ? 'toggle("mouse button").range(' + fmt(round(lo)) + ", " + fmt(round(hi)) + ")"
+          : "slider(" + JSON.stringify(mouse.name === "MouseX" ? "mouse x" : "mouse y") + ", " + fmt(a) + ", " + fmt(a) + ", " + fmt(b) + ")";
+        info.fixed.push({ control, value: a, code, during: FOLLOWABLE.has(control) });
+        info.notes.push("\\" + def.name + " reads the mouse (" + mouse.name + "): it becomes a " + (mouse.name === "MouseButton" ? "switch" : "slider") + " of the Controls panel" + (mouse.exp ? ", moving in a straight line" : ""));
+        return;
+      }
+    }
+    // A random value drawn when the note starts (Rand, ExpRand, IRand): a random value per note.
+    const r = first(v);
+    if (r instanceof GNode && r.kind === "rand") {
+      const lo = typeof first(r.inputs.lo) === "number" ? first(r.inputs.lo) as number : resolve(r.inputs.lo);
+      const hi = typeof first(r.inputs.hi) === "number" ? first(r.inputs.hi) as number : resolve(r.inputs.hi);
+      if (lo !== null && hi !== null) {
+        const a = round(fn(lo)), b = round(fn(hi));
+        const code = r.name === "IRand" && Number.isInteger(a) && Number.isInteger(b) && a <= b
+          ? "irand(" + fmt(b - a + 1) + ")" + (a ? ".add(" + fmt(a) + ")" : "")
+          : r.name === "ExpRand" && a > 0 && b > 0 ? "rand.rangex(" + fmt(a) + ", " + fmt(b) + ")" : "rand.range(" + fmt(a) + ", " + fmt(b) + ")";
+        info.fixed.push({ control, value: round((a + b) / 2), code });
+        return;
+      }
+    }
     info.notes.push("the " + control + " of \\" + def.name + " moves in a way TidalJS cannot follow: its start value is used");
   };
 
@@ -225,6 +371,27 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
     let stop = false;
     node = first(node);
     if (!(node instanceof GNode)) break;
+    const input = inputOf(node);
+    if (input) {
+      info.input = input;
+      break;
+    }
+    // An effect's mix: the dry input plus the wet signal. The wet one is followed; its effects apply in full.
+    if (node.kind === "binop" && node.name === "+" && (dryInput(node.inputs.a) || dryInput(node.inputs.b))) {
+      const wet = dryInput(node.inputs.a) ? node.inputs.b : node.inputs.a;
+      if (audio(wet)) {
+        info.notes.push("\\" + def.name + " mixes its input with the effect: the effect is applied in full");
+        node = wet;
+        continue;
+      }
+    }
+    if (node.kind === "ugen" && (node.name === "XFade2" || node.name === "LinXFade2")) {
+      const [dry, wet] = dryInput(node.inputs.inA ?? null) ? [node.inputs.inA, node.inputs.inB] : [node.inputs.inB, node.inputs.inA];
+      void dry;
+      info.notes.push("\\" + def.name + " crossfades its input with the effect: the effect is applied in full");
+      node = wet ?? null;
+      continue;
+    }
     if (node.kind === "binop" && node.name === "*") {
       const { a, b } = node.inputs;
       const [sig, mod] = audio(a) && !audio(b) ? [a, b] : audio(b) && !audio(a) ? [b, a] : [null, null];
@@ -338,18 +505,44 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
     }
   };
   visit(node);
-  if (!info.port) info.sound = soundByName(def.name) ?? soundByOscillators(oscs, detuned, modulated);
+  const player = findUgen(node, (g) => SAMPLE_PLAYERS.has(g.name));
+  if (info.input) {
+    info.sound = "";
+  } else if (player && !info.port) {
+    // A buffer player: the buffer becomes a sample bank; its rate is the speed, its start the begin.
+    const buf = player.inputs.bufnum ?? player.inputs.sndbuf ?? 0;
+    info.sample = { buf: first(buf), grains: player.name !== "PlayBuf" && player.name !== "BufRd" };
+    info.sound = "";
+    if (player.inputs.rate !== undefined) set(player.inputs.rate, "speed");
+    const start = first(player.inputs.startPos ?? player.inputs.centerPos ?? player.inputs.pos ?? player.inputs.pointer ?? 0);
+    const frac = startFraction(start);
+    if (frac) { if (!role(frac.ctrl, "begin", (x) => x * frac.k, (x) => frac.k === 1 ? x : `${x} * ${fmt(frac.k)}`)) info.notes.push("the start of \\" + def.name + " is not converted"); }
+    else if (typeof start === "number" && start !== 0) info.notes.push("\\" + def.name + " starts " + fmt(start) + " frames into its buffer: the file's length is not known, so it starts at the beginning");
+    if (info.sample.grains) info.notes.push("\\" + def.name + " is granular (" + player.name + "): it plays its buffer as a sample");
+    if (numOr(first(player.inputs.loop ?? 0), 0) >= 1) info.notes.push("\\" + def.name + " loops its buffer: here the sample plays once per note");
+  } else if (!info.port) info.sound = soundByName(def.name) ?? soundByOscillators(oscs, detuned, modulated);
+  if (!info.port && !info.input && !info.sample) fm(node);
+  if (info.sound === "superfb") {
+    // SinOscFB's feedback (0 to about 1.5) is superfb's voice (0 to 1).
+    const fb = findUgen(node, (g) => g.name === "SinOscFB");
+    if (fb) set(fb.inputs.feedback ?? 0, "voice", (x) => Math.max(0, Math.min(1, x / 1.5)), (x) => `Math.max(0, Math.min(1, ${x} / 1.5))`);
+  }
+  if (findUgen(node, (g) => g.name === "LocalIn" || g.name === "InFeedback")) info.notes.push("\\" + def.name + " feeds its output back into itself (LocalIn): the feedback is left out");
 
   // The pitch: how the freq argument reaches the oscillators.
-  if (!info.port || /gabber/i.test(def.name)) pitch(output);
+  if ((!info.port || /gabber/i.test(def.name)) && !info.input && !info.sample) pitch(output);
 
   // The amplitude envelope; without one that ends, the synth plays until it is freed.
   if (ampEnv && !info.port) envelope(ampEnv);
   const done = (e: { node: GNode } | null) => e !== null && numOr(first(e.node.inputs.doneAction ?? 0), 0) >= 2;
-  info.endless = !info.port && !done(ampEnv) && !hasDoneAction(output);
+  // A sustaining envelope (asr, adsr, a release node) opened by a gate argument also plays until something closes it.
+  const gate = ampEnv ? first(ampEnv.node.inputs.gate ?? null) : null;
+  const sustaining = ampEnv !== null && (["asr", "adsr", "dadsr"].includes(ampEnv.env.shape) || (ampEnv.env.releaseNode !== null && ampEnv.env.releaseNode !== undefined))
+    && gate instanceof GNode && gate.kind === "control";
+  info.endless = !info.port && !info.input && ((!done(ampEnv) && !hasDoneAction(output)) || sustaining);
 
-  // SuperCollider's level, as TidalJS's amp for this synth.
-  if (!info.port) info.ampScale = (gain * 0.4) / (SOUND_LEVEL[info.sound] ?? 0.35);
+  // SuperCollider's level, as TidalJS's amp for this synth (a sample plays at amp 1 at full level).
+  if (!info.port) info.ampScale = info.sample ? gain * 0.4 : (gain * 0.4) / (SOUND_LEVEL[info.sound] ?? 0.35);
 
   // Arguments nothing uses as a TidalJS control.
   for (const name of graph.controls.keys()) {
@@ -359,9 +552,59 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
 
   const list = unique(effects.reverse());
   const named = list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0];
-  info.summary = info.sound + ", " + (info.port ? "TidalJS's port of this SynthDef" : "the closest TidalJS synth")
+  if (info.input) {
+    info.summary = "an effect" + (list.length ? ": its " + named + (list.length > 1 ? " become" : " becomes") + " effects of what goes through it" : " TidalJS has nothing for");
+    return info;
+  }
+  info.summary = (info.sample ? "a sample player" : info.sound + ", " + (info.port ? "TidalJS's port of this SynthDef" : "the closest TidalJS synth"))
     + (list.length ? "; its " + named + (list.length > 1 ? " become" : " becomes") + " effects" : "");
   return info;
+
+  /** Two-operator FM (a sine whose frequency a sine moves): superfm, with the ratio as semitone and the index as voice. */
+  function fm(signal: Value) {
+    const pm = findUgen(signal, (g) => g.name === "PMOsc" && g.rate !== "kr");
+    if (pm) {
+      const car = linear(first(pm.inputs.carfreq ?? null));
+      const mod = linear(first(pm.inputs.modfreq ?? null));
+      const ratio = car && mod && car.ctrl === mod.ctrl && car.b === 0 && mod.b === 0 ? mod.a / car.a : null;
+      if (ratio && ratio > 0) fix("semitone", round(12 * Math.log2(ratio)));
+      const index = first(pm.inputs.pmindex ?? 0);
+      if (typeof index === "number") fix("voice", round(Math.min(1, index / 8)));
+      else set(index, "voice", (x) => Math.min(1, x / 8), (x) => `Math.min(1, ${x} / 8)`);
+      info.sound = "superfm";
+      return;
+    }
+    const carrier = findUgen(signal, (g) => (g.name === "SinOsc" || g.name === "FSinOsc") && g.rate !== "kr" && first(g.inputs.freq ?? null) instanceof GNode && (first(g.inputs.freq ?? null) as GNode).kind === "binop" && (first(g.inputs.freq ?? null) as GNode).name === "+");
+    if (!carrier) return;
+    const sum = first(carrier.inputs.freq ?? null) as GNode;
+    const [base, mod] = linear(sum.inputs.a) ? [linear(sum.inputs.a)!, first(sum.inputs.b)] : linear(sum.inputs.b) ? [linear(sum.inputs.b)!, first(sum.inputs.a)] : [null, null];
+    if (!base || !(mod instanceof GNode) || mod.kind !== "binop" || mod.name !== "*") return;
+    // The modulator times its depth: a sine, numbers, and at most the freq control.
+    const factors = productFactors(mod);
+    const oscSide = factors.find(isAudioSine);
+    if (!(oscSide instanceof GNode)) return;
+    const others = factors.filter((f) => f !== oscSide);
+    let k = 1;
+    let byFreq = false;
+    for (const f of others) {
+      const x = first(f);
+      const l = linear(x);
+      if (typeof x === "number") k *= x;
+      else if (l && l.ctrl === base.ctrl && l.b === 0 && !byFreq) { k *= l.a; byFreq = true; }
+      else return;
+    }
+    const modFreq = linear(first(oscSide.inputs.freq ?? null));
+    if (!modFreq || modFreq.ctrl !== base.ctrl || modFreq.b !== 0) return;
+    const ratio = modFreq.a / base.a;
+    const freqDefault = numOr(first(info.defaults.get(base.ctrl.name) ?? 440), 440);
+    // The index is the depth in Hz over the modulator's frequency.
+    const index = byFreq ? k / base.a / ratio : k / (freqDefault * ratio);
+    info.sound = "superfm";
+    if (ratio > 0) fix("semitone", round(12 * Math.log2(ratio)));
+    fix("voice", round(Math.max(0, Math.min(1, index / 8))));
+    if (index > 8) info.notes.push("the FM index of \\" + def.name + " (" + fmt(index) + ") is above what superfm reaches (8)");
+    if (!byFreq) info.notes.push("the FM depth of \\" + def.name + " is fixed in Hz: its index is taken at the default frequency");
+  }
 
   // ---- helpers that write into info
 
@@ -393,7 +636,8 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
       const lfo = lfoSweep(f);
       if (lfo) {
         fix("freq", round(lfo.center));
-        fix("vib", round(lfo.rate));
+        if (lfo.rateMod) info.fixed.push({ control: "vib", value: round(lfo.rate), lfo: lfo.rateMod });
+        else fix("vib", round(lfo.rate));
         fix("vibmod", round(lfo.depth));
         if (lfo.note) info.notes.push(lfo.note);
       }
@@ -404,10 +648,17 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
     const [base, mult] = linear(f.inputs.a) ? [f.inputs.a, f.inputs.b] : linear(f.inputs.b) ? [f.inputs.b, f.inputs.a] : [null, null];
     if (base === null) return;
     const m = first(mult);
+    // freq * Rand(lo, hi): each note slightly out of tune, at random.
+    if (!info.port && m instanceof GNode && m.kind === "rand" && m.name !== "IRand") {
+      const lo = numOr(first(m.inputs.lo ?? 1), 1), hi = numOr(first(m.inputs.hi ?? 1), 1);
+      if (lo > 0 && hi > 0) fix("pitchrand", [round(12 * Math.log2(lo)), round(12 * Math.log2(hi))]);
+      return;
+    }
     // freq * lfo.exprange(a, b), freq * (lfo * k).midiratio: a vibrato around the note.
     const ratio = lfoSweep(m) ?? lfoMidiratio(m);
     if (ratio && !info.port) {
-      fix("vib", round(ratio.rate));
+      if (ratio.rateMod) info.fixed.push({ control: "vib", value: round(ratio.rate), lfo: ratio.rateMod });
+      else fix("vib", round(ratio.rate));
       fix("vibmod", round(ratio.depth));
       if (Math.abs(ratio.center - 1) > 1e-6) info.notes.push("\\" + def.name + " moves its pitch around " + fmt(12 * Math.log2(ratio.center)) + " semitones from the note: the vibrato is centred on the note");
       if (ratio.note) info.notes.push(ratio.note);
@@ -446,6 +697,12 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
       const b = numOr(first(m.inputs.end ?? 1), 1);
       const t = numOr(first(m.inputs.dur ?? 1), 1);
       if (a > 0 && b > 0) fix("pitchenv", [[round(12 * Math.log2(a)), round(12 * Math.log2(b))], [round(t)], ["lin"]]);
+      return;
+    }
+    // freq * an envelope of ratios (Env([2, 1], [0.1])): a pitch envelope in semitones.
+    const ratioEnv = !info.port ? envSignalOf(m, () => null) : null;
+    if (ratioEnv && ratioEnv.levels.every((l) => l > 0)) {
+      fix("pitchenv", [ratioEnv.levels.map((l) => round(12 * Math.log2(l))), ratioEnv.times.map(round), ratioEnv.curves.map((c) => (c === "exp" ? "lin" : c))]);
     }
   }
 
@@ -488,20 +745,23 @@ function analyseChannel(def: SynthDefV, graph: { output: Value; controls: Map<st
 }
 
 /** An oscillator's frequency swept by an LFO: its centre (geometric), rate and depth in semitones each way. */
-function lfoSweep(v: Value): { center: number; rate: number; depth: number; note?: string } | null {
+function lfoSweep(v: Value): { center: number; rate: number; depth: number; note?: string; rateMod?: LfoSignal } | null {
   v = first(v);
   if (!(v instanceof GNode)) return null;
-  const lfoOf = (x: Value): { rate: number; shape: string } | null => {
+  const lfoOf = (x: Value): { rate: number; shape: string; rateMod?: LfoSignal } | null => {
     x = first(x);
     if (x instanceof GNode && x.kind === "ugen" && LFO.has(x.name)) {
       const rate = first(x.inputs.freq ?? null);
       if (typeof rate === "number" && rate < 50) return { rate, shape: x.name };
+      // A vibrato whose speed an LFO moves.
+      const mod = lfoSignalOf(x.inputs.freq ?? null, () => null);
+      if (mod && mod.hi < 50 && mod.lo >= 0) return { rate: meanOf(mod), shape: x.name, rateMod: mod };
     }
     return null;
   };
   let lo: number | null = null;
   let hi: number | null = null;
-  let lfo: { rate: number; shape: string } | null = null;
+  let lfo: { rate: number; shape: string; rateMod?: LfoSignal } | null = null;
   let linearSweep = false;
   if (v.kind === "unop" && (v.name === "exprange" || v.name === "range")) {
     lfo = lfoOf(v.inputs.a);
@@ -522,11 +782,11 @@ function lfoSweep(v: Value): { center: number; rate: number; depth: number; note
   const notes: string[] = [];
   if (lfo.shape !== "SinOsc" && lfo.shape !== "FSinOsc") notes.push("a " + lfo.shape + " moving the pitch becomes a sine vibrato");
   if (linearSweep) notes.push("a pitch sweep that is linear in Hz becomes a vibrato in semitones (the same range, a slightly different curve)");
-  return { center: Math.sqrt(lo * hi), rate: lfo.rate, depth: (12 * Math.log2(hi / lo)) / 2, note: notes.join("; ") || undefined };
+  return { center: Math.sqrt(lo * hi), rate: lfo.rate, depth: (12 * Math.log2(hi / lo)) / 2, note: notes.join("; ") || undefined, rateMod: lfo.rateMod };
 }
 
 /** (lfo * k).midiratio: a vibrato of k semitones. */
-function lfoMidiratio(v: Value): { center: number; rate: number; depth: number; note?: string } | null {
+function lfoMidiratio(v: Value): { center: number; rate: number; depth: number; note?: string; rateMod?: LfoSignal } | null {
   if (!(v instanceof GNode) || v.kind !== "unop" || v.name !== "midiratio") return null;
   const x = first(v.inputs.a);
   if (!(x instanceof GNode) || x.kind !== "binop" || x.name !== "*") return null;
@@ -534,8 +794,238 @@ function lfoMidiratio(v: Value): { center: number; rate: number; depth: number; 
   const l = first(typeof x.inputs.b === "number" ? x.inputs.a : x.inputs.b);
   if (k === null || !(l instanceof GNode) || l.kind !== "ugen" || !LFO.has(l.name)) return null;
   const rate = first(l.inputs.freq ?? null);
-  if (typeof rate !== "number") return null;
+  if (typeof rate !== "number") {
+    const mod = lfoSignalOf(l.inputs.freq ?? null, () => null);
+    return mod && mod.lo >= 0 ? { center: 1, rate: meanOf(mod), depth: Math.abs(k), rateMod: mod } : null;
+  }
   return { center: 1, rate, depth: Math.abs(k) };
+}
+
+/** The first UGen of a signal that matches. */
+function findUgen(v: Value, test: (g: GNode) => boolean, seen = new Set<unknown>()): GNode | null {
+  if (v === null || typeof v !== "object" || seen.has(v)) return null;
+  seen.add(v);
+  if (Array.isArray(v)) {
+    for (const x of v) { const r = findUgen(x, test, seen); if (r) return r; }
+    return null;
+  }
+  if (v instanceof GNode) {
+    if (v.kind === "ugen" && test(v)) return v;
+    for (const x of Object.values(v.inputs)) { const r = findUgen(x, test, seen); if (r) return r; }
+  }
+  return null;
+}
+
+/** The factors of a product (a * b * c). */
+function productFactors(v: Value): Value[] {
+  v = first(v);
+  if (v instanceof GNode && v.kind === "binop" && v.name === "*") return [...productFactors(v.inputs.a), ...productFactors(v.inputs.b)];
+  return [v];
+}
+
+function isAudioSine(v: Value): boolean {
+  const x = first(v);
+  return x instanceof GNode && x.kind === "ugen" && (x.name === "SinOsc" || x.name === "FSinOsc") && x.rate !== "kr";
+}
+
+/** control * BufFrames.kr(buf) (a start as a fraction of the buffer): the control and its factor. */
+function startFraction(v: Value): { ctrl: GNode; k: number } | null {
+  if (!(v instanceof GNode) || v.kind !== "binop" || v.name !== "*") return null;
+  const frames = (x: Value) => { x = first(x); return x instanceof GNode && x.kind === "ugen" && (x.name === "BufFrames" || x.name === "BufSamples"); };
+  const other = frames(v.inputs.a) ? v.inputs.b : frames(v.inputs.b) ? v.inputs.a : null;
+  if (other === null) return null;
+  const l = linear(first(other));
+  return l && l.b === 0 ? { ctrl: l.ctrl, k: l.a } : null;
+}
+
+/** A control signal (an LFO), as a TidalJS signal: its shape, rate in Hz and range. */
+export interface LfoSignal {
+  shape: string;
+  /** Hz; when another LFO moves it (rateMod), its average. */
+  rate: number;
+  /** The range; when an LFO moves a bound (loMod, hiMod), its average. */
+  lo: number;
+  hi: number;
+  exp: boolean;
+  /** An LFO that moves this one's speed (Hz) or the bounds of its range. */
+  rateMod?: LfoSignal;
+  loMod?: LfoSignal;
+  hiMod?: LfoSignal;
+}
+
+/** The average of a signal: the middle of its range (geometric for an exponential one). */
+export function meanOf(l: LfoSignal): number {
+  return l.exp && l.lo > 0 && l.hi > 0 ? Math.sqrt(l.lo * l.hi) : (l.lo + l.hi) / 2;
+}
+
+/** A signal with its values passed through fn (its moving bounds too); lo stays below hi. */
+export function mapSignal(l: LfoSignal, fn: (x: number) => number): LfoSignal {
+  const a = fn(l.lo), b = fn(l.hi);
+  const swap = a > b;
+  const loMod = l.loMod ? mapSignal(l.loMod, fn) : undefined;
+  const hiMod = l.hiMod ? mapSignal(l.hiMod, fn) : undefined;
+  const out: LfoSignal = { shape: l.shape, rate: l.rate, lo: round(Math.min(a, b)), hi: round(Math.max(a, b)), exp: l.exp };
+  if (l.rateMod) out.rateMod = l.rateMod;
+  const lm = swap ? hiMod : loMod, hm = swap ? loMod : hiMod;
+  if (lm) out.loMod = lm;
+  if (hm) out.hiMod = hm;
+  return out;
+}
+
+/** Reads an LFO: lfo.range(lo, hi), lfo.exprange(lo, hi), centre + lfo * depth, or lfo * k + c; `value` resolves arguments. */
+export function lfoSignalOf(v: Value, value: (x: Value) => number | null, depth = 0): LfoSignal | null {
+  v = first(v);
+  if (depth > 4) return null;
+  const num = (x: Value) => (typeof first(x) === "number" ? first(x) as number : value(first(x)));
+  const lfoOf = (x: Value): { shape: string; rate: number; rateMod?: LfoSignal } | null => {
+    x = first(x);
+    if (x instanceof GNode && x.kind === "ugen" && LFO.has(x.name)) {
+      const rate = num(x.inputs.freq ?? 1);
+      if (rate !== null) return { shape: x.name, rate };
+      // Its speed moved by another LFO (SinOsc.kr(LFTri.kr(0.1).range(1, 8))).
+      const mod = lfoSignalOf(x.inputs.freq ?? null, value, depth + 1);
+      if (mod && mod.lo >= 0) return { shape: x.name, rate: meanOf(mod), rateMod: mod };
+    }
+    return null;
+  };
+  /** A bound of a range: a number, or an LFO that moves it (its average, and the LFO). */
+  const bound = (x: Value, d: number): { n: number; mod?: LfoSignal } | null => {
+    const n = num(x ?? d);
+    if (n !== null) return { n };
+    const mod = lfoSignalOf(x, value, depth + 1);
+    return mod ? { n: meanOf(mod), mod } : null;
+  };
+  const ranged = (l: { shape: string; rate: number; rateMod?: LfoSignal }, lo: { n: number; mod?: LfoSignal } | null, hi: { n: number; mod?: LfoSignal } | null, exp: boolean): LfoSignal | null => {
+    if (!lo || !hi) return null;
+    const out: LfoSignal = { ...l, lo: lo.n, hi: hi.n, exp };
+    if (lo.mod) out.loMod = lo.mod;
+    if (hi.mod) out.hiMod = hi.mod;
+    return out;
+  };
+  const bare = lfoOf(v);
+  if (bare) return { ...bare, lo: -1, hi: 1, exp: false };
+  if (!(v instanceof GNode)) return null;
+  if (v.kind === "unop" && ["range", "exprange", "unipolar", "bipolar", "linlin", "linexp"].includes(v.name)) {
+    const l = lfoOf(v.inputs.a);
+    if (!l) return null;
+    if (v.name === "unipolar") return { ...l, lo: 0, hi: num(v.inputs.lo) ?? 1, exp: false };
+    if (v.name === "bipolar") return { ...l, lo: -(num(v.inputs.lo) ?? 1), hi: num(v.inputs.lo) ?? 1, exp: false };
+    if (v.name === "linlin" || v.name === "linexp") return ranged(l, bound(v.inputs.outMin ?? 0, 0), bound(v.inputs.outMax ?? 1, 1), v.name === "linexp");
+    return ranged(l, bound(v.inputs.lo ?? 0, 0), bound(v.inputs.hi ?? 1, 1), v.name === "exprange");
+  }
+  if (v.kind === "binop" && (v.name === "+" || v.name === "*")) {
+    // lfo * k + c, or k * lfo
+    const parts = (x: Value): { lfo: LfoSignal; k: number; c: number } | null => {
+      x = first(x);
+      const l = lfoSignalOf(x, value, depth + 1);
+      if (l && !l.exp) return { lfo: l, k: 1, c: 0 };
+      if (x instanceof GNode && x.kind === "binop" && x.name === "*") {
+        const k = num(x.inputs.b) ?? num(x.inputs.a);
+        const inner = num(x.inputs.b) !== null ? x.inputs.a : x.inputs.b;
+        const p = k !== null ? parts(inner) : null;
+        return p && k !== null ? { lfo: p.lfo, k: p.k * k, c: p.c * k } : null;
+      }
+      if (x instanceof GNode && x.kind === "binop" && x.name === "+") {
+        const c = num(x.inputs.b) ?? num(x.inputs.a);
+        const inner = num(x.inputs.b) !== null ? x.inputs.a : x.inputs.b;
+        const p = c !== null ? parts(inner) : null;
+        return p && c !== null ? { lfo: p.lfo, k: p.k, c: p.c + c } : null;
+      }
+      return null;
+    };
+    const p = parts(v);
+    if (!p) return null;
+    const k = p.k, c = p.c;
+    return mapSignal(p.lfo, (x) => x * k + c);
+  }
+  return null;
+}
+
+/** The mouse as a UGen: MouseX.kr(lo, hi, warp), MouseY, MouseButton.kr(lo, hi). */
+function mouseOf(v: Value): { name: string; lo: number; hi: number; exp: boolean } | null {
+  v = first(v);
+  if (!(v instanceof GNode) || v.kind !== "ugen" || !["MouseX", "MouseY", "MouseButton"].includes(v.name)) return null;
+  const lo = numOr(first(v.inputs.minval ?? 0), 0);
+  const hi = numOr(first(v.inputs.maxval ?? 1), 1);
+  const warp = first(v.inputs.warp ?? 0);
+  const exp = warp === 1 || (warp instanceof Sym && warp.name.startsWith("exp"));
+  return { name: v.name, lo, hi, exp };
+}
+
+/** A curve of an envelope as TidalJS's envelope() takes it: a number or a name. */
+function envCurve(c: Value): number | string {
+  c = first(c);
+  if (typeof c === "number") return c;
+  if (c instanceof Sym || typeof c === "string") {
+    const name = c instanceof Sym ? c.name : c;
+    const names: Record<string, string> = { linear: "lin", lin: "lin", exponential: "exp", exp: "exp", sine: "sin", sin: "sin", step: "step", welch: "wel", wel: "wel", squared: "sqr", sqr: "sqr", cubed: "cub", cub: "cub", hold: "hold" };
+    return names[name] ?? "lin";
+  }
+  return "lin";
+}
+
+/**
+ * An envelope that moves a control during each note, as levels, times (seconds) and curves: EnvGen of an Env
+ * (up to its release node: TidalJS cannot know when the note is let go), Line and XLine, scaled and offset
+ * by numbers (or arguments, through `value`), or put in a range (range, exprange, linlin, linexp).
+ */
+export function envSignalOf(v: Value, value: (x: Value) => number | null): EnvSignal | null {
+  v = first(v);
+  const num = (x: Value) => (typeof first(x) === "number" ? first(x) as number : value(first(x)));
+  if (!(v instanceof GNode)) return null;
+  if (v.kind === "ugen" && (v.name === "Line" || v.name === "XLine")) {
+    const a = num(v.inputs.start ?? (v.name === "XLine" ? 1 : 0)), b = num(v.inputs.end ?? (v.name === "XLine" ? 2 : 1)), d = num(v.inputs.dur ?? 1);
+    if (a === null || b === null || d === null) return null;
+    const exp = v.name === "XLine" && a * b > 0;
+    return { levels: [a, b], times: [Math.max(0, d)], curves: [exp ? "exp" : "lin"] };
+  }
+  if ((v.kind === "env" || (v.kind === "ugen" && v.name === "EnvGen")) && v.inputs.envelope instanceof EnvSpec) {
+    const env = v.inputs.envelope;
+    let levels = env.levels.map(num);
+    let times = env.times.map(num);
+    if (levels.some((l) => l === null) || times.some((t) => t === null) || levels.length < 2) return null;
+    const curves = Array.isArray(env.curves) ? env.curves.map(envCurve) : [envCurve(env.curves ?? null)];
+    if (env.releaseNode !== null && env.releaseNode !== undefined && env.releaseNode >= 0 && env.releaseNode < levels.length - 1) {
+      levels = levels.slice(0, env.releaseNode + 1);
+      times = times.slice(0, env.releaseNode);
+    }
+    const scale = num(v.inputs.levelScale ?? 1) ?? 1, bias = num(v.inputs.levelBias ?? 0) ?? 0, ts = num(v.inputs.timeScale ?? 1) ?? 1;
+    const ls = (levels as number[]).map((l) => l * scale + bias);
+    const tt = (times as number[]).map((t) => Math.max(0, t * ts));
+    if (ls.length === 1) return { levels: [ls[0], ls[0]], times: [0], curves: ["lin"] };
+    return { levels: ls, times: tt, curves: tt.map((_, i) => curves[i % curves.length]) };
+  }
+  if (v.kind === "unop" && ["range", "exprange", "linlin", "linexp", "unipolar", "bipolar"].includes(v.name)) {
+    const inner = envSignalOf(v.inputs.a, value);
+    if (!inner) return null;
+    const map = (fn: (l: number) => number) => ({ ...inner, levels: inner.levels.map(fn) });
+    if (v.name === "unipolar" || v.name === "bipolar") return inner;
+    if (v.name === "linlin" || v.name === "linexp") {
+      const i0 = num(v.inputs.inMin ?? 0), i1 = num(v.inputs.inMax ?? 1), o0 = num(v.inputs.outMin ?? 0), o1 = num(v.inputs.outMax ?? 1);
+      if (i0 === null || i1 === null || o0 === null || o1 === null || i1 === i0) return null;
+      return map((l) => {
+        const u = (l - i0) / (i1 - i0);
+        return v.name === "linexp" && o0 > 0 && o1 > 0 ? o0 * Math.pow(o1 / o0, u) : o0 + u * (o1 - o0);
+      });
+    }
+    const lo = num(v.inputs.lo ?? 0), hi = num(v.inputs.hi ?? 1);
+    if (lo === null || hi === null) return null;
+    return map((l) => (v.name === "exprange" && lo > 0 && hi > 0 ? lo * Math.pow(hi / lo, l) : lo + l * (hi - lo)));
+  }
+  if (v.kind === "binop" && ["*", "+", "-", "/"].includes(v.name)) {
+    for (const [e, k, left] of [[v.inputs.a, v.inputs.b, true], [v.inputs.b, v.inputs.a, false]] as [Value, Value, boolean][]) {
+      const c = num(k);
+      if (c === null) continue;
+      const inner = envSignalOf(e, value);
+      if (!inner) continue;
+      const fn = v.name === "*" ? (l: number) => l * c : v.name === "+" ? (l: number) => l + c
+        : v.name === "-" ? (left ? (l: number) => l - c : (l: number) => c - l) : left ? (l: number) => l / c : (l: number) => (l === 0 ? NaN : c / l);
+      const levels = inner.levels.map(fn);
+      if (!levels.every(Number.isFinite)) return null;
+      return { ...inner, levels };
+    }
+  }
+  return null;
 }
 
 /** The first audio-rate oscillator of a signal. */
@@ -559,7 +1049,7 @@ function hasDoneAction(v: Value, seen = new Set<unknown>()): boolean {
   seen.add(v);
   if (Array.isArray(v)) return v.some((x) => hasDoneAction(x, seen));
   if (v instanceof GNode) {
-    if ((v.kind === "env" || v.name === "EnvGen" || v.name === "Line" || v.name === "XLine") && numOr(first(v.inputs.doneAction ?? 0), 0) >= 2) return true;
+    if ((v.kind === "env" || v.kind === "ugen") && numOr(first(v.inputs.doneAction ?? 0), 0) >= 2) return true;
     return Object.values(v.inputs).some((x) => hasDoneAction(x, seen));
   }
   return false;

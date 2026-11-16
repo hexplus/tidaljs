@@ -1,8 +1,12 @@
-import { button, dialog, dispose, div, h2, p } from "sibujs";
+import { button, dialog, dispose, div, h2, li, p, ul } from "sibujs";
 
 export interface ConfirmOptions {
   title: string;
   message: string;
+  /** Points listed under the message (shown as text). */
+  details?: string[];
+  /** A last line under the details. */
+  note?: string;
   /** Text of the button that goes ahead. */
   confirmText: string;
   cancelText?: string;
@@ -76,6 +80,8 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
         div("confirm-box", [
           h2({ id: "confirmTitle", class: "confirm-title" }, options.title),
           p({ id: "confirmMessage", class: "confirm-message" }, options.message),
+          ...(options.details?.length ? [ul("confirm-details", options.details.map((text) => li([text])))] : []),
+          ...(options.note ? [p("confirm-message confirm-note", [options.note])] : []),
           div("confirm-actions", [cancel, ok]),
         ]),
       ],

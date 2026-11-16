@@ -168,7 +168,9 @@ export function rankItems(items: CompletionItem[], prefix: string): CompletionIt
 const TOKENS = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?|`(?:\\.|[^`\\])*`?)|(\b\d+(?:\.\d+)?\b)|(\b(?:const|let|var|function|return|if|else|new)\b)|([A-Za-z_$][\w$]*)(?=\s*\()|(=>)/g;
 const TOKEN_CLASSES = ["tok-comment", "tok-string", "tok-number", "tok-keyword", "tok-fn", "tok-arrow"];
 
-export const escapeHtml = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Escapes text for HTML: safe as element text and, with the quotes escaped too, inside a quoted attribute. */
+export const escapeHtml = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 /** The code as escaped HTML with token classes. */
 export function highlightHtml(text: string): string {

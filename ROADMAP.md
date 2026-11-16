@@ -533,9 +533,100 @@ Open a SuperCollider file (`.scd`) in the editor and get TidalJS code (Sketches 
 
 `test/supercollider.test.mjs` checks the language, the detection of `.scd` files, and conversions played in the engine: the gabber track's 336 events in 64 seconds (times, notes, peak frequencies, pitch falls, lengths, levels), degrees and scales, rests and random values, sections, routines, Ppar on a TempoClock, Ptpar, chains, chords, SuperDirt events, filter envelopes, and the README's example.
 
+## Phase 15: Sharing a song as a link (complete)
+
+Sketches → Share as a link… copies a link with the song's code, title and tempo in its fragment (`#song=1.d.<base64url deflate>`), so nothing is uploaded. A link is untrusted input, and its code is JavaScript that would run in the page:
+
+- `src/share.ts` (no DOM): versioned encoding, strict decoding (size caps on the link and on the decompressed data, which stops a decompression bomb early; exact fields and types; titles cleaned of control, invisible and bidirectional characters), and a scan of the code for what music never needs (network, storage, the page, running other code, and ways to hide names), with a small lexer so mini-notation strings do not count.
+- `src/components/Share.ts`: the share dialog (copy, or a selected field when the clipboard is unavailable; a warning for long links) and the review of an opened link (the code as text with hidden characters shown, sites, findings). The fragment leaves the address bar at once.
+- `src/session.ts`: shared code never plays by itself: the music stops when it opens, live update waits, and the first Play scans the code as it is then and asks again if anything is flagged (kept across reloads).
+- `index.html`: a Content Security Policy against injected markup, plugins, `<base>` and form hijacking. It keeps `'unsafe-eval'` and an open `connect-src`, which the engine and `samples()` need, so it is not a sandbox; the README's "Sharing a song" says so.
+
+`test/share.test.mjs` checks round trips (Unicode, every example), forged and damaged links, size caps, a 16 MB decompression bomb, title cleaning, the scan (every example is clean; each risky feature and hiding trick is found) and that hostile code cannot add markup through the editor's highlighting.
+
+## Phase 16: The rest of the SuperCollider import (complete)
+
+What Phase 14 left out with a note now converts:
+
+- **Buses and effects** (`interpreter.ts`, `synthdef.ts`, `emit.ts`): `Bus.audio`/`Bus.control`; every `Out` of a SynthDef is kept with its bus, so an effect synth (its signal comes from `In.ar`, a filter's input or `\in.ar`) is found and its effects go onto the parts that play into its bus, through chains of effects and sends (dry plus wet mixes and `XFade2` are followed to the wet side). `Pfx`, `Pfxb` and `Pproto` work the same way. A control bus is its `set` value, or a TidalJS signal when an LFO synth writes it (`lfoSignalOf`: `range`, `exprange`, `linlin`, centre plus depth).
+- **JITLib**: `Ndef`, `NodeProxy`, `ProxySpace`, source and filter slots, `\pset`, `.set`/`.map`, `<<>`/`<>>`, proxies read inside synths (their graph is inlined), `Tdef`; the proxies that play are written when the program ends, so the last definition wins.
+- **Buffers**: `Buffer.read` makes a sample bank; buffer players become samples, with `speed` and `begin` roles.
+- **MIDI and OSC out**: `\type, \midi` events and `MIDIOut` calls become `.midi()` parts; `NetAddr`/server `sendMsg`/`sendBundle` become SuperDirt events, synths (`/s_new`) or `.osc()` parts.
+- **Synths from code**: `release`, `free` and `set(\gate, 0)` end a routine's synth; `set` on a running synth starts a new note.
+- **Random values** in code that repeats (routines, `Pfunc`, `Prout`) are random signals instead of draws; random binary comparisons draw first and then compare (they used to return the draw).
+- **Patterns**: `Pconst`; endless arithmetic and geometric series become `.add`/`.mul` of a `sig` that counts the loops; `Pn(Pshuf(...))` becomes `shuffle`.
+- **SynthDefs**: two-operator FM and `PMOsc` become `superfm` with `semitone` and `voice`; `SinOscFB`, `GrainSin`, `GrainFM`; feedback is noted.
+- **Fixed on the way**: loop lengths are written as exact fractions (`.fast(8 / 3)` instead of `2.66667`, which drifted); a control that some events leave out takes its default there instead of the last value (a legato of 1 next to 1/3 became 1/3 everywhere); a one-off event is no longer reported as "never repeats".
+
+What TidalJS could not do yet (live input, changes during a note, one synth whose values change, a feedback sine) came in Phase 17, and the importer uses it: GUI sliders and buttons become `slider()`/`toggle()`, `MIDIdef.cc` becomes `midicc()`, MIDI note functions that start a synth become `midikeys()`, values an `OSCdef` reads become `oscIn()` (the input functions run once with these live values, so whatever they change follows the player); an LFO inside a SynthDef becomes `.followNote()` and a control bus or proxy an LFO writes `.follow()`; `Pmono` and `synth.set` become `.tie()`; `SinOscFB` becomes `superfb`; random durations become eight random stretches picked by `randcat` each cycle; channels past the second are left out as on a stereo system.
+
+The last gaps closed with the engine features of Phase 18:
+
+- **OSC that starts synths**: an `OSCdef` whose function starts a synth becomes `oscplay(address, template)`, the synth's controls reading that message with `oscIn()`.
+- **Pitch bend and aftertouch**: `MIDIdef.bend`/`MIDIIn.bend` become `midibend()` (SuperCollider's 0 to 16383 as -1 to 1), `touch` and `polytouch` become `miditouch()`. A pitch-bend function that `set`s the synths a note function started gives `midikeys()` its bend range (semitones from a `bend.midiratio`-style argument, or from a ratio). Arrays indexed by a live note (`~notes[num] = Synth(...)`) and `!?`/`??` with functions now run as in sclang.
+- **GUI windows**: `Window`, `View`, `HLayout`/`VLayout`/`GridLayout`, `StaticText`, `Rect` bounds and flow layouts are read; each window becomes a `controlLayout(title, rows)` of the controls the code uses. Unlabelled controls take the `StaticText` beside or above them, or a button's first state; `PopUpMenu`, `ListView`, `NumberBox`, `CheckBox`, `Slider2D`, `RangeSlider`, `EZRanger` and `EZPopUpMenu` are converted, names are made unique, and a widget read in a `Pfunc` or routine is a live slider.
+- **Modulation that is not an LFO**: envelopes (`EnvGen` of any `Env`, up to its release node; `Line`, `XLine`; scaled, offset or put in a range) become `envelope(levels, times, curves)` in `.followNote()`; an envelope synth writing a control bus becomes `.follow()` from the time it starts; `freq * Env(...)` of ratios is a pitch envelope; `MouseX`/`MouseY`/`MouseButton` are sliders and a switch; `Rand`/`ExpRand`/`IRand` are a random value per note, and `freq * Rand(...)` a random detune per note.
+- **An LFO moved by another LFO** (`SinOsc.kr(SinOsc.kr(0.25).range(1, 8))`, a range whose bound an LFO moves): `lfoSignalOf` keeps the moving speed and bounds (`rateMod`, `loMod`, `hiMod`), and the part gets a `sig((t) => ...)` in seconds whose phase is the integral of the speed (closed forms for a sine, saw, triangle or square modulator), so the LFO speeds up and slows down smoothly as in SuperCollider. A vibrato whose speed an LFO moves becomes `.followNote("vib", ...)`; `vib` joined the controls `follow()` can change (the vibrato oscillator's frequency).
+- **Per-key aftertouch**: `keytouch()` (engine) reads, inside a `midikeys()` voice, the pressure of that voice's own key; the engine sets the key while it lays out (and re-lays) a voice's follows, and a note keeps its own value until its key is pressed harder (likewise `miditouch()` in a voice, until channel pressure comes after its key went down). A `polytouch` function that `set`s the held notes becomes `.follow(control, keytouch()...)` in the `midikeys()` template, and a `touch` function on them `.follow(control, miditouch()...)`; used on anything else, polyphonic aftertouch stays the last key's pressure.
+- **Live values during a note**: a GUI, MIDI or OSC value (or a bus it `set`s) that changes a running synth is written with `.follow()`, so it moves the sounding note, not only the next one.
+- **Random durations**: when one random duration sets every event (a `Pbind` `dur` or a routine's random `wait`) and the events follow one another, the values are written in order one per cycle and `rhythm(durations)` plays them, each with a new random duration; with rests in between, the eight `randcat` stretches remain.
+- **Fixed on the way**: a synth with a gated sustaining envelope (`asr`, `adsr`, a release node) that nothing releases now plays until stopped, like any endless synth.
+
+`test/supercollider.test.mjs` plays each of these conversions in the engine and compares the events with what SuperCollider would play.
+
+## Phase 17: Changes during a note, ties, live input and superfb (complete)
+
+What the SuperCollider import (and live playing) needed from the engine:
+
+```javascript
+.follow(ctrl, sig)      // [done] A control changes while each note sounds (onset through release), the signal read at absolute cycles
+.followNote(ctrl, sig)  // [done] The same, the signal's time starting at 0 at each note's onset
+.tie(id)                // [done] Monophonic slur (Pmono, synth.set): the running voice takes the new pitch, controls and length
+slider(name, v, lo, hi, step) // [done] A slider in the Controls panel, as a signal
+toggle(name, on)        // [done] A switch in the Controls panel: 0 or 1
+midicc(cc, channel)     // [done] The last value of a MIDI control change, 0 to 1
+midikeys(template, ch)  // [done] A MIDI keyboard playing a template, each key held until let go
+oscIn(address, index)   // [done] The last number received on an OSC address, through the bridge
+superfb                 // [done] SuperCollider's SinOscFB: voice 0 is a sine, 1 a feedback of 1.5 (saw-like)
+```
+
+- **follow / followNote** (`tidal.js`): the signals travel in the event value as a `Follows` object, left out of JSON (`exportPattern`) and never sent by OSC or MIDI, which get the value at the onset. Every query sets the followed controls to their signals' values at the event's onset, so after `.fast()` or `.late()` the value is the one at the time that plays. `playEvent` binds the signals to the note's onset (cycle, audio time, tempo) and the voice automates the matching AudioParams every 15 ms (at most 400 points per note, flat stretches left out) until it stops: the filter cutoffs and Qs (a followed cutoff replaces its envelope), the panner, a level node for `gain` and `amp` (a gain that starts at 0 still builds the voice), and the pitch (`freq`, `note`, `speed`) as cents on the oscillators' detune, so it adds to portamento, vibrato and pitch envelopes. Other controls are ignored with a warning. Live updates compare the signals' values, so an unchanged follow keeps its stream.
+- **tie**: a control. A synth voice started with a tie registers under orbit, sound and tie; a later event with the same key while it still sounds starts no voice: the gate is held at its level and closes at the new end (sources, modulators and the bend source get the later stop time), the pitch moves on a dedicated bend source (gliding over the new event's portamento, plus its followed pitch), and the filters, pan and level take the new values (or follows) from that moment; controls left out keep their value. Samples ignore it, with a warning.
+- **slider / toggle**: registered while the code runs and committed only when it plays (a failing or pending evaluation keeps the old ones); an existing control keeps its value and takes the new range and step; those not used any more go. `tidal.controls()`, `setControl()`, `onControls()` and `restoreControls()` serve the editor. The Controls panel (`src/components/Controls.ts`, under the cycle view, hidden when there are none) shows a labelled range input with a readout per slider and a switch (`role="switch"`) per toggle; the values are kept in `localStorage`.
+- **MIDI input**: on first use every input is listened to (and inputs plugged in later). The parser keeps running status per input, skips real-time bytes anywhere, system exclusive and system common messages, and treats a note-on with velocity 0 as a note-off. A key plays each `midikeys` template of its channel through `playEvent` with a hold, and its note-off releases those voices over their release.
+- **OSC input**: the bridge's WebSocket (opened by `oscIn` and kept across `setOscUrl`) passes binary messages to a parser of messages and nested bundles (`i f d h s S b c r m t T F N I`, arrays skipped); each address keeps its last numeric arguments. The repository has no bridge: the README says what it must send back, with a small Node example.
+- **superfb**: a second AudioWorklet processor, `tidal-fb`, with a-rate `frequency`, `detune` and `feedback`; the feedback is averaged over two samples. A constant source is its gate, so the oscillator starts and stops to the sample and the node ends when the voice does. Without AudioWorklet it plays a sine, with a warning.
+
+`test/engine.test.mjs` checks each of them through a fake audio graph that records every AudioParam call: the automation points of followed cutoffs, Qs, pan, gain and pitch (absolute and per note), JSON and live updates with follows, a tie gliding into the running voice and extending it, controls kept, clamped, stepped, restored and removed, MIDI bytes (running status, split messages, real-time bytes, channels) driving `midicc` and `midikeys` voices held and released, OSC messages and nested bundles of every type through a fake WebSocket, and the `tidal-fb` processor rendered sample by sample (a pure sine at 0, strong harmonics at 1.5).
+
+## Phase 18: More live input, envelopes, rhythm, control layouts and fuller ties (complete)
+
+More of what the SuperCollider import needed from the engine:
+
+```javascript
+midibend(channel)            // [done] The last MIDI pitch bend, -1 to 1 (0 in the middle)
+miditouch(channel)           // [done] The last aftertouch, 0 to 1: channel pressure or key pressure
+midikeys(template, ch, range) // [done] The wheel bends the held keys by up to `range` semitones
+oscplay(address, template)   // [done] Each OSC message plays the template once, with that message's values
+envelope(levels, times, curves) // [done] SuperCollider's Env as a signal, times in seconds
+.rhythm(durations)           // [done] One step after another from cycle 0, each with its own length, never looping
+controlLayout(title, rows)   // [done] Titled groups of rows of controls in the Controls panel
+.tie(id)                     // [done] A tied note changes effects, synth parameters and the orbit's effects too
+.follow() of live input      // [done] Moving a slider, knob, wheel, fader or bus moves the sounding notes
+```
+
+- **midibend / miditouch** (`tidal.js`): pitch bend (`0xE0`, 14 bits, 8192 the centre, 16383 exactly 1), channel pressure (`0xD0`) and polyphonic key pressure (`0xA0`, the last key's) are kept per channel and for any channel, read by signals as `midicc` is.
+- **midikeys' bend range**: a third argument (the channel may be `null`). A voice of such a keyboard carries its wheel; a bend on the keyboard's channel ramps the bend source of every held voice (5 ms) to the voice's pitch plus bend × range, on top of a followed pitch if it has one, and a key pressed with the wheel off centre starts bent. Voices without a bend source (samples) do not bend.
+- **oscplay**: registered like `midikeys` (pending while the code runs, committed only when it plays). Each message on its address (normalised to a leading `/`) is first kept for `oscIn`, then each template plays its first event of the current cycle at that event's length, so the template reads the message's own values.
+- **envelope**: SuperCollider's curves (numbers, `lin`, `exp`, `step`, `hold`, `sin`, `wel`, `sqr`, `cub`) in a module-level `envelopeValue`, which the pitch envelopes now use too; times and curves are cycled as in `Env`; inputs are checked with clear errors. Cycle t is read at t / cps seconds.
+- **rhythm**: the onsets are summed incrementally into a growing `Float64Array` (step k's length is the duration pattern at cycle k, at least 1/256 cycle; a non-number is 0.25 with a warning), and a query finds its first step by binary search, so a span far ahead costs one pass the first time and a search afterwards. The cache stops at two million steps, with a warning. Each step plays every event of the pattern active at cycle k, with the step's start and end, so legato, the cycle view and `exportPattern` see ordinary events.
+- **controlLayout**: layouts are registered like controls (replaced only by code that plays) and reach the editor through `controlLayouts()` and the second argument of `onControls`. The Controls panel shows a `fieldset` with a `legend` per layout, its rows wrapping side by side, then the controls no layout names; names that are not controls are skipped.
+- **tie**: a tied voice is built with every effect it can change in place, set so it changes nothing when its first note leaves it out (waveshapers without a curve, vowel, band-pass and phaser beside the dry sound, tremolo, ring and leslie at depth 0, the peak equaliser at 0 dB, lpf at 20 kHz, hpf at 20 Hz, a vibrato at depth 0). A tied note then sets them from its start: waveshaper curves, AudioParams, the synth's own `detune`, `voice`, `rate`, `lfo` and `semitone` on running nodes, and AudioWorklet effects through a timed message (`port.postMessage({ at, options })`, applied to each effect's state without resetting it). It also sets its orbit's delay and reverb, connecting the voice to a bus it lacks only once. `follow()` gained the AudioParam-driven effects (peak, djf, tremolo, phaser, ring, leslie).
+- **Live follow**: live inputs count their reads, so `_applyFollows` knows when a voice's signals depend on one; such voices (and their followed pitch) are kept until they end. `setControl`, MIDI control changes, bends and aftertouch, OSC values and `setBus` re-lay their automation from that moment (cancel and hold, a 10 ms glide, then the signal sampled to the voice's stop), at most every 20 ms. A followed pitch also works when the event's only `note` or `freq` is the one `follow()` gives at the onset (or none): it moves from the pitch the voice was built at.
+
+`test/engine.test.mjs` checks each of them: MIDI bytes for bends (centre, extremes, channels), channel and key pressure; a held key bent by the wheel and starting bent; `oscplay` playing the values of the message that triggered it (message and bundle), replaced and kept like `midikeys`; envelope values at several times, tempos and curves, and its errors; `rhythm` onsets, lengths and values with random lengths, far-future spans equal to summing from the start, chords, rests, patterned lengths, the shortest step, the cap, legato, export and the cycle view; `controlLayout` lists, listener and replacement rules; a tied note changing shapers, vowel, tremolo, ring, phaser, leslie, peak, djf, filters, vibrato, synth parameters, worklet settings and the orbit's effects; and sliders, knobs, buses, OSC faders, tied voices and held keys moving the notes that sound.
+
 ## What could come next
 
 - A visual pattern editor: draw steps on a grid and get the mini-notation
 - Recording a session (code and audio) to replay it
-- A MIDI input mapped to buses (`bus()`), like Tidal's control buses
-- Sharing a sketch as a link (the code in the URL)

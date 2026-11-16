@@ -514,7 +514,15 @@
 
         /** Events whose onset falls in [begin, end), measured in cycles. */
         query(begin, end) {
-            return this._query(begin, end);
+            const events = this._query(begin, end);
+            // Controls that follow() changes during a note start at their
+            // signal's value at the onset. Set at every level, so the outermost
+            // (whose onsets are the times that play) has the last word.
+            for (let i = 0; i < events.length; i++) {
+                const v = events[i].value;
+                if (v && v.follow instanceof Follows) return events.map(followOnset);
+            }
+            return events;
         }
 
         /** Events of the first cycle, handy for debugging in the console. */
@@ -1435,6 +1443,9 @@
         nrpn: (v) => (/^\s*\d+\s*:\s*\d+\s*$/.test(String(v)) ? String(v).replace(/\s/g, '') : undefined),
         nrpnn: coerceNumber,
         nrpnv: coerceNumber,
+        // A monophonic slur, as SuperCollider's Pmono: an event whose tie equals
+        // that of a synth voice still sounding (same orbit and sound) changes it.
+        tie: (v) => (v === undefined || v === null || v === '~' || v === '' ? undefined : (typeof v === 'number' ? v : String(v))),
     };
     // Filter envelopes: lpenv, lpattack, lpdecay, lpsustain, lprelease and the
     // same for hp (high-pass), bp (band-pass) and peak (the peak equaliser).
@@ -1504,6 +1515,327 @@
         if (x === undefined) throw new TypeError(`pitchenv(): unknown curve ${JSON.stringify(curve)} (use a number, "lin" or "exp")`);
         return x;
     }
+
+    // SuperCollider's named envelope curves (the shapes of Env), by name.
+    const ENV_SHAPES = {
+        lin: 0, linear: 0, exp: 'exp', exponential: 'exp', step: 'step', hold: 'hold',
+        sin: 'sin', sine: 'sin', wel: 'wel', welch: 'wel', sqr: 'sqr', squared: 'sqr', cub: 'cub', cubed: 'cub',
+    };
+
+    /** The value of an envelope segment from a to b at x (0 to 1 through it), with a SuperCollider curve. */
+    function envSegment(a, b, x, c) {
+        if (c === 'step') return b;
+        if (c === 'hold') return x < 1 ? a : b;
+        if (c === 'exp') return a * b > 0 ? a * Math.pow(b / a, x) : a + (b - a) * x;
+        if (c === 'sin') return a + (b - a) * (0.5 - 0.5 * Math.cos(Math.PI * x));
+        if (c === 'wel') {
+            return a < b ? a + (b - a) * Math.sin((Math.PI / 2) * x) : b - (b - a) * Math.sin((Math.PI / 2) * (1 - x));
+        }
+        if (c === 'sqr') {
+            if (a < 0 || b < 0) return a + (b - a) * x;
+            const s = Math.sqrt(a) + (Math.sqrt(b) - Math.sqrt(a)) * x;
+            return s * s;
+        }
+        if (c === 'cub') {
+            const s = Math.cbrt(a) + (Math.cbrt(b) - Math.cbrt(a)) * x;
+            return s * s * s;
+        }
+        if (!isNum(c) || Math.abs(c) < 0.001) return a + (b - a) * x;
+        return a + ((b - a) * (1 - Math.exp(c * x))) / (1 - Math.exp(c));
+    }
+
+    /**
+     * The value at time t (seconds) of an envelope { levels, times, curves },
+     * as SuperCollider's Env: levels[0] before 0, the last level after the
+     * last segment; times and curves are cycled when shorter than the segments.
+     */
+    function envelopeValue(env, t) {
+        const { levels, times, curves } = env;
+        if (!(t > 0) || levels.length < 2) return levels[0];
+        let start = 0;
+        for (let i = 0; i < levels.length - 1; i++) {
+            const dur = times.length ? times[i % times.length] : 0;
+            if (t < start + dur) {
+                const x = dur > 0 ? Math.max(0, (t - start) / dur) : 1;
+                return envSegment(levels[i], levels[i + 1], x, curves.length ? curves[i % curves.length] : 0);
+            }
+            start += dur;
+        }
+        return levels[levels.length - 1];
+    }
+
+    /** One envelope curve for envelope(): a number or a SuperCollider shape name. */
+    function envShape(curve) {
+        if (isNum(curve)) return curve;
+        if (typeof curve === 'string') {
+            const key = curve.trim().toLowerCase();
+            if (Object.prototype.hasOwnProperty.call(ENV_SHAPES, key)) return ENV_SHAPES[key];
+            const x = toNumber(key);
+            if (x !== undefined) return x;
+        }
+        throw new TypeError(`envelope(): unknown curve ${JSON.stringify(curve)} (use a number, or "lin", "exp", "step", "hold", "sin", "wel", "sqr" or "cub")`);
+    }
+
+    /** The checked { levels, times, curves } of envelope(levels, times, curves). */
+    function makeEnvelope(levels, times, curves) {
+        const example = 'e.g. envelope([0, 1, 0], [0.1, 0.5])';
+        if (!Array.isArray(levels) || levels.length === 0 || !levels.every(isNum)) {
+            throw new TypeError(`envelope() expects a list of levels (numbers), ${example}`);
+        }
+        const list = typeof times === 'number' ? [times] : times;
+        if (!Array.isArray(list) || !list.every((x) => isNum(x) && x >= 0)) {
+            throw new TypeError(`envelope() expects a list of times in seconds (numbers, 0 or more) after the levels, ${example}`);
+        }
+        if (levels.length > 1 && list.length === 0) {
+            throw new TypeError(`envelope() needs a time for each segment between two levels, ${example}`);
+        }
+        const shapes = curves === undefined || curves === null ? [0] : Array.isArray(curves) ? curves : [curves];
+        if (shapes.length === 0) throw new TypeError('envelope() expects a curve, or a list with one curve per segment');
+        return { levels: levels.slice(), times: list.slice(), curves: shapes.map(envShape) };
+    }
+
+    // Controls that .follow() and .followNote() can change while a note
+    // sounds, each through the AudioParam it drives (see _applyFollows).
+    const FOLLOW_CONTROLS = [
+        'lpf', 'hpf', 'bpf', 'resonance', 'hpq', 'bpq', 'pan', 'gain', 'amp', 'freq', 'note', 'speed',
+        'peak', 'peakq', 'peakgain', 'djf', 'tremolorate', 'tremolodepth', 'phaserrate', 'phaserdepth',
+        'ring', 'ringf', 'leslie', 'lrate', 'lsize', 'vib',
+    ];
+
+    /**
+     * The signals of .follow() / .followNote() on an event, by control:
+     * { pattern, note } (note: the signal's time starts at 0 at each note's
+     * onset). Left out of JSON (exportPattern), never sent by OSC or MIDI.
+     * playEvent binds it to the note's onset (cycle, audio time and tempo),
+     * so at(name, time) reads the control at an audio time.
+     */
+    class Follows {
+        constructor(entries, onset) {
+            this.entries = entries;
+            this.onset = onset || null;
+        }
+        with(name, entry) { return new Follows({ ...this.entries, [name]: entry }, this.onset); }
+        names() { return Object.keys(this.entries); }
+        has(name) { return Object.prototype.hasOwnProperty.call(this.entries, name); }
+        /** This set of signals for a note that starts at `cycle` (audio time `time`, at `cps`). */
+        bind(cycle, time, cps) { return new Follows(this.entries, { cycle, time, cps }); }
+        /** The value of a control at cycle t, for a note that starts at cycle `onset`, or undefined. */
+        valueAt(name, t, onset) {
+            const entry = this.entries[name];
+            if (!entry) return undefined;
+            const hit = eventAt(entry.pattern, entry.note ? t - onset : t);
+            if (!hit) return undefined;
+            const v = hit.value;
+            if (v && typeof v === 'object') return isNum(v[name]) ? v[name] : undefined;
+            const x = CONTROLS[name](v, null);
+            return isNum(x) ? x : undefined;
+        }
+        /** The value of a control at audio time `time` (once bound to a note). */
+        at(name, time) {
+            const o = this.onset;
+            if (!o) return undefined;
+            return this.valueAt(name, o.cycle + (time - o.time) * o.cps, o.cycle);
+        }
+        /** Values sampled over two cycles from `from`, so live updates can tell two sets apart. */
+        key(from) {
+            return this.names().sort().map((name) => {
+                const values = [];
+                for (let i = 0; i < 16; i++) values.push(this.valueAt(name, from + i / 8, from));
+                return `${name}${this.entries[name].note ? '~' : ''}=${values.map((x) => (x === undefined ? '' : +x.toFixed(6))).join(',')}`;
+            }).join(';');
+        }
+        toJSON() { return undefined; }
+    }
+
+    /** .follow() and .followNote(): a control that changes while each note sounds. */
+    function followPattern(pattern, fname, control, sig, note) {
+        if (typeof control !== 'string' || sig === undefined || sig === null) {
+            throw new TypeError(`${fname}() expects a control name and a signal, e.g. ${fname}("lpf", sine.range(200, 2000))`);
+        }
+        const name = CONTROL_ALIASES[control] || control;
+        if (!FOLLOW_CONTROLS.includes(name)) {
+            if (pattern.tidal) pattern.tidal._warnOnce(`${fname}() cannot change ${control} during a note, so it is ignored (it can change ${FOLLOW_CONTROLS.join(', ')})`);
+            return pattern;
+        }
+        const entry = { pattern: typeof sig === 'number' ? pure(pattern.tidal, sig) : toRaw(pattern.tidal, sig, fname), note };
+        // Each event also carries the control's value at its onset (see query), for MIDI, OSC and the views.
+        return pattern.withValue((v) => {
+            const o = asObject(v);
+            return { ...o, follow: o.follow instanceof Follows ? o.follow.with(name, entry) : new Follows({ [name]: entry }) };
+        });
+    }
+
+    /** An event whose followed controls take their signals' values at its onset. */
+    function followOnset(ev) {
+        const v = ev.value;
+        if (!v || !(v.follow instanceof Follows)) return ev;
+        const value = { ...v };
+        for (const name of v.follow.names()) {
+            const x = v.follow.valueAt(name, ev.begin, ev.begin);
+            if (x !== undefined) value[name] = x;
+        }
+        return { ...ev, value };
+    }
+
+    // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
+    const RHYTHM_MAX_STEPS = 2000000;
+    const RHYTHM_MIN_STEP = 1 / 256;
+
+    /** Every event of `pattern` sounding at cycle t (a chord gives several); a signal gives its value. */
+    function eventsActiveAt(pattern, t) {
+        if (pattern._signal) {
+            const value = pattern._signal(t);
+            return value === undefined ? [] : [{ begin: t, end: t, value }];
+        }
+        const probe = t + 1e-7;
+        for (const back of [0, 7]) {
+            const found = pattern.query(Math.floor(t) - back, probe).filter((ev) => ev.begin <= probe && ev.end > probe);
+            if (found.length) return found;
+        }
+        return [];
+    }
+
+    /**
+     * .rhythm(durations): the pattern one step at a time from cycle 0, never
+     * looping. Step k starts where step k - 1 ends, lasts d(k) cycles (the
+     * value of `durations` at cycle k) and plays what the pattern plays at
+     * cycle k. The onsets are summed once and kept, so a span far into the
+     * future is found by a binary search.
+     */
+    function rhythmPattern(pattern, durations) {
+        const tidal = pattern.tidal;
+        if (durations === undefined || durations === null || typeof durations === 'boolean') {
+            throw new TypeError('rhythm() expects step lengths in cycles: a number or a pattern, e.g. .rhythm(choose([0.25, 0.5]))');
+        }
+        const fixed = typeof durations === 'number' ? durations : null;
+        if (fixed !== null && !Number.isFinite(fixed)) throw new TypeError('rhythm() expects a finite number of cycles per step');
+        const source = fixed === null ? toRaw(tidal, durations, 'rhythm') : null;
+        const warn = (message) => {
+            if (tidal) tidal._warnOnce(message);
+            else console.warn('TidalJS:', message);
+        };
+        // onsets[k] is the start of step k; the first `known` are summed.
+        let onsets = new Float64Array(1024);
+        let known = 1;
+        const length = (k) => {
+            let x = fixed;
+            if (source) {
+                const hit = eventAt(source, k);
+                const v = hit ? hit.value : undefined;
+                x = typeof v === 'number' ? v : typeof v === 'string' ? ratioValue(v) : undefined;
+            }
+            if (!isNum(x)) {
+                warn('rhythm(): a step length is not a number, so that step lasts 0.25 cycles');
+                return 0.25;
+            }
+            return Math.max(RHYTHM_MIN_STEP, x);
+        };
+        // Sums onsets until one is at or past `until`; false once the cap is reached first.
+        const extend = (until) => {
+            while (onsets[known - 1] < until) {
+                if (known > RHYTHM_MAX_STEPS) {
+                    warn(`rhythm() keeps the first ${RHYTHM_MAX_STEPS} steps; later ones are silent`);
+                    return false;
+                }
+                if (known === onsets.length) {
+                    const grown = new Float64Array(Math.min(onsets.length * 2, RHYTHM_MAX_STEPS + 2));
+                    grown.set(onsets);
+                    onsets = grown;
+                }
+                onsets[known] = onsets[known - 1] + length(known - 1);
+                known++;
+            }
+            return true;
+        };
+        return new PatternBuilder(tidal, (b, e) => {
+            if (!(e > 0) || e <= b) return [];
+            extend(e);
+            // The first step starting at or after b (all known steps are in order).
+            let lo = 0;
+            let hi = known - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (onsets[mid] < b) lo = mid + 1;
+                else hi = mid;
+            }
+            const out = [];
+            for (let k = lo; k + 1 < known && onsets[k] < e; k++) {
+                if (onsets[k] < b) continue;
+                const begin = onsets[k];
+                const end = onsets[k + 1];
+                for (const ev of eventsActiveAt(pattern, k)) out.push({ begin, end, value: ev.value });
+            }
+            return out;
+        });
+    }
+
+    /** [time, value] points of fn(time) from `from` to `to`: every 15 ms, at most 400; flat runs are left out. */
+    function samplePoints(from, to, fn) {
+        const span = Math.max(0, to - from);
+        const count = clamp(Math.ceil(span / 0.015), 1, 400);
+        const raw = [];
+        let last;
+        for (let i = 0; i <= count; i++) {
+            const at = from + (span * i) / count;
+            const x = fn(at);
+            const y = isNum(x) ? x : last;
+            if (y === undefined) continue;
+            raw.push([at, y]);
+            last = y;
+        }
+        // A point between two equal neighbours changes nothing on a straight line.
+        return raw.filter((p, i) => i === 0 || i === raw.length - 1 || !(raw[i - 1][1] === p[1] && raw[i + 1][1] === p[1]));
+    }
+
+    /** Lays [time, value] points on an AudioParam as straight lines. */
+    function automate(param, points) {
+        if (!param || !points.length) return;
+        param.setValueAtTime(points[0][1], points[0][0]);
+        for (let i = 1; i < points.length; i++) param.linearRampToValueAtTime(points[i][1], points[i][0]);
+    }
+
+    /** Replaces a parameter's automation after `from` with straight lines to [time, value] points (from the value it has at `from`). */
+    function automateFrom(param, from, points) {
+        if (!param) return;
+        holdParam(param, from);
+        for (const [at, value] of points) param.linearRampToValueAtTime(value, Math.max(at, from));
+    }
+
+    // A live input re-lays follow() at most this often (milliseconds), gliding there over LIVE_GLIDE seconds.
+    const LIVE_RELAY_MS = 20;
+    const LIVE_GLIDE = 0.01;
+
+    /** Stops a parameter's automation at `time`, holding the value it has there (or `fallback`). */
+    function holdParam(param, time, fallback) {
+        if (!param) return;
+        if (typeof param.cancelAndHoldAtTime === 'function') {
+            param.cancelAndHoldAtTime(time);
+        } else {
+            param.cancelScheduledValues(time);
+            if (isNum(fallback)) param.setValueAtTime(fallback, time);
+        }
+    }
+
+    /** Sets a parameter from `time` on, dropping what was scheduled after it (a tied event's new value). */
+    function setAt(param, value, time) {
+        if (!param || !isNum(value)) return;
+        holdParam(param, time, value);
+        param.setValueAtTime(value, time);
+    }
+
+    // SuperDirt's DJ filter cutoffs for djf 0 to 1: the low-pass closes below 0.5, the high-pass opens above it.
+    const djfLow = (x) => 20 * Math.pow(500, Math.min(clamp(x, 0, 1), 0.5) / 0.5);
+    const djfHigh = (x) => 20 * Math.pow(500, Math.max(clamp(x, 0, 1) - 0.5, 0) / 0.5);
+
+    /**
+     * SuperDirt's resonance and hresonance go from 0 to 1: RLPF / RHPF with
+     * rq = resonance.linexp(0, 1, 1, 0.001), a peak of 60 * resonance dB
+     * (Web Audio takes the Q of these filters in dB). Below 0 (an extension)
+     * they damp the cutoff: -0.1 is SuperCollider's rq 2.
+     */
+    const resonanceDb = (r) => 60 * clamp(r, -1, 1);
+    const bandQ = (q) => clamp(q, 0.0001, 1000);
+    const cutoffHz = (f) => clamp(f, 20, 20000);
 
     // Tidal functions that the earlier sections lack: the primed versions
     // (every', within', toScale', fit'), and the rest of Sound.Tidal.UI.
@@ -1665,6 +1997,31 @@
                 curves: times.map((_, i) => envCurveValue(curveList[i % Math.max(1, curveList.length)])),
             };
             return this.withValue((v) => ({ ...asObject(v), pitchenv: env }));
+        },
+
+        /**
+         * Changes a control while each note sounds, from its onset through its
+         * release: the signal is read at the cycle each moment falls on (the
+         * value at the onset replaces the control's own). Several can be
+         * chained; the last one for a control wins.
+         */
+        follow(control, sig) {
+            return followPattern(this, 'follow', control, sig, false);
+        },
+
+        /** Like follow(), with the signal's time starting at 0 at each note's onset (an LFO that restarts with every note). */
+        followNote(control, sig) {
+            return followPattern(this, 'followNote', control, sig, true);
+        },
+
+        /**
+         * Plays the pattern one step at a time from cycle 0, never looping:
+         * step k starts where the one before ends, lasts `durations` cycles
+         * (a number or a pattern, read at cycle k) and plays what this
+         * pattern plays at cycle k (several events for a chord, none for a rest).
+         */
+        rhythm(durations) {
+            return rhythmPattern(this, durations);
         },
     });
 
@@ -2790,7 +3147,11 @@
     function sameEvents(a, b, from) {
         const key = (p) => {
             try {
-                return p.query(from, from + 2).map((ev) => `${ev.begin.toFixed(6)}:${ev.end.toFixed(6)}:${JSON.stringify(ev.value)}`).sort().join('|');
+                return p.query(from, from + 2).map((ev) => {
+                    // Signals of follow() are left out of JSON: compare their values.
+                    const follow = ev.value && ev.value.follow instanceof Follows ? ev.value.follow.key(ev.begin) : '';
+                    return `${ev.begin.toFixed(6)}:${ev.end.toFixed(6)}:${JSON.stringify(ev.value)}${follow}`;
+                }).sort().join('|');
             } catch (e) {
                 return null;
             }
@@ -2966,6 +3327,24 @@
         return isNum(v.amp) ? clamp(v.amp, 0, 2) / 0.4 : 1;
     }
 
+    /** SuperDirt's amp * gain^4 for an event, with the synth's own amp (superhoover's 0.1) as the default. */
+    function levelOf(def, v) {
+        return gainOf(v) * ampOf(isNum(v.amp) || !def || !isNum(def.amp) ? v : { amp: def.amp });
+    }
+
+    // How long a MIDI key (midikeys) can be held, in seconds.
+    const MIDI_HOLD = 600;
+
+    /** A value for a slider (within its range, on its step) or a toggle (0 or 1); the control's own value when unreadable. */
+    function controlValue(c, value) {
+        if (c.kind === 'toggle') return value === true || toNumber(value) > 0 ? 1 : 0;
+        const x = typeof value === 'boolean' ? (value ? c.max : c.min) : toNumber(value);
+        if (x === undefined) return c.value;
+        let y = clamp(x, c.min, c.max);
+        if (c.step > 0) y = clamp(c.min + Math.round((y - c.min) / c.step) * c.step, c.min, c.max);
+        return +y.toFixed(10);
+    }
+
     // ==================================================================
     // Pattern constructors and combinators
     // ==================================================================
@@ -2979,6 +3358,7 @@
     /** Tidal's ^name in mini-notation: one event per cycle with the value set by setBus(name), else silence. */
     function busValue(tidal, name) {
         const p = new PatternBuilder(tidal, (b, e) => {
+            LIVE_READS.count++;
             const v = tidal ? tidal.buses.get(String(name)) : undefined;
             if (v === undefined) return [];
             const out = [];
@@ -3019,6 +3399,34 @@
         const p = new PatternBuilder(tidal, () => []);
         p._signal = fn;
         return p;
+    }
+
+    // Reads of live inputs (sliders, toggles, MIDI, OSC, buses), counted so
+    // that follow() can tell whether its signal depends on one: such voices
+    // are laid out again when an input changes while they sound.
+    const LIVE_READS = { count: 0 };
+
+    // The MIDI key ("channel:note") of the midikeys() voice whose signals are
+    // being read, so that keytouch() reads that key's own pressure.
+    const KEY_CONTEXT = { key: null };
+
+    /** Runs fn with KEY_CONTEXT set to `key`. */
+    function withKey(key, fn) {
+        const saved = KEY_CONTEXT.key;
+        KEY_CONTEXT.key = key === undefined ? null : key;
+        try {
+            return fn();
+        } finally {
+            KEY_CONTEXT.key = saved;
+        }
+    }
+
+    /** A signal of a live input (slider, toggle, midicc, midibend, miditouch, oscIn, bus). */
+    function liveSignal(tidal, fn) {
+        return signal(tidal, (t) => {
+            LIVE_READS.count++;
+            return fn(t);
+        });
     }
 
     function fastPattern(pattern, f) {
@@ -4001,6 +4409,8 @@
         superzow: { type: 'superzow', freq: 440, decay: 0.6, level: 0.3, pitch: { penv: 2, pattack: 0.15, pdecay: 0.25, pcurve: -2 } },
         superchip: { type: 'superchip', freq: 440, decay: 0.4, level: 0.3 },
         superfm: { type: 'superfm', freq: 440, decay: 0.8, level: 0.4 },
+        // SuperCollider's SinOscFB: voice is the feedback, from a sine (0) to saw-like (1).
+        superfb: { type: 'superfb', freq: 440, decay: 0.6, level: 0.35 },
         superstatic: { type: 'superstatic', freq: 3000, decay: 0.4, level: 0.6 },
         superpiano: { type: 'superpiano', freq: 440, decay: 3, level: 0.45 },
         supergong: { type: 'supergong', freq: 220, decay: 5, level: 0.35 },
@@ -4021,7 +4431,7 @@
     // instead of decaying (like a drum sample cut short).
     const SUSTAINED_TYPES = new Set([
         'osc', 'noise', 'supersaw', 'supersquare', 'superpwm', 'superhoover', 'superreese', 'superzow',
-        'superchip', 'superfm', 'superstatic', 'supergabber',
+        'superchip', 'superfm', 'superfb', 'superstatic', 'supergabber',
     ]);
 
     // General MIDI drum notes, used when exporting or sending drums to MIDI.
@@ -4055,7 +4465,7 @@
     // (see _loadWorklet), where it registers the "tidal-fx" processor. Each
     // node runs one effect, given in processorOptions.kind, on each channel.
 
-    /* global sampleRate, registerProcessor, AudioWorkletProcessor */
+    /* global sampleRate, currentTime, registerProcessor, AudioWorkletProcessor */
     function fxWorkletModule() {
         const TAU = Math.PI * 2;
         const clampTo = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -4065,11 +4475,14 @@
         // the time of the next one, so the pitch rises and the timing stays.
         class Squiz {
             constructor(o) {
-                this.ratio = Math.max(1, o.squiz);
+                this.set(o);
                 this.rec = [];
                 this.play = null;
                 this.pos = 0;
                 this.prev = 0;
+            }
+            set(o) {
+                this.ratio = Math.max(1, o.squiz);
             }
             step(x) {
                 if ((this.prev <= 0 && x > 0 && this.rec.length > 1) || this.rec.length >= 4096) {
@@ -4093,9 +4506,12 @@
         // wave cycles at random.
         class WaveLoss {
             constructor(o) {
-                this.p = clampTo(o.waveloss, 0, 100) / 100;
+                this.set(o);
                 this.prev = 0;
                 this.drop = false;
+            }
+            set(o) {
+                this.p = clampTo(o.waveloss, 0, 100) / 100;
             }
             step(x) {
                 if (this.prev <= 0 && x > 0) this.drop = Math.random() < this.p;
@@ -4124,11 +4540,14 @@
         // frequency by `shift` Hz.
         class FreqShift {
             constructor(o) {
-                this.inc = (TAU * o.shift) / sampleRate;
+                this.set(o);
                 this.phase = o.phase || 0;
                 this.a = [0.6923878, 0.9360654322959, 0.9882295226860, 0.9987488452737].map((c) => new Allpass(c));
                 this.b = [0.4021921162426, 0.8561710882420, 0.9722909545651, 0.9952884791278].map((c) => new Allpass(c));
                 this.late = 0;
+            }
+            set(o) {
+                this.inc = (TAU * o.shift) / sampleRate;
             }
             step(x) {
                 let re = x;
@@ -4149,13 +4568,16 @@
         // by octer, plus flip-flop sub-octaves (one and two octaves down).
         class Octer {
             constructor(o) {
-                this.up = clampTo(o.octer || 0, 0, 1);
-                this.sub = o.octersub || 0;
-                this.subsub = o.octersubsub || 0;
+                this.set(o);
                 this.k = 1 - Math.exp((-TAU * 440) / sampleRate);
                 this.lp = 0; this.prevLp = 0;
                 this.ff2 = 0; this.ff3 = 0;
                 this.r1 = 0; this.dc = 0;
+            }
+            set(o) {
+                this.up = clampTo(o.octer || 0, 0, 1);
+                this.sub = o.octersub || 0;
+                this.subsub = o.octersubsub || 0;
             }
             step(x) {
                 const r = Math.abs(x);
@@ -4228,8 +4650,13 @@
                 this.frozen = null;
                 this.heard = 0;   // frames since the sound started (for freeze)
                 this.count = 0;   // frames processed (for binshift's phases)
+                this.set(o);
+            }
+            /** The settings that come from the controls (a tied event changes them, the buffers stay). */
+            set(o) {
+                this.o = o;
                 const bins = this.half + 1;
-                const binHz = sampleRate / n;
+                const binHz = sampleRate / this.n;
                 this.shift = o.binshift ? Math.round((o.binshift * 1000) / binHz) : 0;
                 this.teeth = o.comb ? Math.max(1, Math.round(1 + o.comb * 31)) : 0;
                 this.smearBins = o.smear ? Math.max(1, Math.round(o.smear * 16)) : 0;
@@ -4349,10 +4776,7 @@
         // wet/dry balance. The delays are in samples, as in SuperCollider.
         class FreeVerb {
             constructor(o) {
-                this.wet = clampTo(o.mix, 0, 1);
-                this.dry = 1 - this.wet;
-                this.feedback = 0.7 + 0.28 * clampTo(o.room, 0, 1);
-                this.damp = 0.4 * clampTo(o.damp, 0, 1);
+                this.set(o);
                 const line = (n) => ({ buf: new Float32Array(n), i: 0, store: 0 });
                 const sides = [0, 23].map((spread) => ({
                     combs: [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617].map((n) => line(n + spread)),
@@ -4360,6 +4784,12 @@
                 }));
                 this.sides = sides;
                 this.out = [0, 0];
+            }
+            set(o) {
+                this.wet = clampTo(o.mix, 0, 1);
+                this.dry = 1 - this.wet;
+                this.feedback = 0.7 + 0.28 * clampTo(o.room, 0, 1);
+                this.damp = 0.4 * clampTo(o.damp, 0, 1);
             }
             side(s, input) {
                 let out = 0;
@@ -4389,9 +4819,12 @@
 
         class Coarse {
             constructor(o) {
-                this.period = Math.max(1, o.coarse);
+                this.set(o);
                 this.phase = 0;
                 this.held = 0;
+            }
+            set(o) {
+                this.period = Math.max(1, o.coarse);
             }
             step(x) {
                 if (this.phase <= 0) {
@@ -4419,8 +4852,23 @@
                 this.options = options.processorOptions;
                 this.Kind = KINDS[this.options.kind];
                 this.chains = [];
+                // New settings from a tied event: { at: audio time, options } (see _workletSet).
+                this.pending = [];
+                if (this.port) this.port.onmessage = (e) => { if (e.data && e.data.options) this.pending.push(e.data); };
+            }
+            applyPending() {
+                const now = typeof currentTime === 'number' ? currentTime : Infinity;
+                while (this.pending.length && !(this.pending[0].at > now)) {
+                    this.options = { ...this.options, ...this.pending.shift().options };
+                    for (let i = 0; i < this.chains.length; i++) {
+                        const fx = this.chains[i];
+                        if (fx && typeof fx.set === 'function') fx.set(this.options);
+                        else if (fx) this.chains[i] = new this.Kind(this.options);
+                    }
+                }
             }
             process(inputs, outputs) {
+                if (this.pending.length) this.applyPending();
                 const input = inputs[0];
                 const output = outputs[0];
                 // No input left: the voice ended and was disconnected.
@@ -4453,6 +4901,57 @@
             }
         }
         registerProcessor('tidal-fx', TidalFx);
+
+        // SuperCollider's SinOscFB: a sine whose phase is pushed by its own
+        // output times `feedback` (radians; 0 is a pure sine, about 1.5 is
+        // saw-like). The output fed back is averaged over two samples, which
+        // keeps high feedback from breaking into noise. frequency (Hz) and
+        // detune (cents) are a-rate, so pitch envelopes, vibrato and glides
+        // drive it as they drive an oscillator. The input is the voice's
+        // gate (a constant source at 1 while the note sounds): the oscillator
+        // runs only where it is above 0, to the sample, and the node ends
+        // once the source has stopped.
+        class TidalFeedbackSine extends AudioWorkletProcessor {
+            static get parameterDescriptors() {
+                return [
+                    { name: 'frequency', defaultValue: 440, minValue: 0, maxValue: 22000, automationRate: 'a-rate' },
+                    { name: 'detune', defaultValue: 0, automationRate: 'a-rate' },
+                    { name: 'feedback', defaultValue: 0, minValue: 0, maxValue: 4, automationRate: 'a-rate' },
+                ];
+            }
+            constructor() {
+                super();
+                this.phase = 0;
+                this.y1 = 0;
+                this.y2 = 0;
+                this.started = false;
+            }
+            process(inputs, outputs, parameters) {
+                const gate = inputs[0] && inputs[0][0];
+                const out = outputs[0][0];
+                if (!gate) {
+                    // Before the voice starts there is no input yet; after it stops, the node is done.
+                    out.fill(0);
+                    return !this.started;
+                }
+                this.started = true;
+                const { frequency, detune, feedback } = parameters;
+                const at = (list, i) => (list.length > 1 ? list[i] : list[0]);
+                for (let i = 0; i < out.length; i++) {
+                    if (!(gate[i] > 0)) { out[i] = 0; continue; }
+                    const y = Math.sin(this.phase + at(feedback, i) * 0.5 * (this.y1 + this.y2));
+                    this.y2 = this.y1;
+                    this.y1 = y;
+                    out[i] = y;
+                    const hz = at(frequency, i) * Math.pow(2, at(detune, i) / 1200);
+                    this.phase += (TAU * hz) / sampleRate;
+                    if (this.phase > TAU) this.phase -= TAU;
+                }
+                for (let ch = 1; ch < outputs[0].length; ch++) outputs[0][ch].set(out);
+                return true;
+            }
+        }
+        registerProcessor('tidal-fb', TidalFeedbackSine);
     }
 
     // ==================================================================
@@ -4498,6 +4997,74 @@
         const size = new Uint8Array(4);
         new DataView(size.buffer).setInt32(0, message.length);
         return concatBytes([oscString('#bundle'), head, size, message]);
+    }
+
+    /**
+     * Reads an OSC packet (a message, or a bundle of them, nested) into
+     * [{ address, args }]. Arguments: i, f, d, h (numbers), s and S (text),
+     * b (a blob, as bytes), c, r and m (32 bits, as a number), t (a time tag,
+     * as seconds), T and F (true, false), N (null), I (Infinity); array
+     * brackets are skipped. Throws on a packet that is cut short.
+     */
+    function parseOsc(bytes, out = []) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const need = (at, n) => {
+            if (at + n > bytes.length) throw new Error('the packet is cut short');
+        };
+        const text = (at) => {
+            let end = at;
+            while (end < bytes.length && bytes[end] !== 0) end++;
+            need(end, 1);
+            return [new TextDecoder().decode(bytes.subarray(at, end)), (end + 4) & ~3];
+        };
+        if (bytes.length >= 8 && text(0)[0] === '#bundle') {
+            let at = 16; // "#bundle\0" and the time tag
+            need(0, 16);
+            while (at < bytes.length) {
+                need(at, 4);
+                const size = view.getInt32(at);
+                at += 4;
+                if (size < 0) throw new Error('a bundle element has a negative size');
+                need(at, size);
+                parseOsc(bytes.subarray(at, at + size), out);
+                at += size;
+            }
+            return out;
+        }
+        const [address, afterAddress] = text(0);
+        if (!address.startsWith('/')) throw new Error('an OSC address starts with /');
+        const args = [];
+        if (afterAddress < bytes.length && bytes[afterAddress] === 0x2c) { // ","
+            const [tags, start] = text(afterAddress);
+            let at = start;
+            for (const tag of tags.slice(1)) {
+                switch (tag) {
+                    case 'i': need(at, 4); args.push(view.getInt32(at)); at += 4; break;
+                    case 'f': need(at, 4); args.push(view.getFloat32(at)); at += 4; break;
+                    case 'c': case 'r': case 'm': need(at, 4); args.push(view.getUint32(at)); at += 4; break;
+                    case 'd': need(at, 8); args.push(view.getFloat64(at)); at += 8; break;
+                    case 'h': need(at, 8); args.push(Number(view.getBigInt64(at))); at += 8; break;
+                    case 't': need(at, 8); args.push(view.getUint32(at) - 2208988800 + view.getUint32(at + 4) / 4294967296); at += 8; break;
+                    case 's': case 'S': { const [s, next] = text(at); args.push(s); at = next; break; }
+                    case 'b': {
+                        need(at, 4);
+                        const size = view.getInt32(at);
+                        need(at + 4, Math.max(0, size));
+                        args.push(bytes.slice(at + 4, at + 4 + size));
+                        at += 4 + ((Math.max(0, size) + 3) & ~3);
+                        break;
+                    }
+                    case 'T': args.push(true); break;
+                    case 'F': args.push(false); break;
+                    case 'N': args.push(null); break;
+                    case 'I': args.push(Infinity); break;
+                    case '[': case ']': break;
+                    default: throw new Error(`unknown OSC type "${tag}"`);
+                }
+            }
+        }
+        out.push({ address, args });
+        return out;
     }
 
     function concatBytes(chunks) {
@@ -4610,6 +5177,30 @@
             this._outputGain = 0.8;            // master volume (setOutput)
             this._limiterOn = true;            // master limiter (setOutput)
             this._lastFreq = new Map();        // orbit:sound -> frequency of its last note, for portamento
+
+            // Live input: slider() / toggle(), midicc(), midikeys() and oscIn().
+            this._controls = new Map();        // name -> { name, kind, value, min, max, step }
+            this._controlPresets = new Map();  // name -> value restored before the control exists (restoreControls)
+            this._controlListeners = new Set();
+            this._live = null;                 // controls, layouts, midikeys and oscplays of the code being evaluated
+            this._layouts = [];                // [{ title, rows }] from controlLayout()
+            this._midiKeys = [];               // [{ pattern, channel, bendRange }] from midikeys()
+            this._midiHeld = new Map();        // "channel:key" -> voices of the held key
+            this._midiCC = new Map();          // "channel:cc" and "cc" -> last value, 0 to 1
+            this._midiBend = new Map();        // "channel" and "*" -> last pitch bend, -1 to 1
+            this._polyTouch = new Map();       // "channel:note" -> that key's pressure, 0 to 1 (keytouch)
+            this._midiSeq = 0;                 // counts MIDI messages, to tell what came after a key went down
+            this._touchSeq = new Map();        // "channel" and "*" -> the count of the last aftertouch
+            this._keySeq = new Map();          // "channel:note" -> the count when the key went down
+            this._midiTouch = new Map();       // "channel" and "*" -> last aftertouch, 0 to 1
+            this._oscPlays = [];               // [{ address, pattern }] from oscplay()
+            this._liveVoices = new Map();      // voice params -> what follow() lays out from live inputs (see _relayLive)
+            this._liveFlushedAt = -Infinity;   // wall time (ms) of the last re-layout
+            this._liveTimer = null;
+            this._midiParsers = new Map();     // MIDI input -> running status and pending data bytes
+            this._midiListening = false;
+            this._oscValues = new Map();       // OSC address -> last numeric arguments
+            this._oscListening = false;
         }
 
         // --- Setup -----------------------------------------------------
@@ -4776,12 +5367,112 @@
             // Buses: values that can be changed from outside while playing.
             g.setBus = (name, value) => {
                 this.buses.set(String(name), value);
+                this._liveChanged();
                 return value;
             };
-            g.bus = (name, fallback = 0) => signal(this, () => {
+            g.bus = (name, fallback = 0) => liveSignal(this, () => {
                 const v = this.buses.get(String(name));
                 return v === undefined ? fallback : v;
             });
+
+            // Live controls: a slider or a switch in the editor's Controls panel,
+            // read as a continuous pattern of its current value.
+            g.slider = (name, value, min = 0, max = 1, step = 0) => {
+                const c = this._registerControl('slider', name, value, min, max, step);
+                return liveSignal(this, () => this._controlValue(c.name, c.value));
+            };
+            g.toggle = (name, on = false) => {
+                const c = this._registerControl('toggle', name, on ? 1 : 0, 0, 1, 1);
+                return liveSignal(this, () => this._controlValue(c.name, c.value));
+            };
+
+            // MIDI input: the last value of a control change (0 to 1), and a keyboard that plays a template.
+            g.midicc = (cc, channel) => {
+                const number = clamp(Math.floor(requireNumber('midicc', cc)), 0, 127);
+                const ch = channel === undefined || channel === null ? null : clamp(Math.floor(requireNumber('midicc', channel)), 0, 15);
+                this._listenMidi();
+                const key = ch === null ? String(number) : `${ch}:${number}`;
+                return liveSignal(this, () => this._midiCC.get(key) ?? 0);
+            };
+            // The pitch-bend wheel (-1 to 1, centre 0) and aftertouch (0 to 1) of a channel, or of any channel.
+            const midiChannel = (fname, channel) => (channel === undefined || channel === null ? null
+                : clamp(Math.floor(requireNumber(fname, channel)), 0, 15));
+            g.midibend = (channel) => {
+                const ch = midiChannel('midibend', channel);
+                this._listenMidi();
+                const key = ch === null ? '*' : String(ch);
+                return liveSignal(this, () => this._midiBend.get(key) ?? 0);
+            };
+            g.miditouch = (channel) => {
+                const ch = midiChannel('miditouch', channel);
+                this._listenMidi();
+                const key = ch === null ? '*' : String(ch);
+                return liveSignal(this, () => {
+                    // In a midikeys() voice: nothing (the note keeps its own value) until pressure comes after its key went down.
+                    if (KEY_CONTEXT.key !== null) {
+                        const down = this._keySeq.get(KEY_CONTEXT.key);
+                        if (down !== undefined && !((this._touchSeq.get(key) ?? 0) > down)) return undefined;
+                    }
+                    return this._midiTouch.get(key) ?? 0;
+                });
+            };
+            // The pressure of the key a midikeys() voice plays (polyphonic aftertouch), 0 to 1: nothing (the note
+            // keeps its own value) until that key is pressed harder; 0 outside a midikeys() voice.
+            g.keytouch = () => {
+                this._listenMidi();
+                return liveSignal(this, () => (KEY_CONTEXT.key === null ? 0 : this._polyTouch.get(KEY_CONTEXT.key)));
+            };
+            g.midikeys = (template, channel, bendRange) => {
+                if (template === undefined || template === null) throw new TypeError('midikeys() expects a pattern to play, e.g. midikeys(sound("superpiano"))');
+                const pattern = toPattern(this, template, 'midikeys');
+                const ch = midiChannel('midikeys', channel);
+                // The pitch-bend wheel bends the held keys by up to bendRange semitones (0: it does not).
+                const range = bendRange === undefined || bendRange === null ? 0 : clamp(requireNumber('midikeys', bendRange), 0, 96);
+                const entry = { pattern, channel: ch, bendRange: range };
+                if (this._live) this._live.midiKeys.push(entry);
+                else this._midiKeys.push(entry);
+                this._listenMidi();
+                return silence(this);
+            };
+
+            // OSC input through the WebSocket bridge: the last numeric argument at `index` of an address.
+            const oscPath = (fname, address, example) => {
+                if (typeof address !== 'string' || !address.trim()) throw new TypeError(`${fname}() expects an OSC address, e.g. ${example}`);
+                return address.trim().startsWith('/') ? address.trim() : '/' + address.trim();
+            };
+            g.oscIn = (address, index = 0) => {
+                const path = oscPath('oscIn', address, 'oscIn("/fader1")');
+                const at = Math.max(0, Math.floor(requireNumber('oscIn', index)));
+                this._oscListening = true;
+                this._oscSocket();
+                return liveSignal(this, () => {
+                    const values = this._oscValues.get(path);
+                    return values && isNum(values[at]) ? values[at] : 0;
+                });
+            };
+            // Each OSC message on `address` plays the template once (as midikeys does for a key).
+            g.oscplay = (address, template) => {
+                const path = oscPath('oscplay', address, 'oscplay("/hit", sound("superpiano"))');
+                if (template === undefined || template === null) throw new TypeError('oscplay() expects an OSC address and a pattern to play, e.g. oscplay("/hit", sound("superpiano"))');
+                const entry = { address: path, pattern: toPattern(this, template, 'oscplay') };
+                if (this._live) this._live.oscPlays.push(entry);
+                else this._oscPlays.push(entry);
+                this._oscListening = true;
+                this._oscSocket();
+                return silence(this);
+            };
+
+            // An envelope as SuperCollider's Env(levels, times, curves), times in seconds, read at cycle / cps.
+            g.envelope = (levels, times, curves) => {
+                const env = makeEnvelope(levels, times, curves);
+                return signal(this, (t) => envelopeValue(env, t / this.cps));
+            };
+
+            // The Controls panel's layout: a titled group of rows of control names.
+            g.controlLayout = (title, rows) => {
+                this._registerLayout(title, rows);
+                return undefined;
+            };
 
             g.setCPS = (cps) => this.setCPS(cps);
             g.setcps = g.setCPS;
@@ -4811,6 +5502,8 @@
                 this.oscUrl = String(url);
                 if (this._socket) this._socket.close();
                 this._socket = null;
+                // oscIn() keeps listening, on the new bridge.
+                if (this._oscListening) this._oscSocket();
                 return this.oscUrl;
             };
             g.midiOutputs = () => this.midiOutputs();
@@ -5319,6 +6012,8 @@
                     try { node.disconnect(); } catch (e) { /* already disconnected */ }
                 }), 150);
             }
+            this._midiHeld.clear(); // the held keys' voices went with the session
+            this._liveVoices.clear();
             this._allNotesOff();
         }
 
@@ -5528,6 +6223,8 @@
 
             this._warnings = warnings;
             this._collecting = { push: (pattern) => collected.push([current, pattern]) };
+            // slider(), toggle(), controlLayout(), midikeys() and oscplay() of this code: they replace the old ones only if it plays.
+            this._live = { controls: new Map(), layouts: [], midiKeys: [], oscPlays: [] };
             try {
                 const body = statements
                     .map((s, k) => `__at(${k});\n` + (isExpression(s.text) ? `__out(${k}, (${s.text}\n));` : `${s.text}\n;`))
@@ -5601,6 +6298,14 @@
                 this.streams = streams;
                 this.channels = new Map([...streams].map(([name, s]) => [name, s.playing]));
                 this._collecting = null;
+                // The controls and keyboards of this code replace the old ones (those not used any more go).
+                const live = this._live;
+                this._live = null;
+                this._midiKeys = live.midiKeys;
+                this._oscPlays = live.oscPlays;
+                this._controls = live.controls;
+                this._layouts = live.layouts;
+                this._notifyControls();
                 if (patterns.length > 0) this._start();
                 else this._halt();
 
@@ -5610,6 +6315,119 @@
             } finally {
                 this._collecting = null;
                 this._warnings = null;
+                this._live = null;
+            }
+        }
+
+        // --- Live controls (slider, toggle) ----------------------------
+
+        /**
+         * Registers a slider or a toggle. A control that exists keeps its value
+         * (re-running code does not reset it) and takes the new range. While
+         * code is evaluated, it goes with that code's controls.
+         */
+        _registerControl(kind, name, value, min, max, step) {
+            if (name === undefined || name === null || String(name).trim() === '') {
+                throw new TypeError(`${kind}() expects a name, e.g. ${kind === 'slider' ? 'slider("cutoff", 800, 200, 4000)' : 'toggle("hats", true)'}`);
+            }
+            const key = String(name).trim();
+            let lo = toNumber(min) ?? 0;
+            let hi = toNumber(max) ?? 1;
+            if (hi < lo) [lo, hi] = [hi, lo];
+            const c = { name: key, kind, value: lo, min: lo, max: hi, step: Math.max(0, toNumber(step) ?? 0) };
+            const pending = this._live ? this._live.controls : null;
+            const prev = (pending && pending.get(key)) || this._controls.get(key);
+            const start = toNumber(value);
+            const initial = prev && prev.kind === kind ? prev.value
+                : this._controlPresets.has(key) ? this._controlPresets.get(key)
+                    : start === undefined ? lo : start;
+            c.value = controlValue(c, initial);
+            if (pending) pending.set(key, c);
+            else {
+                this._controls.set(key, c);
+                this._notifyControls();
+            }
+            return c;
+        }
+
+        /** The current value of a control (those of the code being evaluated first), or `fallback`. */
+        _controlValue(name, fallback) {
+            const c = (this._live && this._live.controls.get(name)) || this._controls.get(name);
+            return c ? c.value : fallback;
+        }
+
+        /** The live controls of the code that plays: [{ name, kind, value, min, max, step }]. */
+        controls() {
+            return [...this._controls.values()].map((c) => ({ ...c }));
+        }
+
+        /** Sets a control's value (kept within its range and step); returns the value set, or undefined if there is no such control. */
+        setControl(name, value) {
+            const c = this._controls.get(String(name));
+            if (!c) return undefined;
+            const x = controlValue(c, value);
+            if (this._controlPresets.has(c.name)) this._controlPresets.set(c.name, x);
+            if (x !== c.value) {
+                c.value = x;
+                this._notifyControls();
+                this._liveChanged();
+            }
+            return x;
+        }
+
+        /**
+         * Registers a controlLayout(title, rows): a titled group of rows of
+         * control names for the Controls panel. While code is evaluated, it
+         * goes with that code's layouts (they replace the old ones if it plays).
+         */
+        _registerLayout(title, rows) {
+            const example = 'e.g. controlLayout("Synth", [["cutoff", "res"], ["amp", "on"]])';
+            if (title !== undefined && title !== null && typeof title !== 'string' && typeof title !== 'number') {
+                throw new TypeError(`controlLayout() expects a title and rows of control names, ${example}`);
+            }
+            if (!Array.isArray(rows)) throw new TypeError(`controlLayout() expects rows of control names (a list of lists), ${example}`);
+            const name = (x) => {
+                if (typeof x !== 'string' && typeof x !== 'number') throw new TypeError(`controlLayout(): control names are strings, ${example}`);
+                return String(x).trim();
+            };
+            // A name on its own is a row of one control.
+            const layout = {
+                title: title === undefined || title === null ? '' : String(title),
+                rows: rows.map((row) => (Array.isArray(row) ? row.map(name) : [name(row)]).filter(Boolean)).filter((row) => row.length),
+            };
+            if (this._live) this._live.layouts.push(layout);
+            else {
+                this._layouts.push(layout);
+                this._notifyControls();
+            }
+        }
+
+        /** The controlLayout() groups of the code that plays, in call order: [{ title, rows: [[name, ...], ...] }]. */
+        controlLayouts() {
+            return this._layouts.map((l) => ({ title: l.title, rows: l.rows.map((row) => row.slice()) }));
+        }
+
+        /** Calls fn(controls(), controlLayouts()) whenever the controls, their values or the layouts change. Returns a function that stops it. */
+        onControls(fn) {
+            this._controlListeners.add(fn);
+            return () => this._controlListeners.delete(fn);
+        }
+
+        /** Values for controls by name (e.g. saved by the editor), used when they are created and set on those that exist. */
+        restoreControls(values) {
+            for (const [name, value] of Object.entries(values || {})) {
+                const x = toNumber(value);
+                if (x === undefined) continue;
+                this._controlPresets.set(name, x);
+                if (this._controls.has(name)) this.setControl(name, x);
+            }
+        }
+
+        _notifyControls() {
+            const list = this.controls();
+            const layouts = this.controlLayouts();
+            for (const fn of this._controlListeners) {
+                try { fn(list, layouts); } catch (e) { console.error('TidalJS: controls listener failed:', e); }
             }
         }
 
@@ -5810,8 +6628,14 @@
          * size and dry (1 - the reverb's level) when it has them. Every sound
          * of the orbit feeds both, so other patterns on the orbit hear them too.
          */
-        _orbitSend(node, v, time, orbit) {
+        _orbitSend(node, v, time, orbit, sends = null) {
             const fx = this._orbitEffects(orbit);
+            // A voice connects to each bus once (a tied event sends the same voice again).
+            const link = (input) => {
+                if (sends && sends.has(input)) return;
+                if (sends) sends.add(input);
+                node.connect(input);
+            };
             if (isNum(v.delay) && v.delay > 0) this._orbitDelay(fx);
             if (fx.delay) {
                 const d = fx.delay;
@@ -5821,7 +6645,7 @@
                 d.line.delayTime.setValueAtTime(clamp(seconds, 0, 4), time);
                 if (isNum(v.delayfeedback)) d.feedback.gain.setValueAtTime(clamp(v.delayfeedback, 0, 0.99), time);
                 d.amp.gain.setValueAtTime(isNum(v.delay) ? clamp(v.delay, 0, 1) : 0, time);
-                node.connect(d.input);
+                link(d.input);
             }
             if (isNum(v.reverb) && v.reverb > 0) this._orbitReverb(fx);
             if (fx.reverb) {
@@ -5829,7 +6653,7 @@
                 if (isNum(v.reverb)) r.input.gain.setValueAtTime(clamp(v.reverb, 0, 1), time);
                 if (isNum(v.size)) this._reverbSize(r, v.size, time);
                 if (isNum(v.dry)) r.out.gain.setValueAtTime(1 - clamp(v.dry, 0, 1), time);
-                node.connect(r.input);
+                link(r.input);
             }
         }
 
@@ -5860,11 +6684,14 @@
                 nodes.push(g);
                 return g;
             };
+            // A waveshaper; amount null leaves it without a curve (it passes the
+            // sound as it is) until a tied event gives it one.
             const shaper = (kind, amount, oversample = '2x') => {
                 const ws = ctx.createWaveShaper();
-                ws.curve = this._curve(kind, amount);
+                ws.curve = amount === null ? null : this._curve(kind, amount);
                 ws.oversample = oversample;
                 add(ws);
+                return ws;
             };
 
             // Oscillators that modulate this voice (ring, tremolo, phaser, leslie); stopped with it.
@@ -5880,29 +6707,55 @@
                 osc.start();
                 lfos.push(osc);
                 nodes.push(osc, amount);
+                return { freq: osc.frequency, amount: amount.gain };
             };
 
+            // The parameters follow() and tie change later (see _applyFollows and _retie).
+            const params = {};
+            const follows = v.follow instanceof Follows && v.follow.onset ? v.follow : null;
+            const followed = (...keys) => !!follows && keys.some((key) => follows.has(key));
+            // A tied voice (tie()) builds the effects it can change even when
+            // this event does not use them, set so they leave the sound as it
+            // is; a later event of the tie turns them on (see _retie).
+            const tied = !!(timing && timing.tied);
+            const updates = [];
+            const when = (time, fn) => this._atTime(time, fn);
+
             // A filter, with its envelope when prefix is lp, hp, bp or peak (see _filterEnvelope).
-            const filter = (type, freq, q, prefix, gain) => {
+            // A followed cutoff (key: lpf, hpf or bpf) replaces the envelope.
+            const filter = (type, freq, q, prefix, gain, key) => {
                 const f = ctx.createBiquadFilter();
                 f.type = type;
                 f.frequency.value = clamp(freq, 20, 20000);
                 f.Q.value = q;
                 if (gain !== undefined) f.gain.value = gain;
-                if (prefix && timing) this._filterEnvelope(f.frequency, freq, v, prefix, timing);
+                if (prefix && timing && !(key && follows && follows.has(key))) this._filterEnvelope(f.frequency, freq, v, prefix, timing);
                 add(f);
+                if (key) params[key] = { freq: f.frequency, q: f.Q };
+                return f;
             };
 
             // An AudioWorklet effect (see fxWorkletModule), once the module is loaded.
-            const worklet = (kind, options, label) => {
+            // A tied voice's worklet takes the new settings of the keys a later event gives.
+            const worklet = (kind, options, label, keys, settings) => {
                 const fx = this._workletNode(kind, options, label);
-                if (fx) add(fx);
+                if (!fx) return;
+                add(fx);
+                if (tied && keys) {
+                    const state = { ...options };
+                    updates.push((e, time, info) => {
+                        if (!keys.some((key) => isNum(e[key]))) return;
+                        Object.assign(state, settings(e, state, info));
+                        this._workletSet(fx, time, state);
+                    });
+                }
             };
 
-            if (v.vowel && VOWELS[v.vowel]) {
+            const vowel = v.vowel && VOWELS[v.vowel] ? v.vowel : null;
+            if (vowel || tied) {
                 const vin = gainNode(1);
-                const vout = gainNode(2);
-                VOWELS[v.vowel].forEach((freq, i) => {
+                const vout = gainNode(vowel ? 2 : 0);
+                const formants = VOWELS[vowel || 'a'].map((freq, i) => {
                     const f = ctx.createBiquadFilter();
                     const g = ctx.createGain();
                     f.type = 'bandpass';
@@ -5913,49 +6766,145 @@
                     f.connect(g);
                     g.connect(vout);
                     nodes.push(f, g);
+                    return f;
                 });
                 node.connect(vin);
-                node = vout;
+                if (tied) {
+                    // Without a vowel the sound goes round the formants.
+                    const dry = gainNode(vowel ? 0 : 1);
+                    const out = gainNode(1);
+                    node.connect(dry);
+                    dry.connect(out);
+                    vout.connect(out);
+                    node = out;
+                    params.vowel = { dry: dry.gain, wet: vout.gain };
+                    updates.push((e, time) => {
+                        if (!e.vowel || !VOWELS[e.vowel]) return;
+                        VOWELS[e.vowel].forEach((freq, i) => setAt(formants[i].frequency, freq, time));
+                        setAt(vout.gain, 2, time);
+                        setAt(dry.gain, 0, time);
+                    });
+                } else {
+                    node = vout;
+                }
             }
 
-            if (isNum(v.shape) && v.shape > 0) shaper('shape', Math.round(clamp(v.shape, 0, 0.99) * 100));
+            const shapeAmount = (x) => Math.round(clamp(x, 0, 0.99) * 100);
+            if ((isNum(v.shape) && v.shape > 0) || tied) {
+                const ws = shaper('shape', isNum(v.shape) && v.shape > 0 ? shapeAmount(v.shape) : null);
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.shape)) when(time, () => { ws.curve = e.shape > 0 ? this._curve('shape', shapeAmount(e.shape)) : null; });
+                    });
+                }
+            }
 
-            // SuperDirt's resonance and hresonance go from 0 to 1: RLPF / RHPF with
-            // rq = resonance.linexp(0, 1, 1, 0.001), a peak of 60 * resonance dB
-            // (Web Audio takes the Q of these filters in dB). Below 0 (an extension)
-            // they damp the cutoff: -0.1 is SuperCollider's rq 2.
-            const resonanceDb = (r) => 60 * clamp(r, -1, 1);
-            if (isNum(v.hpf) && v.hpf > 0) filter('highpass', v.hpf, resonanceDb(isNum(v.hpq) ? v.hpq : 0), 'hp');
+            // resonance and hresonance as in SuperDirt (see resonanceDb). A tied
+            // voice without hpf gets one at 20 Hz, without lpf one at 20 kHz.
+            const hpfOn = isNum(v.hpf) && v.hpf > 0;
+            if (hpfOn || tied) filter('highpass', hpfOn ? v.hpf : 20, resonanceDb(isNum(v.hpq) ? v.hpq : 0), hpfOn ? 'hp' : null, undefined, 'hpf');
             // SuperDirt: BPF.ar(signal, bandf, 1 / bandq) * max(bandq, 1), bandq 10 by default.
-            if (isNum(v.bpf) && v.bpf > 0) {
-                const bandq = isNum(v.bpq) ? clamp(v.bpq, 0.0001, 1000) : 10;
-                filter('bandpass', v.bpf, bandq, 'bp');
-                add(gainNode(Math.max(bandq, 1)));
+            const bpfOn = isNum(v.bpf) && v.bpf > 0;
+            if (bpfOn && !tied) {
+                const bandq = isNum(v.bpq) ? bandQ(v.bpq) : 10;
+                filter('bandpass', v.bpf, bandq, 'bp', undefined, 'bpf');
+                const makeup = gainNode(Math.max(bandq, 1));
+                add(makeup);
+                params.bpf.gain = makeup.gain;
+            } else if (tied) {
+                // A tied voice's band-pass is beside the dry sound: the event chooses which is heard.
+                let bandq = isNum(v.bpq) ? bandQ(v.bpq) : 10;
+                let on = bpfOn;
+                const split = node;
+                const out = gainNode(1);
+                const dry = gainNode(on ? 0 : 1);
+                const f = ctx.createBiquadFilter();
+                f.type = 'bandpass';
+                f.frequency.value = cutoffHz(on ? v.bpf : 1000);
+                f.Q.value = bandq;
+                if (on && !followed('bpf')) this._filterEnvelope(f.frequency, v.bpf, v, 'bp', timing);
+                nodes.push(f);
+                const makeup = gainNode(on ? Math.max(bandq, 1) : 0);
+                split.connect(dry);
+                dry.connect(out);
+                split.connect(f);
+                f.connect(makeup);
+                makeup.connect(out);
+                node = out;
+                params.bpf = { freq: f.frequency, q: f.Q };
+                updates.push((e, time) => {
+                    if (!isNum(e.bpf) && !isNum(e.bpq)) return;
+                    if (isNum(e.bpq)) bandq = bandQ(e.bpq);
+                    if (isNum(e.bpf)) on = e.bpf > 0;
+                    setAt(dry.gain, on ? 0 : 1, time);
+                    setAt(makeup.gain, on ? Math.max(bandq, 1) : 0, time);
+                });
             }
             // SuperDirt: signal.round(0.5 ** (crush - 1)); fractions work.
-            if (isNum(v.crush)) shaper('crush', Math.round(clamp(v.crush, 1, 16) * 100), 'none');
+            const crushAmount = (x) => Math.round(clamp(x, 1, 16) * 100);
+            if (isNum(v.crush) || tied) {
+                const ws = shaper('crush', isNum(v.crush) ? crushAmount(v.crush) : null, 'none');
+                if (tied) updates.push((e, time) => { if (isNum(e.crush)) when(time, () => { ws.curve = this._curve('crush', crushAmount(e.crush)); }); });
+            }
             // SuperDirt: coarse > 1 holds every sample for coarse samples (Latch), on every sound.
-            if (isNum(v.coarse) && v.coarse > 1) worklet('coarse', { coarse: Math.min(v.coarse, 256) }, 'coarse');
-            if (isNum(v.lpf) && v.lpf > 0) filter('lowpass', v.lpf, resonanceDb(isNum(v.resonance) ? v.resonance : 0), 'lp');
+            if (isNum(v.coarse) && v.coarse > 1) {
+                worklet('coarse', { coarse: Math.min(v.coarse, 256) }, 'coarse', ['coarse'], (e) => ({ coarse: clamp(e.coarse, 1, 256) }));
+            }
+            const lpfOn = isNum(v.lpf) && v.lpf > 0;
+            if (lpfOn || tied) filter('lowpass', lpfOn ? v.lpf : 20000, resonanceDb(isNum(v.resonance) ? v.resonance : 0), lpfOn ? 'lp' : null, undefined, 'lpf');
             // Peak equaliser: boosts (or cuts, with a negative gain) a band around peak Hz.
-            if (isNum(v.peak) && v.peak > 0) {
-                filter('peaking', v.peak, isNum(v.peakq) ? clamp(v.peakq, 0.0001, 40) : 1, 'peak',
-                    isNum(v.peakgain) ? clamp(v.peakgain, -40, 40) : 6);
+            // Off (a tied voice without peak, or a followed one that starts at 0) it boosts by 0 dB.
+            const peakOn = isNum(v.peak) && v.peak > 0;
+            if (peakOn || tied || followed('peak', 'peakq', 'peakgain')) {
+                let on = peakOn || followed('peak');
+                let gainDb = isNum(v.peakgain) ? clamp(v.peakgain, -40, 40) : 6;
+                const f = filter('peaking', peakOn ? v.peak : 1000, isNum(v.peakq) ? clamp(v.peakq, 0.0001, 40) : 1, peakOn ? 'peak' : null,
+                    on ? gainDb : 0, 'peak');
+                params.peak.gain = f.gain;
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.peak)) {
+                            on = e.peak > 0;
+                            if (on) setAt(f.frequency, cutoffHz(e.peak), time);
+                        }
+                        if (isNum(e.peakq)) setAt(f.Q, clamp(e.peakq, 0.0001, 40), time);
+                        if (isNum(e.peakgain)) gainDb = clamp(e.peakgain, -40, 40);
+                        if (isNum(e.peak) || isNum(e.peakgain)) setAt(f.gain, on ? gainDb : 0, time);
+                    });
+                }
             }
 
             // Tremolo: the volume swings tremolodepth (0 to 1) at tremolorate Hz.
-            if ((isNum(v.tremolorate) && v.tremolorate > 0) || (isNum(v.tremolodepth) && v.tremolodepth > 0)) {
-                const depth = isNum(v.tremolodepth) ? clamp(v.tremolodepth, 0, 1) : 0.5;
+            const tremOn = (isNum(v.tremolorate) && v.tremolorate > 0) || (isNum(v.tremolodepth) && v.tremolodepth > 0);
+            if (tremOn || tied || followed('tremolorate', 'tremolodepth')) {
+                let depth = isNum(v.tremolodepth) ? clamp(v.tremolodepth, 0, 1) : tremOn || followed('tremolorate') ? 0.5 : 0;
                 const trem = gainNode(1 - depth / 2);
                 add(trem);
-                lfo(isNum(v.tremolorate) ? clamp(v.tremolorate, 0, 100) : 1, depth / 2, trem.gain);
+                const m = lfo(isNum(v.tremolorate) ? clamp(v.tremolorate, 0, 100) : 1, depth / 2, trem.gain);
+                params.tremolo = { gain: trem.gain, rate: m.freq, amount: m.amount };
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.tremolorate)) setAt(m.freq, clamp(e.tremolorate, 0, 100), time);
+                        let next = depth;
+                        if (isNum(e.tremolodepth)) next = clamp(e.tremolodepth, 0, 1);
+                        else if (isNum(e.tremolorate)) next = e.tremolorate > 0 ? (depth > 0 ? depth : 0.5) : 0;
+                        if (next === depth && !isNum(e.tremolodepth)) return;
+                        depth = next;
+                        setAt(trem.gain, 1 - depth / 2, time);
+                        setAt(m.amount, depth / 2, time);
+                    });
+                }
             }
 
             // Phaser: four all-pass filters swept by a slow sine, mixed with the dry sound.
-            if (isNum(v.phaserrate) && v.phaserrate > 0) {
+            const phaserOn = isNum(v.phaserrate) && v.phaserrate > 0;
+            if (phaserOn || tied || followed('phaserrate', 'phaserdepth')) {
+                const on = phaserOn || followed('phaserrate');
                 const depth = isNum(v.phaserdepth) ? clamp(v.phaserdepth, 0, 1) : 0.5;
                 const dry = node;
-                const out = gainNode(0.7);
+                const out = gainNode(on ? 0.7 : 1);
+                const wet = gainNode(on ? 1 : 0);
+                const sweeps = [];
                 let chain = dry;
                 for (let i = 0; i < 4; i++) {
                     const ap = ctx.createBiquadFilter();
@@ -5965,67 +6914,157 @@
                     chain.connect(ap);
                     chain = ap;
                     nodes.push(ap);
-                    lfo(clamp(v.phaserrate, 0, 40), 900 * depth, ap.frequency);
+                    sweeps.push(lfo(isNum(v.phaserrate) ? clamp(v.phaserrate, 0, 40) : 0, 900 * depth, ap.frequency));
                 }
-                chain.connect(out);
+                chain.connect(wet);
+                wet.connect(out);
                 dry.connect(out);
                 node = out;
+                params.phaser = { sweeps };
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.phaserrate)) {
+                            const rate = clamp(e.phaserrate, 0, 40);
+                            for (const s of sweeps) setAt(s.freq, rate, time);
+                            setAt(out.gain, rate > 0 ? 0.7 : 1, time);
+                            setAt(wet.gain, rate > 0 ? 1 : 0, time);
+                        }
+                        if (isNum(e.phaserdepth)) for (const s of sweeps) setAt(s.amount, 900 * clamp(e.phaserdepth, 0, 1), time);
+                    });
+                }
             }
 
-            if (isNum(v.waveloss) && v.waveloss > 0) worklet('waveloss', { waveloss: v.waveloss }, 'waveloss');
-            if (isNum(v.squiz) && v.squiz > 1) worklet('squiz', { squiz: Math.min(v.squiz, 64) }, 'squiz');
+            if (isNum(v.waveloss) && v.waveloss > 0) {
+                worklet('waveloss', { waveloss: v.waveloss }, 'waveloss', ['waveloss'], (e) => ({ waveloss: clamp(e.waveloss, 0, 100) }));
+            }
+            if (isNum(v.squiz) && v.squiz > 1) {
+                worklet('squiz', { squiz: Math.min(v.squiz, 64) }, 'squiz', ['squiz'], (e) => ({ squiz: clamp(e.squiz, 1, 64) }));
+            }
             if ((isNum(v.fshift) && v.fshift !== 0) || (isNum(v.fshiftnote) && v.fshiftnote !== 0)) {
                 const noteShift = isNum(v.fshiftnote) && timing && timing.freq ? v.fshiftnote * timing.freq : 0;
                 const shift = (isNum(v.fshift) ? v.fshift : 0) + noteShift;
-                worklet('fshift', { shift: clamp(shift, -20000, 20000), phase: isNum(v.fshiftphase) ? v.fshiftphase : 0 }, 'fshift');
+                // The shift follows a tied event's fshift, fshiftnote and pitch.
+                let hz = isNum(v.fshift) ? v.fshift : 0;
+                let perNote = isNum(v.fshiftnote) ? v.fshiftnote : 0;
+                worklet('fshift', { shift: clamp(shift, -20000, 20000), phase: isNum(v.fshiftphase) ? v.fshiftphase : 0 }, 'fshift',
+                    ['fshift', 'fshiftnote', 'note', 'freq', 'midinote', 'n', 'speed', 'up', 'octave'], (e, state, info) => {
+                        if (isNum(e.fshift)) hz = e.fshift;
+                        if (isNum(e.fshiftnote)) perNote = e.fshiftnote;
+                        return { shift: clamp(hz + perNote * (info.freq || 0), -20000, 20000) };
+                    });
             }
-            if (isNum(v.triode) && v.triode > 0) {
-                shaper('triode', Math.round(clamp(v.triode, 0, 10) * 100));
+            const triodeOn = isNum(v.triode) && v.triode > 0;
+            if (triodeOn || tied) {
+                const ws = shaper('triode', triodeOn ? Math.round(clamp(v.triode, 0, 10) * 100) : null);
                 filter('highpass', 10, 0.7); // SuperDirt follows triode with LeakDC
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.triode)) when(time, () => { ws.curve = e.triode > 0 ? this._curve('triode', Math.round(clamp(e.triode, 0, 10) * 100)) : null; });
+                    });
+                }
             }
-            if (isNum(v.krush) && v.krush > 0) {
-                shaper('krush', Math.round(clamp(v.krush, 0, 100) * 100));
-                filter('lowpass', isNum(v.kcutoff) ? v.kcutoff : 3140, 0.7);
+            const krushOn = isNum(v.krush) && v.krush > 0;
+            if (krushOn || tied) {
+                const ws = shaper('krush', krushOn ? Math.round(clamp(v.krush, 0, 100) * 100) : null);
+                let on = krushOn;
+                let cutoff = isNum(v.kcutoff) ? v.kcutoff : 3140;
+                const f = filter('lowpass', on ? cutoff : 20000, 0.7);
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (!isNum(e.krush) && !isNum(e.kcutoff)) return;
+                        if (isNum(e.krush)) {
+                            on = e.krush > 0;
+                            when(time, () => { ws.curve = on ? this._curve('krush', Math.round(clamp(e.krush, 0, 100) * 100)) : null; });
+                        }
+                        if (isNum(e.kcutoff)) cutoff = e.kcutoff;
+                        setAt(f.frequency, on ? cutoffHz(cutoff) : 20000, time);
+                    });
+                }
             }
             if ((isNum(v.octer) && v.octer > 0) || (isNum(v.octersub) && v.octersub > 0) || (isNum(v.octersubsub) && v.octersubsub > 0)) {
-                worklet('octer', { octer: v.octer || 0, octersub: v.octersub || 0, octersubsub: v.octersubsub || 0 }, 'octer');
+                worklet('octer', { octer: v.octer || 0, octersub: v.octersub || 0, octersubsub: v.octersubsub || 0 }, 'octer',
+                    ['octer', 'octersub', 'octersubsub'], (e, state) => ({
+                        octer: isNum(e.octer) ? e.octer : state.octer,
+                        octersub: isNum(e.octersub) ? e.octersub : state.octersub,
+                        octersubsub: isNum(e.octersubsub) ? e.octersubsub : state.octersubsub,
+                    }));
             }
 
             // Ring modulation: the sound times a sine at ringf Hz, mixed by ring (0 to 1).
-            if (isNum(v.ring) && v.ring > 0) {
-                const depth = clamp(v.ring, 0, 1);
+            const ringOn = isNum(v.ring) && v.ring > 0;
+            if (ringOn || tied || followed('ring', 'ringf')) {
+                const depth = ringOn ? clamp(v.ring, 0, 1) : 0;
                 const ringer = gainNode(1 - depth);
                 add(ringer);
-                lfo(isNum(v.ringf) ? clamp(v.ringf, 0, 20000) : 0, depth, ringer.gain);
+                const m = lfo(isNum(v.ringf) ? clamp(v.ringf, 0, 20000) : 0, depth, ringer.gain);
+                params.ring = { gain: ringer.gain, freq: m.freq, amount: m.amount };
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.ringf)) setAt(m.freq, clamp(e.ringf, 0, 20000), time);
+                        if (isNum(e.ring)) {
+                            setAt(ringer.gain, 1 - clamp(e.ring, 0, 1), time);
+                            setAt(m.amount, clamp(e.ring, 0, 1), time);
+                        }
+                    });
+                }
             }
 
             // distortion (1 to 100) and Tidal's distort (0 to 1) share one waveshaper.
-            const drive = isNum(v.distortion) && v.distortion > 0 ? clamp(v.distortion, 1, 100)
-                : isNum(v.distort) && v.distort > 0 ? 1 + clamp(v.distort, 0, 1) * 99 : 0;
-            if (drive > 0) shaper('distortion', Math.round(drive), '4x');
+            const driveOf = (e) => (isNum(e.distortion) && e.distortion > 0 ? clamp(e.distortion, 1, 100)
+                : isNum(e.distort) && e.distort > 0 ? 1 + clamp(e.distort, 0, 1) * 99 : 0);
+            const drive = driveOf(v);
+            if (drive > 0 || tied) {
+                const ws = shaper('distortion', drive > 0 ? Math.round(drive) : null, '4x');
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (!isNum(e.distortion) && !isNum(e.distort)) return;
+                        const next = driveOf(e);
+                        when(time, () => { ws.curve = next > 0 ? this._curve('distortion', Math.round(next)) : null; });
+                    });
+                }
+            }
 
             const spectral = {};
             for (const key of SPECTRAL_CONTROLS) if (isNum(v[key]) && v[key] !== 0) spectral[key] = v[key];
             if (Object.keys(spectral).length) {
-                worklet('spectral', { ...spectral, size: SPECTRAL_SIZE, hop: SPECTRAL_HOP }, Object.keys(spectral).join(', '));
+                worklet('spectral', { ...spectral, size: SPECTRAL_SIZE, hop: SPECTRAL_HOP }, Object.keys(spectral).join(', '),
+                    SPECTRAL_CONTROLS, (e) => Object.fromEntries(SPECTRAL_CONTROLS.filter((key) => isNum(e[key])).map((key) => [key, e[key]])));
             }
 
             // SuperDirt's DJ filter: RHPF(RLPF(signal, djf.linexp(0, 0.5, 20, 10000)),
-            // djf.linexp(0.5, 1, 20, 10000)), both with rq 1; 0.5 does nothing.
-            if (isNum(v.djf) && v.djf !== 0.5) {
-                const x = clamp(v.djf, 0, 1);
-                filter('lowpass', 20 * Math.pow(500, Math.min(x, 0.5) / 0.5), 0);
-                filter('highpass', 20 * Math.pow(500, Math.max(x - 0.5, 0) / 0.5), 0);
+            // djf.linexp(0.5, 1, 20, 10000)), both with rq 1; 0.5 does nothing
+            // (a tied voice keeps the two filters open: 20 kHz and 20 Hz).
+            const djfOn = isNum(v.djf) && v.djf !== 0.5;
+            if (djfOn || tied || followed('djf')) {
+                const x = djfOn || followed('djf') ? clamp(isNum(v.djf) ? v.djf : 0.5, 0, 1) : null;
+                const low = filter('lowpass', x === null ? 20000 : djfLow(x), 0);
+                const high = filter('highpass', x === null ? 20 : djfHigh(x), 0);
+                params.djf = { low: low.frequency, high: high.frequency };
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (!isNum(e.djf)) return;
+                        const y = clamp(e.djf, 0, 1);
+                        setAt(low.frequency, y === 0.5 ? 20000 : djfLow(y), time);
+                        setAt(high.frequency, y === 0.5 ? 20 : djfHigh(y), time);
+                    });
+                }
             }
 
             // SuperCollider's FreeVerb2 on the voice (freeverb, freeroom, freedamp).
-            if (timing && timing.reverb) worklet('freeverb', timing.reverb, 'freeverb');
+            if (timing && timing.reverb) {
+                worklet('freeverb', timing.reverb, 'freeverb', ['freeverb', 'freeroom', 'freedamp'], (e, state) => ({
+                    mix: isNum(e.freeverb) ? clamp(e.freeverb, 0, 1) : state.mix,
+                    room: isNum(e.freeroom) ? clamp(e.freeroom, 0, 1) : state.room,
+                    damp: isNum(e.freedamp) ? clamp(e.freedamp, 0, 1) : state.damp,
+                }));
+            }
 
             // Leslie: a rotating speaker. The horn's movement bends the pitch
             // (a delay swept by lsize metres), its volume swings and it turns
             // around the stereo field lrate times a second. leslie is the mix.
-            if (isNum(v.leslie) && v.leslie > 0) {
-                const wet = clamp(v.leslie, 0, 1);
+            const leslieOn = isNum(v.leslie) && v.leslie > 0;
+            if (leslieOn || tied || followed('leslie', 'lrate', 'lsize')) {
+                const wet = leslieOn ? clamp(v.leslie, 0, 1) : 0;
                 const rate = isNum(v.lrate) ? clamp(v.lrate, 0, 30) : 6.7;
                 const size = isNum(v.lsize) ? clamp(v.lsize, 0, 5) : 0.3;
                 const swing = size / 343;
@@ -6041,30 +7080,61 @@
                 dryLevel.connect(out);
                 dry.connect(horn);
                 horn.connect(am);
-                lfo(rate, swing, horn.delayTime);
-                lfo(rate, 0.25, am.gain);
+                const turns = [];
+                const hornSwing = lfo(rate, swing, horn.delayTime);
+                turns.push(hornSwing, lfo(rate, 0.25, am.gain));
                 let last = am;
                 if (typeof ctx.createStereoPanner === 'function') {
                     const turn = ctx.createStereoPanner();
                     nodes.push(turn);
                     am.connect(turn);
-                    lfo(rate, 0.8, turn.pan, 'triangle');
+                    turns.push(lfo(rate, 0.8, turn.pan, 'triangle'));
                     last = turn;
                 }
                 last.connect(wetLevel);
                 wetLevel.connect(out);
                 node = out;
+                params.leslie = { dry: dryLevel.gain, wet: wetLevel.gain, rates: turns.map((m) => m.freq), delay: horn.delayTime, swing: hornSwing.amount };
+                if (tied) {
+                    updates.push((e, time) => {
+                        if (isNum(e.leslie)) {
+                            setAt(dryLevel.gain, 1 - clamp(e.leslie, 0, 1), time);
+                            setAt(wetLevel.gain, clamp(e.leslie, 0, 1), time);
+                        }
+                        if (isNum(e.lrate)) for (const m of turns) setAt(m.freq, clamp(e.lrate, 0, 30), time);
+                        if (isNum(e.lsize)) {
+                            const s = clamp(e.lsize, 0, 5) / 343;
+                            setAt(horn.delayTime, 0.002 + s, time);
+                            setAt(hornSwing.amount, s, time);
+                        }
+                    });
+                }
             }
 
-            if (isNum(v.pan) && typeof ctx.createStereoPanner === 'function') {
+            // The level that a followed gain or amp (or a tied event) changes, relative to the voice's own.
+            if (timing && (timing.changeable || followed('gain', 'amp'))) {
+                const level = gainNode(isNum(timing.levelStart) ? timing.levelStart : 1);
+                add(level);
+                params.level = level.gain;
+            }
+
+            // A voice that tie can change gets a panner even without pan, so a later event can move it.
+            if ((isNum(v.pan) || (timing && timing.changeable)) && typeof ctx.createStereoPanner === 'function') {
                 const panner = ctx.createStereoPanner();
-                panner.pan.value = clamp(v.pan, -1, 1);
+                panner.pan.value = isNum(v.pan) ? clamp(v.pan, -1, 1) : 0;
                 add(panner);
+                params.pan = panner.pan;
             }
 
             node.connect(session.out);
-            // The orbit's delay and reverb (SuperDirt's global effects).
-            this._orbitSend(node, v, timing ? timing.time : ctx.currentTime, orbit);
+            // The orbit's delay and reverb (SuperDirt's global effects); a tied
+            // event sets them again, and connects the voice to a bus it lacks.
+            params.output = node;
+            params.sends = new Set();
+            params.update = (e, time, info) => {
+                for (const fn of updates) fn(e, time, info);
+            };
+            this._orbitSend(node, v, timing ? timing.time : ctx.currentTime, orbit, params.sends);
 
             sources[0].onended = () => {
                 for (const osc of lfos) {
@@ -6074,9 +7144,23 @@
                     try { n.disconnect(); } catch (e) { /* already disconnected */ }
                 }
             };
+            return params;
         }
 
         /** A node running one AudioWorklet effect (see fxWorkletModule), or null (with a warning) without the module. */
+        /** Runs fn at audio time `time` (now if it is due): for changes that are not AudioParams, such as a waveshaper's curve. */
+        _atTime(time, fn) {
+            const ctx = this.audioContext;
+            const wait = ctx && isNum(time) ? time - ctx.currentTime : 0;
+            if (!(wait > 0.002) || typeof setTimeout !== 'function') fn();
+            else setTimeout(fn, wait * 1000);
+        }
+
+        /** New settings for a running AudioWorklet effect from audio time `time` on (see TidalFx). */
+        _workletSet(node, time, options) {
+            if (node && node.port && typeof node.port.postMessage === 'function') node.port.postMessage({ at: time, options: { ...options } });
+        }
+
         _workletNode(kind, options, label) {
             if (this._fxState !== 'ready' || typeof AudioWorkletNode === 'undefined') {
                 this._warnOnce(this._fxState === 'loading'
@@ -6301,9 +7385,12 @@
          * negative speed plays it backwards), begin/end play part of it,
          * legato/sustain cut it, loop repeats it, attack/release fade it.
          */
-        _playSample(v, time, duration, bank) {
-            const gain = gainOf(v) * ampOf(v);
-            if (gain <= 0) return;
+        _playSample(v, time, duration, bank, hold = false) {
+            const actual = levelOf(null, v);
+            // A followed gain or amp may start at 0: the voice is built at gain 1 (see playEvent).
+            const levelFollowed = v.follow instanceof Follows && (v.follow.has('gain') || v.follow.has('amp'));
+            if (actual <= 0 && !levelFollowed) return null;
+            const gain = actual > 0 ? actual : 1;
             const speed = isNum(v.speed) && v.speed !== 0 ? clamp(v.speed, -16, 16) : 1;
             const target = isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60;
             // A pitched bank plays its nearest recording; others are pitched from middle C.
@@ -6312,14 +7399,14 @@
             // SuperDirt pitches samples by octave too (midinote = note + octave * 12).
             if (isNum(v.octave)) semitones += (clamp(Math.round(v.octave), 0, 10) - 5) * 12;
             const buffer = this._sampleBuffer(file ? file.url : this._sampleUrl(bank, v), speed < 0);
-            if (!buffer) return; // still loading: it plays from the next event on
+            if (!buffer) return null; // still loading: it plays from the next event on
             // With unit "c", speed is in cycles: speed 1 plays the whole sample in one cycle.
             const base = v.unit === 'c' ? buffer.duration * this.cps * Math.abs(speed) : Math.abs(speed);
             const rate = clamp(base, 0.01, 64) * Math.pow(2, clamp(semitones, -48, 48) / 12);
 
             const begin = isNum(v.begin) ? clamp(v.begin, 0, 1) : 0;
             const end = isNum(v.end) ? clamp(v.end, 0, 1) : 1;
-            if (end <= begin) return;
+            if (end <= begin) return null;
             // SuperDirt: the [begin, end] part plays (backwards in the reversed
             // buffer when speed < 0), looping; it lasts loop times its length,
             // or legato / sustain, never longer than that.
@@ -6330,10 +7417,11 @@
             let window = full;
             if (isNum(v.sustain) && v.sustain > 0) window = Math.min(full, v.sustain);
             else if (isNum(v.legato) && v.legato > 0) window = Math.min(full, v.legato * duration);
-            this._sampleVoice(v, time, buffer, rate, start, window, gain * 0.8, loops > 1 ? [start, start + span] : null);
+            return this._sampleVoice(v, time, buffer, rate, start, window, gain * 0.8, loops > 1 ? [start, start + span] : null,
+                { levelBase: gain, levelStart: actual / gain, handle: hold, pitchRef: { note: target } });
         }
 
-        _sampleVoice(v, time, buffer, rate, offset, window, level, loopRange = null) {
+        _sampleVoice(v, time, buffer, rate, offset, window, level, loopRange = null, o = {}) {
             const ctx = this.audioContext;
             const attack = isNum(v.attack) ? clamp(v.attack, 0, 10) : 0;
             const release = isNum(v.release) ? clamp(v.release, 0.001, 10) : 0.005;
@@ -6360,9 +7448,22 @@
             src.start(time, Math.min(offset, buffer.duration));
             src.stop(stopAt);
             // accelerate, pitchenv, vibrato and portamento work on samples too.
-            const mods = this._pitchModulation({}, v, time, { window, freq: 0 }, [src], stopAt);
+            const timing = { time, holdEnd, release, stopAt, freq: 0, levelBase: o.levelBase, levelStart: o.levelStart, def: null };
+            const mods = this._pitchModulation({}, v, time, { window, freq: 0, timing, pitchRef: o.pitchRef }, [src], stopAt);
             this._cutGroup(v, time, gate, [src]);
-            this._route(gate, v, [src], [amp, ...mods], { time, holdEnd, release, freq: 0 });
+            const params = this._route(gate, v, [src], [amp, ...mods], timing);
+            if (params && mods.vibrato) params.vibrato = mods.vibrato;
+            this._applyFollows(params, v, timing);
+            this._livePitch(params, v, timing);
+            if (!o.handle) return null;
+            const handle = {
+                def: null, time, holdEnd, release, tail: 0, stopAt, curve: 0, gate: gate.gain, held: 1, steady: 1,
+                attackEnd: time + attack, sources: [src, ...mods.filter((m) => typeof m.stop === 'function')],
+                bend: null, cents: 0, freq: 0, params, levelBase: o.levelBase || 1, timing,
+            };
+            const live = this._liveVoices.get(params);
+            if (live) live.handle = handle;
+            return handle;
         }
 
         // --- Events ----------------------------------------------------
@@ -6371,8 +7472,8 @@
          * Renders one event (a map of controls) at an audio time.
          * duration is the event length in seconds (used by legato and MIDI).
          */
-        playEvent(v, time, duration = 0.25) {
-            if (!this.audioContext || !this._session) return;
+        playEvent(v, time, duration = 0.25, hold = false) {
+            if (!this.audioContext || !this._session) return null;
             if (v.nTake) {
                 // The next value of the list, counted per name across cycles.
                 const { name, list } = v.nTake;
@@ -6392,16 +7493,26 @@
                 }
                 delete v.takes;
             }
+            if (v.follow instanceof Follows) {
+                // The followed controls start at their signals' values at the onset.
+                const cycle = this.cycleAt(time);
+                const follow = v.follow.bind(cycle, time, this.cps);
+                v = { ...v, follow };
+                for (const key of follow.names()) {
+                    const x = follow.valueAt(key, cycle, cycle);
+                    if (x !== undefined) v[key] = x;
+                }
+            }
             if (v.midi !== undefined) {
                 this._sendMidi(v, time, duration);
-                return;
+                return null;
             }
             if (v.osc !== undefined) {
                 this._sendOsc(v, time, duration);
-                return;
+                return null;
             }
             const name = v.s;
-            if (!name || name === '~') return;
+            if (!name || name === '~') return null;
             // The spectral effects delay the sound by their analysis window:
             // start such voices that much earlier (when there is time).
             if (SPECTRAL_CONTROLS.some((key) => isNum(v[key]) && v[key] !== 0)) {
@@ -6411,18 +7522,22 @@
             // A loaded sample bank wins over the synthesised sound of the same name.
             const bank = this.sampleBanks.get(name);
             if (bank) {
-                this._playSample(v, time, duration, bank);
-                return;
+                if (v.tie !== undefined) this._warnOnce('tie() works on synths; samples ignore it');
+                return this._playSample(v, time, duration, bank, hold);
             }
             const def = this.samples.get(name);
             if (!def) {
                 if (!this.isLoadingSamples()) this._warnOnce(`Unknown sound "${name}"`);
-                return;
+                return null;
             }
 
             // SuperDirt: amp * gain^4 (gain 0.5 is a sixteenth, -24 dB).
-            const gain = gainOf(v) * ampOf(isNum(v.amp) || !isNum(def.amp) ? v : { amp: def.amp });
-            if (gain <= 0) return;
+            const actual = levelOf(def, v);
+            // A followed gain or amp may start at 0 and rise: the voice is then
+            // built at gain 1 and its level node scales it (see _applyFollows).
+            const levelFollowed = v.follow instanceof Follows && (v.follow.has('gain') || v.follow.has('amp'));
+            if (actual <= 0 && !levelFollowed) return null;
+            const gain = actual > 0 ? actual : 1;
             const level = gain * (def.level ?? 0.5);
 
             let freq = def.freq;
@@ -6431,6 +7546,8 @@
             else if (isNum(v.note)) freq = midiToFreq(clamp(v.note, 0, 127));
             // SuperDirt plays n as the note of a synth; banks of variations (bd, sn...) use it to pick one.
             else if (isNum(v.n) && !(def.variations > 1)) freq = midiToFreq(clamp(60 + v.n, 0, 127));
+            // The pitch a followed note or freq moves from (the note's own, before up, octave and speed).
+            const pitchRef = { note: 69 + 12 * Math.log2(clamp(freq, 1, 20000) / 440), freq: clamp(freq, 20, 20000) };
             if (isNum(v.up)) freq *= Math.pow(2, clamp(v.up, -48, 48) / 12);
             // octave, as in SuperDirt: 5 is the default, each step one octave.
             if (isNum(v.octave)) freq *= Math.pow(2, clamp(Math.round(v.octave), 0, 10) - 5);
@@ -6457,7 +7574,7 @@
 
             const begin = isNum(v.begin) ? clamp(v.begin, 0, 1) : 0;
             const end = isNum(v.end) ? clamp(v.end, 0, 1) : 1;
-            if (end <= begin) return;
+            if (end <= begin) return null;
 
             const sustained = SUSTAINED_TYPES.has(def.type);
             // decay is how long a sound rings, unless it is a held synth:
@@ -6468,14 +7585,38 @@
             let window = (end - begin) * length;
             if (!sustained && held) window = Math.min(window, held);
 
+            // tie: a voice of the same sound, orbit and tie still sounding takes
+            // this event's pitch, controls and length, without a new attack.
+            const tieKey = v.tie !== undefined && v.tie !== null ? `${glideKey}:${String(v.tie)}` : null;
+            const ties = this._session.ties || (this._session.ties = new Map());
+            if (tieKey) {
+                const running = ties.get(tieKey);
+                if (running && running.time < time - 1e-6 && running.stopAt > time) {
+                    this._retie(running, v, time, time + Math.max(window, 0.005), freq, pitchRef);
+                    return running;
+                }
+            }
+
             const loops = isNum(v.loop) ? clamp(Math.floor(v.loop), 1, 32) : 1;
+            let handle = null;
             for (let i = 0; i < loops; i++) {
-                this._voice(def, v, time + i * window, {
+                const voice = this._voice(def, v, time + i * window, {
                     level, freq, variation, speed, length, window, sustained: sustained && !!held,
                     start: time + i * window - begin * length,
                     glideFrom: i === 0 ? glideFrom : undefined,
+                    levelBase: gain,
+                    levelStart: actual / gain,
+                    handle: i === 0 && (hold || !!tieKey),
+                    tied: i === 0 && !!tieKey,
+                    pitchRef,
                 });
+                if (i === 0) handle = voice;
             }
+            if (tieKey && handle) {
+                for (const [key, h] of ties) if (h.stopAt <= time) ties.delete(key);
+                ties.set(tieKey, handle);
+            }
+            return handle;
         }
 
         _naturalLength(def, variation) {
@@ -6520,10 +7661,341 @@
             const voice = this._generate(def, o, time, v);
             voice.output.connect(gate);
             for (const src of voice.sources) src.stop(stopAt);
-            const mods = this._pitchModulation(def, v, time, o, voice.pitched, stopAt);
+            // A voice that can be changed later (tie, a held MIDI key) bends its
+            // pitch through one more source, so a later event can glide it.
+            const bend = o.handle ? this._bendSource(voice.pitched, time, stopAt) : null;
+            const timing = {
+                time, holdEnd, release, stopAt, freq: o.freq, reverb: def.freeverb ? null : reverb,
+                levelBase: o.levelBase, levelStart: o.levelStart, def, changeable: !!o.handle, tied: !!o.tied,
+            };
+            const mods = this._pitchModulation(def, v, time, { ...o, bend, timing }, voice.pitched, stopAt);
             this._cutGroup(v, time, gate, voice.sources);
-            this._route(gate, v, voice.sources, [...voice.nodes, ...mods],
-                { time, holdEnd, release, freq: o.freq, reverb: def.freeverb ? null : reverb });
+            const params = this._route(gate, v, voice.sources, [...voice.nodes, ...mods, ...(bend ? [bend] : [])], timing);
+            if (params && mods.vibrato) params.vibrato = mods.vibrato;
+            this._applyFollows(params, v, timing);
+            this._livePitch(params, v, timing);
+            if (!o.handle) return null;
+            const handle = {
+                def, time, holdEnd, release, tail, stopAt, curve, gate: gate.gain,
+                held, steady: sustainLevel, attackEnd: time + attack + decay,
+                sources: [...voice.sources, ...mods.filter((m) => typeof m.stop === 'function'), ...(bend ? [bend] : [])],
+                bend: bend ? bend.offset : null, cents: 0, freq: o.freq, params, levelBase: o.levelBase || 1,
+                timing, vibrato: mods.vibrato || null, tune: voice.tune || null,
+            };
+            // A pitch that follows a live input is laid out again around this voice's own bend (see _pitchRelay).
+            const live = this._liveVoices.get(params);
+            if (live) live.handle = handle;
+            return handle;
+        }
+
+        /** Remembers a voice whose followed pitch reads a live input (see _pitchModulation and _pitchRelay). */
+        _livePitch(params, v, timing) {
+            if (!params || !timing.pitchLive) return;
+            const entry = this._liveVoices.get(params) || { params, v, timing, relayParams: false };
+            entry.pitch = timing.pitchLive;
+            entry.key = KEY_CONTEXT.key;
+            this._liveVoices.set(params, entry);
+        }
+
+        /** A constant source on the detune of a voice's oscillators (cents), for tie and held keys; null if they have none. */
+        _bendSource(targets, time, stopAt) {
+            const ctx = this.audioContext;
+            const params = targets.map((src) => src.detune).filter(Boolean);
+            if (!params.length || typeof ctx.createConstantSource !== 'function') return null;
+            const src = ctx.createConstantSource();
+            src.offset.value = 0;
+            for (const param of params) src.connect(param);
+            src.start(time);
+            src.stop(stopAt);
+            return src;
+        }
+
+        /**
+         * Pitch changes of follow() and followNote() as a function of audio
+         * time, in cents from the note's own pitch (note, freq and speed add
+         * up), or null when the event follows none of them. `ref` gives the
+         * pitch the voice was built at, { note, freq }, for an event whose
+         * only note or freq is the one follow() gave it at the onset (or none).
+         */
+        _followCents(v, ref = {}) {
+            const f = v.follow instanceof Follows && v.follow.onset ? v.follow : null;
+            if (!f) return null;
+            const parts = [];
+            const note = isNum(v.note) ? clamp(v.note, 0, 127) : ref.note;
+            if (f.has('note') && isNum(note)) {
+                parts.push((t) => { const x = f.at('note', t); return isNum(x) ? 100 * (clamp(x, 0, 127) - note) : 0; });
+            }
+            const freq = isNum(v.freq) ? clamp(v.freq, 20, 20000) : ref.freq;
+            if (f.has('freq') && isNum(freq) && freq > 0) {
+                parts.push((t) => { const x = f.at('freq', t); return isNum(x) ? 1200 * Math.log2(clamp(x, 20, 20000) / freq) : 0; });
+            }
+            if (f.has('speed')) {
+                const speed = isNum(v.speed) && v.speed !== 0 ? clamp(Math.abs(v.speed), 0.01, 16) : 1;
+                parts.push((t) => { const x = f.at('speed', t); return isNum(x) && x !== 0 ? 1200 * Math.log2(clamp(Math.abs(x), 0.01, 16) / speed) : 0; });
+            }
+            if (!parts.length) return null;
+            return (t) => clamp(parts.reduce((sum, part) => sum + part(t), 0), -9600, 9600);
+        }
+
+        /**
+         * Automates the parameters of a voice (from _route) that follow() and
+         * followNote() change, from `from` (the onset) until the voice stops:
+         * filter cutoffs and Qs, pan, the level (gain and amp, relative to the
+         * level the voice was built at), the peak equaliser, the DJ filter,
+         * tremolo, phaser, ring modulation and leslie. Pitch is in
+         * _pitchModulation. With `relay` (a live input changed while the
+         * voice sounds) what was laid out after `from` is replaced.
+         * A voice whose signals read a live input is remembered for that.
+         */
+        _applyFollows(params, v, timing, from = timing.time, relay = false) {
+            const f = v.follow instanceof Follows && v.follow.onset ? v.follow : null;
+            if (!params) return;
+            if (!f) {
+                this._liveVoices.delete(params);
+                return;
+            }
+            const end = timing.stopAt;
+            const reads = LIVE_READS.count;
+            const lay = (param, fn) => {
+                if (!param) return;
+                const points = samplePoints(relay ? from + LIVE_GLIDE : from, end, fn);
+                if (!relay) automate(param, points);
+                else automateFrom(param, from, points);
+            };
+            const follow = (param, name, map) => {
+                if (param && f.has(name)) lay(param, (t) => { const x = f.at(name, t); return isNum(x) ? map(x) : undefined; });
+            };
+            follow(params.lpf && params.lpf.freq, 'lpf', cutoffHz);
+            follow(params.lpf && params.lpf.q, 'resonance', resonanceDb);
+            follow(params.hpf && params.hpf.freq, 'hpf', cutoffHz);
+            follow(params.hpf && params.hpf.q, 'hpq', resonanceDb);
+            follow(params.bpf && params.bpf.freq, 'bpf', cutoffHz);
+            follow(params.bpf && params.bpf.q, 'bpq', bandQ);
+            follow(params.bpf && params.bpf.gain, 'bpq', (q) => Math.max(bandQ(q), 1));
+            follow(params.pan, 'pan', (x) => clamp(x, -1, 1));
+            follow(params.peak && params.peak.freq, 'peak', cutoffHz);
+            follow(params.peak && params.peak.q, 'peakq', (q) => clamp(q, 0.0001, 40));
+            follow(params.peak && params.peak.gain, 'peakgain', (g) => clamp(g, -40, 40));
+            follow(params.djf && params.djf.low, 'djf', djfLow);
+            follow(params.djf && params.djf.high, 'djf', djfHigh);
+            // The vibrato's rate (vib times a second): a vibrato whose speed an LFO moves.
+            if (params.vibrato) follow(params.vibrato.rate, 'vib', (x) => clamp(x, 0, 100));
+            if (params.tremolo) {
+                follow(params.tremolo.rate, 'tremolorate', (x) => clamp(x, 0, 100));
+                follow(params.tremolo.gain, 'tremolodepth', (x) => 1 - clamp(x, 0, 1) / 2);
+                follow(params.tremolo.amount, 'tremolodepth', (x) => clamp(x, 0, 1) / 2);
+            }
+            if (params.phaser) {
+                for (const s of params.phaser.sweeps) {
+                    follow(s.freq, 'phaserrate', (x) => clamp(x, 0, 40));
+                    follow(s.amount, 'phaserdepth', (x) => 900 * clamp(x, 0, 1));
+                }
+            }
+            if (params.ring) {
+                follow(params.ring.freq, 'ringf', (x) => clamp(x, 0, 20000));
+                follow(params.ring.gain, 'ring', (x) => 1 - clamp(x, 0, 1));
+                follow(params.ring.amount, 'ring', (x) => clamp(x, 0, 1));
+            }
+            if (params.leslie) {
+                follow(params.leslie.dry, 'leslie', (x) => 1 - clamp(x, 0, 1));
+                follow(params.leslie.wet, 'leslie', (x) => clamp(x, 0, 1));
+                for (const rate of params.leslie.rates) follow(rate, 'lrate', (x) => clamp(x, 0, 30));
+                follow(params.leslie.delay, 'lsize', (x) => 0.002 + clamp(x, 0, 5) / 343);
+                follow(params.leslie.swing, 'lsize', (x) => clamp(x, 0, 5) / 343);
+            }
+            if (params.level && (f.has('gain') || f.has('amp'))) {
+                const base = timing.levelBase || 1;
+                lay(params.level, (t) => {
+                    const g = f.has('gain') ? f.at('gain', t) : v.gain;
+                    const a = f.has('amp') ? f.at('amp', t) : v.amp;
+                    return levelOf(timing.def, { gain: isNum(g) ? g : undefined, amp: isNum(a) ? a : undefined }) / base;
+                });
+            }
+            if (relay) return;
+            // Signals that read a slider, MIDI, OSC or a bus are laid out again when it changes.
+            const known = this._liveVoices.get(params);
+            if (LIVE_READS.count !== reads) {
+                this._liveVoices.set(params, { ...(known || {}), params, v, timing, relayParams: true, key: KEY_CONTEXT.key });
+                if (this._liveVoices.size > 64) this._pruneLive();
+            } else if (known && known.pitch) {
+                this._liveVoices.set(params, { ...known, v, timing, relayParams: false });
+            } else {
+                this._liveVoices.delete(params);
+            }
+        }
+
+        /**
+         * A live input (a slider, MIDI, OSC, a bus) changed: the sounding
+         * voices that follow one are laid out again from now, at most once
+         * every LIVE_RELAY_MS milliseconds.
+         */
+        _liveChanged() {
+            if (!this._liveVoices.size) return;
+            const wait = this._liveFlushedAt + LIVE_RELAY_MS - Date.now();
+            if (wait <= 0) this._relayLive();
+            else if (!this._liveTimer && typeof setTimeout === 'function') {
+                this._liveTimer = setTimeout(() => {
+                    this._liveTimer = null;
+                    this._relayLive();
+                }, wait);
+            }
+        }
+
+        /** Forgets the voices of _liveVoices that have ended. */
+        _pruneLive() {
+            const now = this.audioContext ? this.audioContext.currentTime : 0;
+            for (const [key, entry] of this._liveVoices) {
+                if (!((entry.handle ? entry.handle.stopAt : entry.timing.stopAt) > now)) this._liveVoices.delete(key);
+            }
+        }
+
+        /** Lays the followed controls of every sounding voice that reads a live input out again, from now; drops finished voices. */
+        _relayLive() {
+            this._liveFlushedAt = Date.now();
+            const ctx = this.audioContext;
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            for (const [key, entry] of this._liveVoices) {
+                const end = entry.handle ? entry.handle.stopAt : entry.timing.stopAt;
+                if (!(end > now)) {
+                    this._liveVoices.delete(key);
+                    continue;
+                }
+                const from = Math.max(now, entry.timing.time);
+                try {
+                    withKey(entry.key, () => {
+                        if (entry.relayParams) this._applyFollows(entry.params, entry.v, entry.timing, from, true);
+                        if (entry.pitch) this._pitchRelay(entry, from);
+                    });
+                } catch (error) {
+                    console.error('TidalJS: could not follow a live input:', error);
+                    this._liveVoices.delete(key);
+                }
+            }
+        }
+
+        /**
+         * The pitch of a voice that follows a live input (note, freq or speed),
+         * laid out again from `from`: its bend (on top of a tied note's pitch
+         * and the wheel of a held MIDI key), or its own pitch source.
+         */
+        _pitchRelay(entry, from) {
+            const { param, cents } = entry.pitch;
+            const h = entry.handle;
+            const base = h ? (h.wheel ? h.wheel.cents : h.cents) : 0;
+            const end = h ? h.stopAt : entry.timing.stopAt;
+            automateFrom(param, from, samplePoints(from + LIVE_GLIDE, end, (t) => base + cents(t)));
+        }
+
+        /**
+         * tie: a new event for a voice that still sounds. The voice takes its
+         * pitch (gliding over portamento seconds, if set), its length (the
+         * gate stays open, no new attack, and closes at the new end, with the
+         * new release), and every control it can change in place:
+         *   - filters: lpf, hpf, bpf and their resonance/Q, the peak
+         *     equaliser (peak, peakq, peakgain), djf, kcutoff;
+         *   - level and pan: gain, amp, pan;
+         *   - shape, crush, distort/distortion, triode, krush (new curves);
+         *   - vowel, tremolo (tremolorate, tremolodepth), phaser
+         *     (phaserrate, phaserdepth), ring and ringf, leslie (leslie,
+         *     lrate, lsize), vibrato (vib, vibmod);
+         *   - the AudioWorklet effects the voice was built with (coarse,
+         *     waveloss, squiz, fshift/fshiftnote, octer, the spectral
+         *     effects, freeverb/freeroom/freedamp);
+         *   - the synth's own parameters that drive running nodes: detune and
+         *     voice (supersaw, supersquare, superreese), rate, lfo and
+         *     detune (superpwm, superzow), voice, rate and lfo (superchip),
+         *     voice and semitone (superfm), voice (superfb);
+         *   - its orbit's delay and reverb (delay, delaytime, delayfeedback,
+         *     lock, room, size, dry), as every event of the orbit sets them;
+         *   - follow() and followNote() of the new event.
+         * A tied voice is built with these effects even when its first event
+         * leaves them out (set so they change nothing), so a later event can
+         * turn them on. Controls the event leaves out keep their current
+         * value. Still fixed for the voice's life: the envelope's attack,
+         * decay and sustainlevel, the filter and pitch envelopes (lpenv...,
+         * penv, pitchenv), accelerate, begin/end/loop, the sound and n, the
+         * AudioWorklet effects it was built without, and the other synths'
+         * own parameters. Samples ignore tie.
+         */
+        _retie(h, v, time, holdEnd, freq, ref) {
+            const release = isNum(v.release) ? clamp(v.release, 0.001, 10) : h.release;
+            const stopAt = holdEnd + release + h.tail + 0.02;
+            const def = h.def;
+            // The gate: on at its steady level (still rising if the attack has not ended), then the release.
+            const level = time <= h.holdEnd ? h.held : h.held * Math.max(0, 1 - (time - h.holdEnd) / h.release);
+            holdParam(h.gate, time, level);
+            h.gate.linearRampToValueAtTime(h.steady, Math.max(time + 0.005, Math.min(h.attackEnd, holdEnd)));
+            this._envSegments(h.gate, holdEnd, h.steady, [{ dur: release, level: 0, curve: h.curve }], Infinity);
+            for (const src of h.sources) {
+                try { src.stop(stopAt); } catch (e) { /* already stopped */ }
+            }
+            Object.assign(h, { holdEnd, release, stopAt });
+            const timing = { time, holdEnd, release, stopAt, def, levelBase: h.levelBase, freq };
+            h.timing = timing;
+            const follow = v.follow instanceof Follows && v.follow.onset ? v.follow : null;
+            const p = h.params || {};
+            this._liveVoices.delete(p);
+            // Pitch: from the cents it is at to the new note's, plus the new event's followed pitch.
+            if (h.bend) {
+                const start = h.cents;
+                const target = 1200 * Math.log2(freq / h.freq);
+                const glide = isNum(v.portamento) && v.portamento > 0 ? clamp(v.portamento, 0.001, 10) : 0;
+                const reads = LIVE_READS.count;
+                const cents = this._followCents(v, ref);
+                holdParam(h.bend, time, start);
+                if (!glide && !cents) h.bend.setValueAtTime(target, time);
+                else {
+                    automate(h.bend, samplePoints(time, stopAt, (t) => (glide && t < time + glide ? start + ((target - start) * (t - time)) / glide : target)
+                        + (cents ? cents(t) : 0)));
+                }
+                h.cents = target;
+                if (cents && LIVE_READS.count !== reads) {
+                    this._liveVoices.set(p, { params: p, v, timing, handle: h, relayParams: false, pitch: { param: h.bend, cents } });
+                }
+            }
+            // Filters, pan and level: the new values (or followed signals) from now on.
+            const set = (param, value, map) => {
+                if (!param) return;
+                holdParam(param, time, isNum(value) ? map(value) : undefined);
+                if (isNum(value)) param.setValueAtTime(map(value), time);
+            };
+            set(p.lpf && p.lpf.freq, v.lpf, (x) => (x > 0 ? cutoffHz(x) : 20000));
+            set(p.lpf && p.lpf.q, v.resonance, resonanceDb);
+            set(p.hpf && p.hpf.freq, v.hpf, (x) => (x > 0 ? cutoffHz(x) : 20));
+            set(p.hpf && p.hpf.q, v.hpq, resonanceDb);
+            set(p.bpf && p.bpf.freq, v.bpf, (x) => (x > 0 ? cutoffHz(x) : 1000));
+            set(p.bpf && p.bpf.q, v.bpq, bandQ);
+            set(p.bpf && p.bpf.gain, v.bpq, (q) => Math.max(bandQ(q), 1));
+            set(p.pan, v.pan, (x) => clamp(x, -1, 1));
+            set(p.level, levelOf(def, v) / h.levelBase, (x) => x);
+            // The effects and the synth's own parameters it can change in place.
+            if (p.update) p.update(v, time, { freq, holdEnd });
+            if (h.vibrato) h.vibrato.update(v, time);
+            if (h.tune) {
+                for (const [key, change] of Object.entries(h.tune)) if (isNum(v[key])) change(v[key], time, { holdEnd });
+            }
+            // The orbit's delay and reverb, as any event of the orbit sets them.
+            if (p.output) this._orbitSend(p.output, v, time, isNum(v.orbit) ? Math.floor(v.orbit) : 0, p.sends);
+            if (follow) {
+                this._applyFollows(p, v, timing, time);
+                const live = this._liveVoices.get(p);
+                if (live) live.handle = h;
+            }
+        }
+
+        /** Releases a held voice (a MIDI key let go) at `time`: its gate closes over its release, then it stops. */
+        _releaseVoice(h, time) {
+            if (h.stopAt <= time) return;
+            const level = time <= h.holdEnd ? h.held : h.held * Math.max(0, 1 - (time - h.holdEnd) / h.release);
+            holdParam(h.gate, time, level);
+            this._envSegments(h.gate, time, level, [{ dur: h.release, level: 0, curve: h.curve || 0 }], Infinity);
+            const stopAt = time + h.release + (h.tail || 0) + 0.02;
+            for (const src of h.sources) {
+                try { src.stop(stopAt); } catch (e) { /* already stopped */ }
+            }
+            Object.assign(h, { holdEnd: time, stopAt });
+            if (h.timing) h.timing.stopAt = stopAt;
         }
 
         /**
@@ -6572,22 +8044,7 @@
 
         /** The value at time t (seconds) of an envelope { levels, times, curves }, as SuperCollider's Env. */
         _envelopeAt(env, t) {
-            const { levels, times, curves } = env;
-            let start = 0;
-            for (let i = 0; i < times.length; i++) {
-                const a = levels[i];
-                const b = levels[i + 1];
-                const dur = times[i];
-                if (t < start + dur) {
-                    const x = dur > 0 ? Math.max(0, (t - start) / dur) : 1;
-                    const c = curves[i];
-                    if (c === 'exp') return a * b > 0 ? a * Math.pow(b / a, x) : a + (b - a) * x;
-                    if (Math.abs(c) < 0.001) return a + (b - a) * x;
-                    return a + ((b - a) * (1 - Math.exp(c * x))) / (1 - Math.exp(c));
-                }
-                start += dur;
-            }
-            return levels[levels.length - 1];
+            return envelopeValue(env, t);
         }
 
         /** The pitch envelope of an event: pitchenv, else penv and friends (with the synth's defaults), else the synth's own. */
@@ -6655,16 +8112,32 @@
             }
 
             // Vibrato: vib times a second, vibmod semitones each way (0.5 by default).
-            if (isNum(v.vib) && v.vib > 0) {
+            // A tied voice has one (at depth 0 without vib) that a later event can change.
+            if ((isNum(v.vib) && v.vib > 0) || o.tied) {
+                let on = isNum(v.vib) && v.vib > 0;
+                let semitones = isNum(v.vibmod) ? clamp(v.vibmod, 0, 48) : 0.5;
                 const wobble = ctx.createOscillator();
                 const depth = ctx.createGain();
-                wobble.frequency.value = clamp(v.vib, 0, 100);
-                depth.gain.value = (isNum(v.vibmod) ? clamp(v.vibmod, 0, 48) : 0.5) * 100;
+                wobble.frequency.value = isNum(v.vib) ? clamp(v.vib, 0, 100) : 0;
+                depth.gain.value = on ? semitones * 100 : 0;
                 wobble.connect(depth);
                 for (const param of params) depth.connect(param);
                 wobble.start(time);
                 wobble.stop(stopAt);
                 mods.push(wobble, depth);
+                mods.vibrato = {
+                    // Its rate, for follow("vib", ...) (see _applyFollows).
+                    rate: wobble.frequency,
+                    update: (e, at) => {
+                        if (!isNum(e.vib) && !isNum(e.vibmod)) return;
+                        if (isNum(e.vib)) {
+                            on = e.vib > 0;
+                            setAt(wobble.frequency, clamp(e.vib, 0, 100), at);
+                        }
+                        if (isNum(e.vibmod)) semitones = clamp(e.vibmod, 0, 48);
+                        setAt(depth.gain, on ? semitones * 100 : 0, at);
+                    },
+                };
             }
 
             // Portamento: glide from the previous note of this sound over this many seconds.
@@ -6675,6 +8148,29 @@
                 src.offset.setValueAtTime(from, time);
                 src.offset.linearRampToValueAtTime(0, time + clamp(v.portamento, 0.001, 10));
                 drive(src);
+            }
+
+            // follow() / followNote() of note, freq or speed: the pitch moves
+            // relative to the note while it sounds (on the bend source of a
+            // voice that tie can change, so a later event can take it over).
+            // A pitch that reads a live input is laid out again when it changes (see _pitchRelay).
+            const reads = LIVE_READS.count;
+            const cents = this._followCents(v, o.pitchRef);
+            if (cents) {
+                const points = samplePoints(time, stopAt, cents);
+                let param;
+                if (o.bend) param = o.bend.offset;
+                else {
+                    const src = ctx.createConstantSource();
+                    src.offset.value = points.length ? points[0][1] : 0;
+                    drive(src);
+                    param = src.offset;
+                }
+                automate(param, points);
+                if (o.timing) {
+                    o.timing.pitchCents = cents;
+                    if (LIVE_READS.count !== reads) o.timing.pitchLive = { param, cents };
+                }
             }
             return mods;
         }
@@ -6715,6 +8211,8 @@
             };
             const mix = ctx.createGain();
             nodes.push(mix);
+            // The synth's own parameters that a tied event changes in place: name -> (value, time, info).
+            const tune = {};
 
             // Helpers of the SuperDirt-style synths.
             const osc = (wave, freq, opts = {}) => {
@@ -6860,11 +8358,19 @@
                     const spread = num('detune', 0.2, 0, 12) * 100;
                     const side = num('voice', 0.3, 0, 1);
                     const out = body(o.level);
+                    const saws = [];
+                    const sides = [];
                     for (let i = 0; i < 7; i++) {
                         const x = (i - 3) / 3;
-                        chain(osc(wave, f, { detune: x * spread, start: phase() }), amp((i === 3 ? 1 : side) / 2.2), pan(x * 0.7), out);
+                        const src = osc(wave, f, { detune: x * spread, start: phase() });
+                        const level = amp((i === 3 ? 1 : side) / 2.2);
+                        saws.push({ src, x });
+                        if (i !== 3) sides.push(level);
+                        chain(src, level, pan(x * 0.7), out);
                     }
                     out.connect(mix);
+                    tune.detune = (val, at) => { for (const s of saws) setAt(s.src.detune, s.x * clamp(val, 0, 12) * 100, at); };
+                    tune.voice = (val, at) => { for (const g of sides) setAt(g.gain, clamp(val, 0, 1) / 2.2, at); };
                     break;
                 }
                 // Pulse-width modulation: a saw minus a delayed copy of itself is
@@ -6874,15 +8380,26 @@
                     const depth = num('lfo', 0.5, 0, 1);
                     const spread = num('detune', 0.06, 0, 12) * 100;
                     const out = body(o.level);
+                    const saws = [];
+                    const sweeps = [];
                     [-1, 1].forEach((side) => {
                         const sum = amp(0.5);
                         const late = delay(0.5 / f);
-                        chain(osc('sawtooth', f, { detune: side * spread }), sum);
-                        chain(osc('sawtooth', f, { detune: side * spread }), late, amp(-1), sum);
-                        chain(osc('sine', rate * (side > 0 ? 1.13 : 1), { pitched: false }), amp((depth * 0.4) / f), late.delayTime);
+                        const a = osc('sawtooth', f, { detune: side * spread });
+                        const b = osc('sawtooth', f, { detune: side * spread });
+                        chain(a, sum);
+                        chain(b, late, amp(-1), sum);
+                        const sweep = osc('sine', rate * (side > 0 ? 1.13 : 1), { pitched: false });
+                        const width = amp((depth * 0.4) / f);
+                        chain(sweep, width, late.delayTime);
                         chain(sum, pan(side * 0.5), out);
+                        saws.push({ src: a, side }, { src: b, side });
+                        sweeps.push({ sweep, width, ratio: side > 0 ? 1.13 : 1 });
                     });
                     out.connect(mix);
+                    tune.rate = (val, at) => { for (const s of sweeps) setAt(s.sweep.frequency, clamp(val, 0, 50) * s.ratio, at); };
+                    tune.lfo = (val, at) => { for (const s of sweeps) setAt(s.width.gain, (clamp(val, 0, 1) * 0.4) / f, at); };
+                    tune.detune = (val, at) => { for (const s of saws) setAt(s.src.detune, s.side * clamp(val, 0, 12) * 100, at); };
                     break;
                 }
                 // The hoover (after Nathan Ho's SynthDef): 20 voices, each a saw and
@@ -6926,9 +8443,16 @@
                 case 'superreese': {
                     const spread = num('detune', 0.15, 0, 12) * 100;
                     const out = body(o.level);
-                    [[-1, -0.6], [0, 0], [1, 0.6]].forEach(([x, p]) => chain(osc('sawtooth', f, { detune: x * spread, start: phase() }), amp(0.4), pan(p), out));
-                    chain(osc('sine', f / 2), amp(num('voice', 0.3, 0, 1)), out);
+                    const saws = [[-1, -0.6], [0, 0], [1, 0.6]].map(([x, p]) => {
+                        const src = osc('sawtooth', f, { detune: x * spread, start: phase() });
+                        chain(src, amp(0.4), pan(p), out);
+                        return { src, x };
+                    });
+                    const sub = amp(num('voice', 0.3, 0, 1));
+                    chain(osc('sine', f / 2), sub, out);
                     out.connect(mix);
+                    tune.detune = (val, at) => { for (const s of saws) setAt(s.src.detune, s.x * clamp(val, 0, 12) * 100, at); };
+                    tune.voice = (val, at) => setAt(sub.gain, clamp(val, 0, 1), at);
                     break;
                 }
                 // Phasing saws: each saw is mixed with a copy whose delay sweeps
@@ -6938,16 +8462,25 @@
                     const depth = num('lfo', 0.5, 0, 1);
                     const spread = num('detune', 0.1, 0, 12) * 100;
                     const out = body(o.level);
+                    const saws = [];
+                    const sweeps = [];
                     for (let i = 0; i < 3; i++) {
                         const saw = osc('sawtooth', f, { detune: (i - 1) * spread, start: phase() });
                         const late = delay(0.004 + i * 0.002);
                         const voiceMix = amp(0.35);
                         saw.connect(voiceMix);
                         chain(saw, late, voiceMix);
-                        chain(osc('sine', rate * (1 + i * 0.37), { pitched: false }), amp(0.003 * depth), late.delayTime);
+                        const sweep = osc('sine', rate * (1 + i * 0.37), { pitched: false });
+                        const width = amp(0.003 * depth);
+                        chain(sweep, width, late.delayTime);
                         chain(voiceMix, pan((i - 1) * 0.7), out);
+                        saws.push({ src: saw, x: i - 1 });
+                        sweeps.push({ sweep, width, ratio: 1 + i * 0.37 });
                     }
                     out.connect(mix);
+                    tune.rate = (val, at) => { for (const s of sweeps) setAt(s.sweep.frequency, clamp(val, 0, 20) * s.ratio, at); };
+                    tune.lfo = (val, at) => { for (const s of sweeps) setAt(s.width.gain, 0.003 * clamp(val, 0, 1), at); };
+                    tune.detune = (val, at) => { for (const s of saws) setAt(s.src.detune, s.x * clamp(val, 0, 12) * 100, at); };
                     break;
                 }
                 // A chiptune pulse: voice is the pulse width (0.05 to 0.5), rate and
@@ -6956,14 +8489,22 @@
                     const src = osc(this._pulseWave(num('voice', 0.25, 0.05, 0.5)), f);
                     chain(src, body(o.level), mix);
                     const depth = num('lfo', 0, 0, 12);
-                    if (depth > 0) chain(osc('sine', num('rate', 6, 0, 50), { pitched: false }), amp(depth * 100), src.detune);
+                    tune.voice = (val, at) => this._atTime(at, () => src.setPeriodicWave(this._pulseWave(clamp(val, 0.05, 0.5))));
+                    // A tied voice has the vibrato (at depth 0 without lfo), so a later event can start it.
+                    if (depth > 0 || o.tied) {
+                        const wobble = osc('sine', num('rate', 6, 0, 50), { pitched: false });
+                        const amount = amp(depth * 100);
+                        chain(wobble, amount, src.detune);
+                        tune.rate = (val, at) => setAt(wobble.frequency, clamp(val, 0, 50), at);
+                        tune.lfo = (val, at) => setAt(amount.gain, clamp(val, 0, 12) * 100, at);
+                    }
                     break;
                 }
                 // Two-operator FM: a sine modulated by a sine semitone semitones
                 // above (12 by default), voice the modulation index (0 to 1).
                 case 'superfm': {
-                    const ratio = Math.pow(2, num('semitone', 12, -48, 48) / 12);
-                    const index = num('voice', 0.3, 0, 1) * 8;
+                    let ratio = Math.pow(2, num('semitone', 12, -48, 48) / 12);
+                    let index = num('voice', 0.3, 0, 1) * 8;
                     const carrier = osc('sine', f);
                     const modulator = osc('sine', f * ratio);
                     const depth = amp(index * f * ratio);
@@ -6971,6 +8512,46 @@
                     depth.gain.exponentialRampToValueAtTime(Math.max(0.001, index * f * ratio * 0.25), t0 + Math.max(0.02, o.length));
                     chain(modulator, depth, carrier.frequency);
                     chain(carrier, body(o.level), mix);
+                    // A tied event's semitone or voice: the modulator moves and its depth falls again from the new index.
+                    const strike = (at, info) => {
+                        const top = index * f * ratio;
+                        setAt(modulator.frequency, clamp(f * ratio, 0.01, 22000), at);
+                        setAt(depth.gain, top, at);
+                        depth.gain.exponentialRampToValueAtTime(Math.max(0.001, top * 0.25), at + Math.max(0.02, (info && info.holdEnd ? info.holdEnd : at) - at));
+                    };
+                    tune.semitone = (val, at, info) => { ratio = Math.pow(2, clamp(val, -48, 48) / 12); strike(at, info); };
+                    tune.voice = (val, at, info) => { index = clamp(val, 0, 1) * 8; strike(at, info); };
+                    break;
+                }
+                // SuperCollider's SinOscFB, in the AudioWorklet (see TidalFeedbackSine):
+                // voice 0 is a sine, 1 a feedback of 1.5 radians (saw-like).
+                case 'superfb': {
+                    const feedback = num('voice', 0.5, 0, 1) * 1.5;
+                    const node = this._fxState === 'ready' && typeof AudioWorkletNode !== 'undefined'
+                        ? new AudioWorkletNode(ctx, 'tidal-fb', {
+                            numberOfInputs: 1,
+                            numberOfOutputs: 1,
+                            outputChannelCount: [1],
+                            parameterData: { frequency: clamp(f, 0.01, 22000), feedback },
+                        })
+                        : null;
+                    if (!node) {
+                        this._warnOnce(this._fxState === 'loading'
+                            ? 'superfb is still loading; it plays a sine until then'
+                            : 'superfb needs AudioWorklet, which is not available here; it plays a sine');
+                        chain(osc('sine', f), body(o.level), mix);
+                        break;
+                    }
+                    // The gate: 1 from the note's start until the voice stops.
+                    const run = ctx.createConstantSource();
+                    run.offset.value = 1;
+                    run.start(time);
+                    sources.push(run);
+                    nodes.push(node);
+                    run.connect(node);
+                    pitched.push({ detune: node.parameters.get('detune') });
+                    tune.voice = (val, at) => setAt(node.parameters.get('feedback'), clamp(val, 0, 1) * 1.5, at);
+                    chain(node, body(o.level), mix);
                     break;
                 }
                 // Crackle: random clicks (voice is how many) through a band-pass at freq.
@@ -7106,7 +8687,7 @@
                     env.connect(mix);
                 }
             }
-            return { output: mix, sources, nodes, pitched: pitched.length ? pitched : sources };
+            return { output: mix, sources, nodes, pitched: pitched.length ? pitched : sources, tune: Object.keys(tune).length ? tune : null };
         }
 
         /** A pulse wave with the given duty cycle (0 to 1), cached. */
@@ -7232,25 +8813,272 @@
             }
         }
 
-        // --- OSC -------------------------------------------------------
+        // --- MIDI input --------------------------------------------------
 
-        _sendOsc(v, time, duration) {
-            if (typeof WebSocket === 'undefined') return;
-            if (!this._socket) {
-                try {
-                    this._socket = new WebSocket(this.oscUrl);
-                    this._socket.binaryType = 'arraybuffer';
-                    this._socket.onopen = () => {
-                        for (const msg of this._socketQueue) this._socket.send(msg);
-                        this._socketQueue = [];
-                    };
-                    this._socket.onerror = () => this._warnOnce(`Could not connect to the OSC bridge at ${this.oscUrl}`);
-                    this._socket.onclose = () => { this._socket = null; };
-                } catch (err) {
-                    this._warnOnce(`Invalid OSC WebSocket URL ${this.oscUrl}`);
+        /** Listens to every MIDI input, and to inputs plugged in later (for midicc and midikeys). Asks for access on first use. */
+        _listenMidi() {
+            if (this._midiListening) return;
+            this._midiListening = true;
+            Promise.resolve(this.enableMidi()).then((access) => {
+                if (!access) {
+                    this._midiListening = false; // asked again by the next midicc() or midikeys()
                     return;
                 }
+                const attached = new WeakSet();
+                const attach = () => {
+                    for (const input of access.inputs.values()) {
+                        if (attached.has(input)) continue;
+                        attached.add(input);
+                        const listener = (e) => this._midiIn(e.data, input.id || input.name || '');
+                        if (typeof input.addEventListener === 'function') input.addEventListener('midimessage', listener);
+                        else input.onmidimessage = listener;
+                    }
+                };
+                attach();
+                if (typeof access.addEventListener === 'function') access.addEventListener('statechange', attach);
+                else access.onstatechange = attach;
+            });
+        }
+
+        /**
+         * Reads the bytes of MIDI messages from one input: running status (data
+         * bytes after a message repeat its status), real-time bytes anywhere,
+         * system exclusive and system common messages skipped.
+         */
+        _midiIn(data, source = '') {
+            let p = this._midiParsers.get(source);
+            if (!p) {
+                p = { status: 0, data: [], sysex: false };
+                this._midiParsers.set(source, p);
             }
+            for (const byte of data || []) {
+                if (byte >= 0xf8) continue;                 // clock, start, stop...: anywhere, change nothing
+                if (byte === 0xf0) { p.sysex = true; p.status = 0; continue; }
+                if (byte === 0xf7) { p.sysex = false; continue; }
+                if (p.sysex && byte < 0x80) continue;
+                p.sysex = false;
+                if (byte >= 0xf0) { p.status = 0; p.data = []; continue; } // system common: no running status after it
+                if (byte >= 0x80) { p.status = byte; p.data = []; continue; }
+                if (!p.status) continue;                    // data with no status to belong to
+                p.data.push(byte);
+                const type = p.status & 0xf0;
+                if (p.data.length < (type === 0xc0 || type === 0xd0 ? 1 : 2)) continue;
+                const [a, b] = p.data;
+                p.data = [];
+                this._midiMessage(type, p.status & 0x0f, a, b);
+            }
+        }
+
+        _midiMessage(type, channel, a, b) {
+            if (type === 0xb0) {
+                this._midiCC.set(`${channel}:${a}`, b / 127);
+                this._midiCC.set(String(a), b / 127);
+                this._liveChanged();
+            } else if (type === 0x90 && b > 0) {
+                this._midiNoteOn(channel, a, b);
+            } else if (type === 0x80 || type === 0x90) {
+                this._midiNoteOff(channel, a); // a note-on with velocity 0 is a note-off
+            } else if (type === 0xe0) {
+                // 14 bits, least significant first: 8192 is the centre, 16383 the top.
+                const raw = b * 128 + a;
+                const x = raw >= 16383 ? 1 : (raw - 8192) / 8192;
+                this._midiBend.set(String(channel), x);
+                this._midiBend.set('*', x);
+                this._midiWheel(channel);
+                this._liveChanged();
+            } else if (type === 0xd0 || type === 0xa0) {
+                // Channel pressure, or the pressure of one key (the last one of any key for miditouch, its own for keytouch).
+                const x = (type === 0xd0 ? a : b) / 127;
+                if (type === 0xa0) this._polyTouch.set(`${channel}:${a}`, x);
+                const seq = ++this._midiSeq;
+                this._touchSeq.set(String(channel), seq);
+                this._touchSeq.set('*', seq);
+                this._midiTouch.set(String(channel), x);
+                this._midiTouch.set('*', x);
+                this._liveChanged();
+            }
+        }
+
+        /** The wheel's bend in cents for a voice of a midikeys() with a bend range: its channel's (any channel's if it has none) last bend. */
+        _wheelCents(wheel) {
+            const x = this._midiBend.get(wheel.channel === null ? '*' : String(wheel.channel)) ?? 0;
+            return x * wheel.range * 100;
+        }
+
+        /** A pitch bend on `channel`: the held keys of each midikeys() with a bend range on that channel bend. */
+        _midiWheel(channel) {
+            const ctx = this.audioContext;
+            if (!ctx) return;
+            const time = ctx.currentTime;
+            for (const [held, voices] of this._midiHeld) {
+                for (const h of voices) {
+                    if (!h.wheel || !h.bend || h.stopAt <= time) continue;
+                    if (h.wheel.channel !== null && h.wheel.channel !== channel) continue;
+                    const cents = h.cents + this._wheelCents(h.wheel);
+                    // On top of a followed pitch, if the voice has one.
+                    const follow = h.timing && h.timing.pitchCents;
+                    if (follow) withKey(held, () => automateFrom(h.bend, time, samplePoints(time + LIVE_GLIDE, h.stopAt, (t) => cents + follow(t))));
+                    else {
+                        holdParam(h.bend, time, h.wheel.cents);
+                        h.bend.linearRampToValueAtTime(cents, time + 0.005);
+                    }
+                    h.wheel.cents = cents;
+                }
+            }
+        }
+
+        /**
+         * A key pressed: each midikeys() template on its channel plays its values
+         * (from its first event in the current cycle) with the key as note and
+         * amp scaled by the velocity, held until the key is let go.
+         */
+        _midiNoteOn(channel, key, velocity) {
+            const ctx = this.audioContext;
+            if (!ctx || !this._midiKeys.length) return;
+            if (!this._session) this._session = this._createSession();
+            const time = ctx.currentTime;
+            this._midiNoteOff(channel, key, time); // the same key again: the last one ends
+            this._polyTouch.delete(`${channel}:${key}`); // a new press starts without pressure
+            this._keySeq.set(`${channel}:${key}`, ++this._midiSeq);
+            const cycle = Math.floor(this.isPlaying ? this.cycleAt(time) : 0);
+            const voices = [];
+            for (const { pattern, channel: wanted, bendRange } of this._midiKeys) {
+                if (wanted !== null && wanted !== channel) continue;
+                let first;
+                try {
+                    first = pattern.query(cycle, cycle + 1).sort((x, y) => x.begin - y.begin)[0];
+                } catch (error) {
+                    console.error('TidalJS: midikeys pattern error:', error);
+                    continue;
+                }
+                if (!first) continue;
+                const base = asObject(first.value);
+                const def = this.samples.get(base.s);
+                const amp = isNum(base.amp) ? base.amp : def && isNum(def.amp) ? def.amp : 0.4;
+                const v = { ...base, note: key, amp: (amp * velocity) / 127, sustain: MIDI_HOLD };
+                // The key sets the pitch and how long it sounds.
+                for (const k of ['freq', 'midinote', 'up', 'legato', 'hold', 'tie']) delete v[k];
+                try {
+                    const voice = withKey(`${channel}:${key}`, () => this.playEvent(v, time, MIDI_HOLD, true));
+                    if (voice && bendRange > 0 && voice.bend) {
+                        // The wheel bends this voice; a key pressed with the wheel off centre starts bent.
+                        voice.wheel = { channel: wanted, range: bendRange, cents: 0 };
+                        const cents = this._wheelCents(voice.wheel);
+                        if (cents !== 0) {
+                            const base = voice.cents + cents;
+                            const follow = voice.timing && voice.timing.pitchCents;
+                            if (follow) withKey(`${channel}:${key}`, () => automateFrom(voice.bend, time, samplePoints(time, voice.stopAt, (t) => base + follow(t))));
+                            else voice.bend.setValueAtTime(base, time);
+                            voice.wheel.cents = base;
+                        }
+                    }
+                    if (voice) voices.push(voice);
+                } catch (error) {
+                    console.error('TidalJS: could not play a MIDI key:', error);
+                }
+            }
+            if (voices.length) this._midiHeld.set(`${channel}:${key}`, voices);
+        }
+
+        /** A key let go: its voices release. */
+        _midiNoteOff(channel, key, time) {
+            const held = this._midiHeld.get(`${channel}:${key}`);
+            if (!held) return;
+            this._midiHeld.delete(`${channel}:${key}`);
+            const at = isNum(time) ? time : this.audioContext ? this.audioContext.currentTime : 0;
+            for (const voice of held) this._releaseVoice(voice, at);
+        }
+
+        // --- OSC -------------------------------------------------------
+
+        /**
+         * The WebSocket of the OSC bridge (see setOscUrl), opened on first use.
+         * It sends .osc() events, and binary messages coming back (OSC packets
+         * the bridge received over UDP) feed oscIn(). Null without WebSocket.
+         */
+        _oscSocket() {
+            if (typeof WebSocket === 'undefined') return null;
+            if (this._socket) return this._socket;
+            let socket;
+            try {
+                socket = new WebSocket(this.oscUrl);
+            } catch (err) {
+                this._warnOnce(`Invalid OSC WebSocket URL ${this.oscUrl}`);
+                return null;
+            }
+            socket.binaryType = 'arraybuffer';
+            socket.onopen = () => {
+                for (const msg of this._socketQueue) socket.send(msg);
+                this._socketQueue = [];
+            };
+            socket.onerror = () => this._warnOnce(`Could not connect to the OSC bridge at ${this.oscUrl}`);
+            socket.onclose = () => { if (this._socket === socket) this._socket = null; };
+            socket.onmessage = (e) => this._oscReceive(e.data);
+            this._socket = socket;
+            return socket;
+        }
+
+        /** OSC packets from the bridge (an ArrayBuffer, typed array or Blob): keeps each address's numeric arguments for oscIn(). */
+        _oscReceive(data) {
+            if (data && typeof data.arrayBuffer === 'function' && !(data instanceof ArrayBuffer)) {
+                data.arrayBuffer().then((buffer) => this._oscReceive(buffer), () => {});
+                return;
+            }
+            let bytes;
+            if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+            else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            else return; // text frames are not OSC
+            let messages;
+            try {
+                messages = parseOsc(bytes);
+            } catch (error) {
+                this._warnOnce(`An OSC packet from the bridge could not be read (${error.message})`);
+                return;
+            }
+            for (const { address, args } of messages) {
+                const values = this._oscValues.get(address) || [];
+                args.forEach((arg, i) => {
+                    if (isNum(arg)) values[i] = arg;
+                    else if (typeof arg === 'boolean') values[i] = arg ? 1 : 0;
+                });
+                this._oscValues.set(address, values);
+                this._liveChanged();
+                // After its values are kept, so oscIn() in an oscplay() template reads this message.
+                this._oscPlay(address);
+            }
+        }
+
+        /**
+         * An OSC message on an address: each oscplay() template for it plays
+         * its first event of the current cycle once, now, at that event's length.
+         */
+        _oscPlay(address) {
+            const ctx = this.audioContext;
+            if (!ctx || !this._oscPlays.length) return;
+            const plays = this._oscPlays.filter((p) => p.address === address);
+            if (!plays.length) return;
+            if (!this._session) this._session = this._createSession();
+            const time = ctx.currentTime;
+            const cycle = Math.floor(this.isPlaying ? this.cycleAt(time) : 0);
+            for (const { pattern } of plays) {
+                let first;
+                try {
+                    first = pattern.query(cycle, cycle + 1).sort((x, y) => x.begin - y.begin)[0];
+                } catch (error) {
+                    console.error('TidalJS: oscplay pattern error:', error);
+                    continue;
+                }
+                if (!first) continue;
+                try {
+                    this.playEvent(asObject(first.value), time, (first.end - first.begin) / this.cps);
+                } catch (error) {
+                    console.error('TidalJS: could not play an OSC message:', error);
+                }
+            }
+        }
+
+        _sendOsc(v, time, duration) {
+            if (!this._oscSocket()) return;
             const args = ['cps', this.cps, 'cycle', this.cycleAt(time), 'delta', duration];
             for (const [key, value] of Object.entries(v)) {
                 if (key === 'osc' || value === undefined || value === null) continue;
@@ -7392,6 +9220,12 @@
     TidalJS.splitStatementRanges = splitStatementRanges;
     TidalJS.parseChord = parseChord;
     TidalJS.bjorklund = bjorklund;
+    TidalJS.parseOsc = parseOsc;
+    TidalJS.oscMessage = oscMessage;
+    TidalJS.oscBundle = oscBundle;
+    TidalJS.samplePoints = samplePoints;
+    // The source of the AudioWorklet module (effects and superfb), for tests.
+    TidalJS.workletModule = fxWorkletModule;
     // Name lists, used by the editor's autocomplete.
     TidalJS.soundNames = Object.keys(SAMPLE_DEFS);
     TidalJS.scaleNames = Object.keys(SCALES);

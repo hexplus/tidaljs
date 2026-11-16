@@ -904,4 +904,723 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     t.stopAll();
 }
 
+// ---------------------------------------------------------------------
+// Phase 17: changes during a note (follow, tie), live controls, MIDI and
+// OSC input, superfb. A fake audio graph records every AudioParam call.
+// ---------------------------------------------------------------------
+function fakeAudio() {
+    const nodes = [];
+    const param = (label, value = 0) => {
+        const p = {
+            label, value, events: [],
+            setValueAtTime(v, at) { p.events.push(['set', v, at]); },
+            linearRampToValueAtTime(v, at) { p.events.push(['ramp', v, at]); },
+            exponentialRampToValueAtTime(v, at) { p.events.push(['exp', v, at]); },
+            setTargetAtTime(v, at) { p.events.push(['target', v, at]); },
+            setValueCurveAtTime(values, at, dur) { p.events.push(['curve', values[values.length - 1], at + dur]); },
+            cancelScheduledValues(at) { p.events.push(['cancel', at]); },
+            cancelAndHoldAtTime(at) { p.events.push(['hold', at]); },
+        };
+        return p;
+    };
+    const base = (kind) => ({ kind, connections: [], connect(x) { this.connections.push(x); return x; }, disconnect() {} });
+    const source = (kind) => ({ ...base(kind), stops: [], start(at) { this.started = at; }, stop(at) { this.stops.push(at); } });
+    const track = (n) => { nodes.push(n); return n; };
+    const ctx = {
+        currentTime: 0, sampleRate: 48000, state: 'running', resume() {},
+        createGain: () => track({ ...base('gain'), gain: param('gain', 1) }),
+        createBiquadFilter: () => track({ ...base('filter'), type: '', frequency: param('frequency', 350), Q: param('Q', 1), gain: param('fgain', 0) }),
+        createStereoPanner: () => track({ ...base('panner'), pan: param('pan', 0) }),
+        createOscillator: () => track({ ...source('osc'), type: 'sine', frequency: param('frequency', 440), detune: param('detune', 0), setPeriodicWave() {} }),
+        createConstantSource: () => track({ ...source('constant'), offset: param('offset', 1) }),
+        createBufferSource: () => track({ ...source('buffer'), playbackRate: param('rate', 1), detune: param('detune', 0) }),
+        createWaveShaper: () => track({ ...base('shaper') }),
+        createDelay: () => track({ ...base('delay'), delayTime: param('delayTime', 0) }),
+        createChannelMerger: () => track(base('merger')),
+        createConvolver: () => track(base('convolver')),
+        createBuffer: (ch, length, sampleRate) => ({ numberOfChannels: ch, length, sampleRate, duration: length / sampleRate, getChannelData: () => new Float32Array(length) }),
+        createPeriodicWave: () => ({}),
+    };
+    return { ctx, nodes, param };
+}
+{
+    const savedCtx = t.audioContext;
+    delete t.playEvent; // stubbed by the scheduler test above
+    const { ctx, nodes, param } = fakeAudio();
+    const useAudio = () => {
+        nodes.length = 0;
+        t.audioContext = ctx;
+        t._session = t._createSession();
+        t.cps = 1;
+        t._anchorTime = 0;
+        t._anchorCycle = 0;
+    };
+    const near = (a, b, tol, msg) => { assert(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`); passed++; };
+    /** The value an automated parameter is given at (about) a time. */
+    const valueAt = (p, at) => {
+        const points = p.events.filter((x) => x[0] === 'set' || x[0] === 'ramp');
+        return points.reduce((best, x) => (Math.abs(x[2] - at) < Math.abs(best[2] - at) ? x : best))[1];
+    };
+
+    // samplePoints: every 15 ms (at most 400), flat runs left out
+    const pts = TidalJS.samplePoints(0, 1, (x) => x);
+    eq(pts[0].join(), '0,0');
+    eq(pts[pts.length - 1].join(), '1,1');
+    eq(pts.length, Math.ceil(1 / 0.015) + 1);
+    eq(TidalJS.samplePoints(0, 60, (x) => x).length, 401);
+    eq(TidalJS.samplePoints(0, 1, () => 5).length, 2);
+
+    // follow: the event carries the signal's value at its onset; the filter moves during the note
+    useAudio();
+    const lp = sound('saw').note('c3').legato(1).follow('lpf', saw.range(200, 2200));
+    eq(lp.query(0, 1)[0].value.lpf, 200);
+    eq(lp.fast(2).query(0, 1)[1].value.lpf, 1200); // onsets are the times that play (after fast)
+    eq(JSON.stringify(lp.query(0, 1)[0].value).includes('follow'), false); // left out of JSON
+    eq(JSON.stringify(t.exportPattern(lp, 1)).includes('follow'), false);
+    t.playEvent(lp.query(0, 1)[0].value, 0.25, 1);
+    let filt = nodes.find((n) => n.kind === 'filter' && n.type === 'lowpass');
+    eq(filt.frequency.events[0].join(), 'set,700,0.25'); // the onset value replaces the control's own
+    near(valueAt(filt.frequency, 0.75), 1700, 40, 'lpf follows the signal at absolute cycles');
+    near(valueAt(filt.frequency, 1.1), 400, 40, 'the saw wraps at the next cycle');
+    const lastAt = Math.max(...filt.frequency.events.map((x) => x[2]));
+    near(lastAt, 0.25 + 1 + 0.03 + 0.02, 1e-6, 'automated through the release');
+    // followNote: the signal's time starts at the onset
+    useAudio();
+    t.playEvent(sound('saw').legato(1).followNote('lpf', saw.range(200, 2200)).query(0, 1)[0].value, 0.25, 1);
+    filt = nodes.find((n) => n.kind === 'filter' && n.type === 'lowpass');
+    eq(filt.frequency.events[0][1], 200);
+    near(valueAt(filt.frequency, 0.75), 1200, 40, 'followNote at half a cycle into the note');
+    // resonance, pan and gain (a gain that starts at 0 still builds the voice)
+    useAudio();
+    t.playEvent(sound('saw').legato(1).lpf(1000).follow('resonance', saw).follow('pan', saw.range(-1, 1)).follow('gain', saw).query(0, 1)[0].value, 0, 1);
+    filt = nodes.find((n) => n.kind === 'filter' && n.type === 'lowpass');
+    near(valueAt(filt.Q, 0.5), 30, 1, 'resonance 0.5 is 30 dB');
+    near(valueAt(nodes.find((n) => n.kind === 'panner').pan, 0.5), 0, 0.05, 'pan follows');
+    const level = nodes.find((n) => n.kind === 'gain' && n.gain.events.some((x) => x[0] === 'ramp' && Math.abs(x[2] - 0.5) < 0.008));
+    near(valueAt(level.gain, 0.5), Math.pow(0.5, 4), 0.01, 'gain follows SuperDirt\'s curve');
+    // pitch: note (relative to the note, in cents, on a constant source into the detunes)
+    useAudio();
+    t.playEvent(sound('saw').note('c3').legato(1).followNote('note', saw.range(0, 12)).query(0, 1)[0].value, 0, 1);
+    const bend = nodes.find((n) => n.kind === 'constant' && n.offset.events.length > 2);
+    near(valueAt(bend.offset, 0.5), 600, 20, 'note follows in cents');
+    eq(nodes.find((n) => n.kind === 'osc').frequency.value.toFixed(2), (440 * Math.pow(2, (60 - 69) / 12)).toFixed(2)); // starts at the signal's note
+    eq(bend.connections.some((c) => c.label === 'detune'), true);
+    // speed on a synth, and several follows with the last winning
+    useAudio();
+    t.playEvent(sound('saw').legato(1).follow('speed', '2').follow('speed', saw.range(1, 2)).query(0, 1)[0].value, 0, 1);
+    near(valueAt(nodes.find((n) => n.kind === 'constant' && n.offset.events.length > 2).offset, 0.5), 1200 * Math.log2(1.5), 20, 'speed follows');
+    // an unsupported control is ignored with a warning
+    let r = t.eval('sound("saw").follow("vowel", "a")');
+    eq(r.success && r.warnings.some((w) => /cannot change vowel/.test(w)), true);
+    // live updates tell follow signals apart
+    t.eval('d1(sound("saw").follow("lpf", sine.range(200, 400)))');
+    const kept = t.channels.get('d1');
+    t.eval('d1(sound("saw").follow("lpf", sine.range(200, 400)))', { keepUnchanged: true });
+    eq(t.channels.get('d1') === kept, true);
+    t.eval('d1(sound("saw").follow("lpf", sine.range(200, 800)))', { keepUnchanged: true });
+    eq(t.channels.get('d1') === kept, false);
+    t.stopAll();
+
+    // tie: the second note takes over the voice (no new oscillator), glides and lasts longer
+    useAudio();
+    const tied = sound('saw').note('c3 e3').legato(1).lpf('500 900').tie(1).portamento(0.1).query(0, 1).map((e) => e.value);
+    eq(tied[0].tie, 1);
+    const first = t.playEvent(tied[0], 0, 0.5);
+    const oscs = nodes.filter((n) => n.kind === 'osc').length;
+    const again = t.playEvent(tied[1], 0.5, 0.5);
+    eq(again === first, true);
+    eq(nodes.filter((n) => n.kind === 'osc').length, oscs);
+    eq(first.bend.events.some((x) => x[0] === 'hold' && x[1] === 0.5), true);
+    near(valueAt(first.bend, 0.6), 400, 5, 'glides to e3 over portamento');
+    eq(first.gate.events.some((x) => x[0] === 'hold' && x[1] === 0.5), true);
+    near(first.stopAt, 1 + 0.03 + 0.02, 1e-9, 'the voice lasts until the new end');
+    eq(nodes.find((n) => n.kind === 'osc').stops.slice(-1)[0], first.stopAt);
+    eq(first.params.lpf.freq.events.slice(-1)[0].join(), 'set,900,0.5');
+    // once the voice has ended, the same tie starts a new one; another tie is another voice
+    eq(t.playEvent({ ...tied[1], note: 50 }, 3, 0.5) === first, false);
+    eq(t.playEvent({ ...tied[0], tie: 2 }, 3.1, 0.5) === t._session.ties.get('0:saw:1'), false);
+    t.sampleBanks.set('kit', ['k.wav']);
+    t._sampleBuffers.set('k.wav', { buffer: ctx.createBuffer(1, 4800, 48000) });
+    r = t.eval('sound("kit").tie(1)');
+    t._session = t._createSession();
+    t.playEvent({ s: 'kit', tie: 1 }, 0, 0.5);
+    eq(t._warned.has('tie() works on synths; samples ignore it'), true);
+    t.sampleBanks.delete('kit');
+
+    // Live controls: slider and toggle
+    const seen = [];
+    const stop = t.onControls((list) => seen.push(list));
+    r = t.eval('sound("saw").lpf(slider("cut", 800, 200, 4000))');
+    eq(JSON.stringify(t.controls()), JSON.stringify([{ name: 'cut', kind: 'slider', value: 800, min: 200, max: 4000, step: 0 }]));
+    eq(seen.length > 0, true);
+    eq(t.channels.get('#1').query(0, 1)[0].value.lpf, 800);
+    eq(t.setControl('cut', 5000), 4000);
+    eq(t.channels.get('#1').query(0, 1)[0].value.lpf, 4000);
+    t.eval('sound("saw").lpf(slider("cut", 300, 100, 3000))');
+    eq(t.controls()[0].value, 3000); // keeps its value, within the new range
+    t.eval('sound("saw").lpf(slider("cut", 300).fast("xyz"))'); // fails: the controls stay
+    eq(t.controls().length, 1);
+    t.eval('sound("hh*4").gain(toggle("hats", true)).pan(slider("p", 0.33, 0, 1, 0.25))');
+    eq(t.controls().map((c) => `${c.name}:${c.kind}:${c.value}`).join(), 'hats:toggle:1,p:slider:0.25'); // cut went
+    eq(t.setControl('hats', false), 0);
+    eq(t.channels.get('#1').query(0, 1)[0].value.gain, 0);
+    t.restoreControls({ x: 7 });
+    t.eval('sound("saw").speed(slider("x", 1, 0, 10))');
+    eq(t.controls()[0].value, 7);
+    stop();
+    t.stopAll();
+
+    // MIDI input: control changes (running status, real-time bytes, channels)
+    t._midiIn([0xb0, 74, 127]);
+    eq(midicc(74)._signal(0), 1);
+    eq(midicc(74, 0)._signal(0), 1);
+    eq(midicc(74, 1)._signal(0), 0);
+    t._midiIn([0xb1, 10, 64, 11, 127], 'other');
+    eq(+midicc(10, 1)._signal(0).toFixed(4), +(64 / 127).toFixed(4));
+    eq(midicc(11)._signal(0), 1);
+    t._midiIn([0xb0, 0xf8, 7, 0]);
+    eq(midicc(7)._signal(0), 0);
+    t._midiIn([0xb0, 7]); t._midiIn([127]); // a message split in two
+    eq(midicc(7)._signal(0), 1);
+    // midikeys: each key plays the template, held until let go
+    useAudio();
+    r = t.eval('stack(midikeys(sound("supersaw").amp(0.2).lpf(2000)), midikeys(sound("superfm"), 3))');
+    eq(r.success && t._midiKeys.length === 2, true);
+    ctx.currentTime = 1;
+    t._midiIn([0x90, 64, 127]);
+    let held = t._midiHeld.get('0:64');
+    eq(held.length, 1); // the channel-3 keyboard does not hear channel 0
+    const keyOsc = nodes.find((n) => n.kind === 'osc');
+    eq(+keyOsc.frequency.value.toFixed(3), +(440 * Math.pow(2, (64 - 69) / 12)).toFixed(3));
+    eq(keyOsc.stops[0] > 600, true); // held
+    t._midiIn([64, 0]); // running status: note-on with velocity 0 is a note-off
+    eq(t._midiHeld.has('0:64'), false);
+    eq(keyOsc.stops.slice(-1)[0] < 2, true);
+    const played = [];
+    const realPlay = t.playEvent;
+    t.playEvent = (v, time, dur, hold) => { played.push({ v, hold }); return null; };
+    t._midiIn([0x93, 60, 64]);
+    eq(played.length, 2);
+    eq(played[0].v.note === 60 && played[0].v.lpf === 2000 && +played[0].v.amp.toFixed(4) === +(0.2 * 64 / 127).toFixed(4) && played[0].hold, true);
+    eq(+played[1].v.amp.toFixed(4), +(0.4 * 64 / 127).toFixed(4)); // the default amp
+    t.playEvent = realPlay;
+    t.eval('sound("bd")');
+    eq(t._midiKeys.length, 0); // gone when the code no longer uses it
+    t.stopAll();
+
+    // OSC input: messages and bundles from the bridge
+    class FakeSocket {
+        constructor(url) { this.url = url; this.readyState = 0; FakeSocket.last = this; }
+        send() {}
+        close() {}
+    }
+    const savedSocket = globalThis.WebSocket;
+    globalThis.WebSocket = FakeSocket;
+    t._socket = null;
+    r = t.eval('sound("saw*4").lpf(oscIn("/fader").range(200, 4000)).pan(oscIn("pan", 1))');
+    eq(r.success && FakeSocket.last.url === t.oscUrl, true);
+    eq(oscIn('/fader')._signal(0), 0);
+    FakeSocket.last.onmessage({ data: TidalJS.oscMessage('/fader', [0.5, 3]).buffer });
+    eq(oscIn('/fader')._signal(0), 0.5);
+    eq(oscIn('/fader', 1)._signal(0), 3);
+    eq(t.channels.get('#1').query(0, 1)[0].value.lpf, 2100);
+    t._oscReceive(TidalJS.oscBundle(0, TidalJS.oscMessage('/pan', ['x', -1])));
+    eq(oscIn('/pan', 1)._signal(0), -1);
+    eq(oscIn('/pan', 0)._signal(0), 0); // text is not a number
+    // other types: double, int64, true, a blob; nested bundles
+    const enc = new TextEncoder();
+    const pad = (bytes) => { const out = new Uint8Array(Math.ceil((bytes.length + 1) / 4) * 4); out.set(bytes); return out; };
+    const u8 = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let at = 0; for (const p of parts) { out.set(p, at); at += p.length; } return out; };
+    const be = (n, f) => { const b = new Uint8Array(n); f(new DataView(b.buffer)); return b; };
+    const msg = u8(pad(enc.encode('/many')), pad(enc.encode(',dbhTi')), be(8, (d) => d.setFloat64(0, 0.25)),
+        be(4, (d) => d.setInt32(0, 3)), new Uint8Array([1, 2, 3, 0]), be(8, (d) => d.setBigInt64(0, 9n)), be(4, (d) => d.setInt32(0, -7)));
+    eq(JSON.stringify(TidalJS.parseOsc(msg)[0].args), JSON.stringify([0.25, { 0: 1, 1: 2, 2: 3 }, 9, true, -7]));
+    const nested = TidalJS.oscBundle(0, TidalJS.oscBundle(0, TidalJS.oscMessage('/deep', [2])));
+    t._oscReceive(nested);
+    eq(oscIn('/deep')._signal(0), 2);
+    t._oscReceive(msg.slice(0, 13)); // cut short: a warning, nothing changes
+    eq([...t._warned].some((w) => /OSC packet/.test(w)), true);
+    eq(oscIn('/many', 4)._signal(0), 0);
+    t._oscReceive(msg);
+    eq(oscIn('/many', 4)._signal(0), -7);
+    globalThis.WebSocket = savedSocket;
+    t._socket = null;
+    t.stopAll();
+
+    // superfb: the SinOscFB processor, sample by sample
+    const registered = {};
+    new Function('sampleRate', 'registerProcessor', 'AudioWorkletProcessor', '(' + TidalJS.workletModule.toString() + ')();')(
+        48000, (name, cls) => { registered[name] = cls; }, class {});
+    const FB = registered['tidal-fb'];
+    eq(typeof FB, 'function');
+    const render = (feedback, gate = 1) => {
+        const p = new FB();
+        const out = [];
+        for (let k = 0; k < 16; k++) {
+            const o = new Float32Array(128);
+            p.process([[new Float32Array(128).fill(gate)]], [[o]], { frequency: [750], detune: [0], feedback: [feedback] });
+            out.push(...o);
+        }
+        return out;
+    };
+    const pure = render(0);
+    eq(pure.every((y, i) => Math.abs(y - Math.sin((2 * Math.PI * 750 * i) / 48000)) < 1e-4), true); // a sine
+    const harmonic = (ys, k) => {
+        let re = 0; let im = 0;
+        ys.forEach((y, i) => { re += y * Math.cos((2 * Math.PI * 750 * k * i) / 48000); im += y * Math.sin((2 * Math.PI * 750 * k * i) / 48000); });
+        return Math.hypot(re, im) / ys.length;
+    };
+    const buzz = render(1.5);
+    eq(harmonic(pure, 2) < 1e-3, true);
+    eq(harmonic(buzz, 2) / harmonic(buzz, 1) > 0.25 && harmonic(buzz, 3) / harmonic(buzz, 1) > 0.1, true); // saw-like
+    const gated = new FB();
+    const o = new Float32Array(128);
+    eq(gated.process([[]], [[o]], { frequency: [750], detune: [0], feedback: [0] }), true); // not started yet
+    gated.process([[new Float32Array(128).fill(1)]], [[o]], { frequency: [750], detune: [0], feedback: [0] });
+    eq(gated.process([[]], [[o]], { frequency: [750], detune: [0], feedback: [0] }), false); // stopped: done
+    eq(render(0, 0).every((y) => y === 0), true);
+    // In the engine: the worklet node with the voice's feedback, or a sine with a warning without it
+    eq(TidalJS.soundNames.includes('superfb'), true);
+    useAudio();
+    t._fxState = 'failed';
+    t.playEvent({ s: 'superfb', note: 48, legato: 1 }, 0, 1);
+    eq(t._warned.has('superfb needs AudioWorklet, which is not available here; it plays a sine'), true);
+    eq(nodes.some((n) => n.kind === 'osc'), true);
+    const worklets = [];
+    globalThis.AudioWorkletNode = class {
+        constructor(c, name, opts) { this.name = name; this.opts = opts; this.parameters = new Map([['detune', param('detune')]]); worklets.push(this); }
+        connect() {}
+        disconnect() {}
+    };
+    t._fxState = 'ready';
+    useAudio();
+    t.playEvent({ s: 'superfb', note: 48, voice: 0.8, legato: 1, tie: 'x' }, 0, 1);
+    eq(worklets.length === 1 && worklets[0].name === 'tidal-fb', true);
+    eq(+worklets[0].opts.parameterData.feedback.toFixed(6), 1.2);
+    eq(nodes.some((n) => n.kind === 'osc' && n.frequency.value > 20), false); // no sine instead (a tied voice's LFOs are slower)
+    const gateSrc = nodes.find((n) => n.kind === 'constant' && n.offset.value === 1);
+    eq(gateSrc.connections[0] === worklets[0], true);
+    eq(nodes.filter((n) => n.kind === 'constant').some((n) => n.connections.includes(worklets[0].parameters.get('detune'))), true); // tie can bend it
+    delete globalThis.AudioWorkletNode;
+    t._fxState = 'none';
+
+    // ---------------------------------------------------------------
+    // Phase 18: midibend, miditouch, midikeys' bend range, oscplay,
+    // envelope, rhythm, controlLayout, tie on every control, live follow.
+    // ---------------------------------------------------------------
+    const lastSet = (p) => p.events.filter((x) => x[0] === 'set' || x[0] === 'ramp').slice(-1)[0];
+
+    // midibend: 14 bits, -1 to 1, per channel and any channel; miditouch: channel and key pressure
+    eq(midibend()._signal(0), 0);
+    t._midiIn([0xe0, 0, 64]);
+    eq(midibend()._signal(0), 0);
+    t._midiIn([0xe0, 0x7f, 0x7f]);
+    eq(midibend(0)._signal(0), 1);
+    t._midiIn([0xe1, 0, 0]);
+    eq(midibend(1)._signal(0), -1);
+    eq(midibend()._signal(0), -1);
+    eq(midibend(0)._signal(0), 1);
+    t._midiIn([0xe2, 0, 96]);
+    eq(midibend(2)._signal(0), 0.5);
+    eq(miditouch()._signal(0), 0);
+    t._midiIn([0xd3, 127]);
+    eq(miditouch(3)._signal(0), 1);
+    eq(miditouch(4)._signal(0), 0);
+    t._midiIn([0xa0, 60, 64, 61, 127]); // running status: two key pressures, the last one counts
+    eq(miditouch(0)._signal(0), 1);
+    eq(miditouch()._signal(0), 1);
+    t._midiIn([0xa5, 60, 0]);
+    eq(miditouch()._signal(0), 0);
+    eq(miditouch(3)._signal(0), 1);
+
+    // keytouch: inside a midikeys() voice, the pressure of its own key; 0 elsewhere
+    t._midiIn([0xa0, 60, 127]);
+    eq(keytouch()._signal(0), 0);
+    useAudio();
+    r = t.eval('midikeys(sound("saw").follow("amp", keytouch().range(0.1, 0.5)))');
+    eq(r.success, true);
+    ctx.currentTime = 3;
+    t._midiIn([0x90, 60, 100, 64, 100]); // a new press of 60 starts without its old pressure
+    const k60 = t._midiHeld.get('0:60')[0], k64 = t._midiHeld.get('0:64')[0];
+    eq([...t._liveVoices.values()].map((e) => e.key).sort().join(), '0:60,0:64');
+    const before64 = k64.params.level.events.length;
+    const levelAt = (h) => h.params.level.events.filter((x) => x[0] === 'set' || x[0] === 'ramp').slice(-1)[0][1];
+    const start60 = levelAt(k60);
+    eq(start60, levelAt(k64)); // before any pressure each note keeps its own amp
+    t._liveFlushedAt = 0;
+    t._midiIn([0xa0, 64, 127]); // only key 64 is pressed harder
+    eq(k64.params.level.events.length > before64, true);
+    const hard = levelAt(k64);
+    t._liveFlushedAt = 0;
+    t._midiIn([0xa0, 64, 0]);
+    eq(hard > levelAt(k64) * 4.9, true); // amp 0.5 at full pressure, 0.1 at none
+    eq(levelAt(k60), start60); // key 60 keeps its own (no) pressure
+    eq(miditouch()._signal(0), 0); // miditouch still reads the last key
+    // miditouch in a voice: the note keeps its own value until channel pressure comes after its key went down
+    r = t.eval('midikeys(sound("saw").follow("amp", miditouch().range(0.1, 0.5)))');
+    t._midiIn([0x90, 67, 100]);
+    const k67 = t._midiHeld.get('0:67')[0];
+    const own = levelAt(k67);
+    t._liveFlushedAt = 0;
+    t._midiIn([0xd0, 127]);
+    eq(levelAt(k67) !== own, true);
+    t._midiIn([0x80, 60, 0, 64, 0, 67, 0]);
+    t.eval('sound("bd")');
+    t.stopAll();
+
+    // midikeys(template, channel, bendRange): the wheel bends the held keys
+    useAudio();
+    t._midiIn([0xe0, 0, 64]); t._midiIn([0xe1, 0, 64]); t._midiIn([0xe2, 0, 64]);
+    r = t.eval('stack(midikeys(sound("saw"), null, 2), midikeys(sound("superfm"), 1))');
+    eq(r.success && t._midiKeys[0].bendRange === 2 && t._midiKeys[1].bendRange === 0, true);
+    ctx.currentTime = 1;
+    t._midiIn([0xe0, 0, 96]); // half up before the key: it starts bent by a semitone
+    t._midiIn([0x90, 60, 100]);
+    let voice = t._midiHeld.get('0:60')[0];
+    eq(voice.wheel.range, 2);
+    eq(lastSet(voice.bend).join(), 'set,100,1');
+    ctx.currentTime = 1.5;
+    t._midiIn([0xe0, 0x7f, 0x7f]); // all the way up: two semitones
+    eq(lastSet(voice.bend).join(), 'ramp,200,1.505');
+    t._midiIn([0xe0, 0, 64]);
+    eq(lastSet(voice.bend)[1], 0);
+    t._midiIn([0x91, 62, 100]); // channel 1: the superfm keyboard has no bend range
+    const fm = t._midiHeld.get('1:62').find((h) => !h.wheel);
+    eq(!!fm, true);
+    const fmEvents = fm.bend ? fm.bend.events.length : 0;
+    t._midiIn([0xe1, 0x7f, 0x7f]);
+    eq(fm.bend ? fm.bend.events.length : 0, fmEvents);
+    t._midiIn([0x80, 60, 0]);
+    eq(t._midiHeld.has('0:60'), false);
+    eq(voice.stopAt < 2, true); // released as before
+    t._midiIn([0xe0, 0, 64]); t._midiIn([0xe1, 0, 64]);
+    t.eval('sound("bd")');
+    t.stopAll();
+
+    // oscplay: each message plays the template once, with that message's values
+    {
+        const savedWs = globalThis.WebSocket;
+        globalThis.WebSocket = class { constructor(url) { this.url = url; this.readyState = 0; } send() {} close() {} };
+        t._socket = null;
+        useAudio();
+        r = t.eval('oscplay("hit", sound("superpiano").freq(oscIn("/hit", 1)).amp(oscIn("/hit", 2)))');
+        eq(r.success && t._oscPlays.length === 1 && t._oscPlays[0].address === '/hit', true);
+        const heard = [];
+        t.playEvent = (v, time, dur) => { heard.push({ v, time, dur }); return null; };
+        ctx.currentTime = 2;
+        t._oscReceive(TidalJS.oscMessage('/hit', [0, 330, 0.5]));
+        t._oscReceive(TidalJS.oscBundle(0, TidalJS.oscMessage('/hit', [0, 440, 0.25])));
+        t._oscReceive(TidalJS.oscMessage('/other', [1, 2, 3]));
+        eq(heard.length, 2);
+        eq(heard[0].v.s === 'superpiano' && heard[0].v.freq === 330 && heard[0].v.amp === 0.5 && heard[0].time === 2 && heard[0].dur === 1, true);
+        eq(heard[1].v.freq === 440 && heard[1].v.amp === 0.25, true);
+        delete t.playEvent;
+        t._oscReceive(TidalJS.oscMessage('/hit', [0, 220, 0.4])); // really plays
+        eq(nodes.some((n) => n.kind === 'osc' && Math.abs(n.frequency.value - 220) < 0.1), true); // superpiano stretches its partials a little
+        t.eval('sound("saw").lpf(slider("x", 1)).fast("xyz")'); // fails: oscplay stays
+        eq(t._oscPlays.length, 1);
+        t.eval('sound("bd")');
+        eq(t._oscPlays.length, 0);
+        let threw = false;
+        try { oscplay('/x'); } catch (e) { threw = e instanceof TypeError; }
+        eq(threw, true);
+        globalThis.WebSocket = savedWs;
+        t._socket = null;
+        t.stopAll();
+    }
+
+    // envelope(levels, times, curves): SuperCollider's Env, times in seconds
+    t.cps = 1;
+    const env = envelope([0, 1, 0], [1, 1]);
+    eq(env._signal(-1), 0);
+    eq(env._signal(0), 0);
+    eq(env._signal(0.5), 0.5);
+    eq(env._signal(1), 1);
+    eq(env._signal(1.5), 0.5);
+    eq(env._signal(5), 0);
+    t.cps = 0.5;
+    eq(env._signal(0.25), 0.5); // cycle 0.25 is half a second at 0.5 cps
+    t.cps = 1;
+    near(envelope([1, 100], [1], 'exp')._signal(0.5), 10, 1e-9, 'exponential');
+    near(envelope([0, 100], [1], 'exp')._signal(0.5), 50, 1e-9, 'exponential from 0 is straight');
+    eq(envelope([1, 100], [1], 'step')._signal(0.5), 100);
+    eq(envelope([1, 100], [1], 'hold')._signal(0.5), 1);
+    near(envelope([0, 1], [1], 'sin')._signal(0.25), 0.5 - 0.5 * Math.cos(Math.PI / 4), 1e-9, 'sine');
+    near(envelope([0, 1], [1], 'welch')._signal(0.5), Math.sin(Math.PI / 4), 1e-9, 'welch up');
+    near(envelope([1, 0], [1], 'wel')._signal(0.5), Math.sin(Math.PI / 4), 1e-9, 'welch down (SuperCollider: y2 - (y2 - y1) * sin(pi/2 * (1 - x)))');
+    near(envelope([0, 4], [1], 'sqr')._signal(0.5), 1, 1e-9, 'squared');
+    near(envelope([0, 8], [1], 'cubed')._signal(0.5), 1, 1e-9, 'cubed');
+    near(envelope([0, 1], [1], -4)._signal(0.5), (1 - Math.exp(-2)) / (1 - Math.exp(-4)), 1e-9, 'curve -4');
+    near(envelope([0, 1, 0], [1, 1], ['lin', 'step'])._signal(1.5), 0, 1e-9, 'one curve per segment');
+    near(envelope([0, 1, 0, 1], [1], 'lin')._signal(2.5), 0.5, 1e-9, 'times are cycled');
+    eq(envelope([0.3], [])._signal(9), 0.3);
+    for (const bad of [() => envelope('x', [1]), () => envelope([0, 1], [-1]), () => envelope([0, 1], []), () => envelope([0, 1], [1], 'zig'), () => envelope([0, 'a'], [1])]) {
+        let threw = false;
+        try { bad(); } catch (e) { threw = e instanceof TypeError; }
+        eq(threw, true);
+    }
+    // with followNote: restarts at each note; with follow and late: absolute time
+    useAudio();
+    t.playEvent(sound('saw').legato(1).followNote('lpf', envelope([200, 4200], [1])).query(0, 1)[0].value, 0.25, 1);
+    let envFilt = nodes.find((n) => n.kind === 'filter' && n.type === 'lowpass');
+    eq(envFilt.frequency.events[0][1], 200);
+    near(valueAt(envFilt.frequency, 0.75), 2200, 40, 'followNote reads the envelope from the onset');
+    eq(sound('saw').follow('pan', envelope([-1, 1], [8]).late(2)).query(6, 7)[0].value.pan, 0);
+
+    // rhythm(durations): one step after another from cycle 0, never looping
+    const steps = note('c4 e4 g4').slow(3).s('superpiano').rhythm(0.25);
+    eq(steps.query(0, 1).map((e2) => `${e2.value.note}@${e2.begin}-${e2.end}`).join(' '), '60@0-0.25 64@0.25-0.5 67@0.5-0.75 60@0.75-1');
+    eq(steps.query(0.3, 0.6).map((e2) => e2.value.note).join(), '67'); // onsets in the span
+    const randomSteps = note('c4 e4 g4').slow(3).s('superpiano').rhythm(choose([0.25, 0.5]));
+    const pick = choose([0.25, 0.5])._signal;
+    let at = 0;
+    const firstSteps = randomSteps.query(0, 20);
+    for (let k = 0; k < firstSteps.length; k++) {
+        const e2 = firstSteps[k];
+        assert(Math.abs(e2.begin - at) < 1e-9 && Math.abs(e2.end - e2.begin - pick(k)) < 1e-9, `step ${k}`);
+        assert.strictEqual(e2.value.note, [60, 64, 67][k % 3]);
+        at = e2.end;
+    }
+    passed++;
+    // far into the future: fast, and the same as summing from the start
+    const started = Date.now();
+    const far = randomSteps.query(20000, 20002);
+    eq(Date.now() - started < 3000, true);
+    const fresh = note('c4 e4 g4').slow(3).s('superpiano').rhythm(choose([0.25, 0.5]));
+    let sum = 0;
+    let k0 = 0;
+    while (sum < 20000) sum += pick(k0++);
+    eq(Math.abs(far[0].begin - sum) < 1e-6 && far[0].value.note === [60, 64, 67][k0 % 3], true);
+    eq(JSON.stringify(fresh.query(20000, 20002)), JSON.stringify(far));
+    for (let i = 1; i < far.length; i++) assert(Math.abs(far[i].begin - far[i - 1].end) < 1e-9);
+    passed++;
+    // chords, rests, a pattern of lengths, the shortest step, other lengths
+    eq(note('[c4,e4] g4').slow(2).rhythm(0.5).query(0, 1).map((e2) => `${e2.value.note}@${e2.begin}`).join(' '), '60@0 64@0 67@0.5');
+    eq(note('c4 ~').slow(2).rhythm(0.5).query(0, 1.5).map((e2) => `${e2.value.note}@${e2.begin}`).join(' '), '60@0 60@1');
+    eq(note('c d e f').rhythm('1 0.5').query(0, 3).map((e2) => `${e2.begin}-${e2.end}`).join(' '), '0-1 1-2 2-3');
+    eq(note('c').rhythm('<1 0.5>').query(0, 3).map((e2) => e2.begin).join(), '0,1,1.5,2.5');
+    eq(note('c').rhythm(0).query(0, 1).length, 256);
+    eq(note('c').rhythm(rand.range(0.1, 0.3)).query(0, 4).every((e2) => e2.end - e2.begin >= 0.1 - 1e-9 && e2.end - e2.begin <= 0.3 + 1e-9), true);
+    t._warnings = new Set();
+    eq(note('c').rhythm('a').query(0, 1).map((e2) => e2.end - e2.begin).join(), '0.25,0.25,0.25,0.25');
+    eq([...t._warnings].some((w) => /step length is not a number/.test(w)), true);
+    t._warnings = null;
+    eq(note('c').rhythm(1 / 256).query(8000, 8001).length, 0); // past the cap: silent, with a warning
+    eq([...t._warned].some((w) => /first 2000000 steps/.test(w)), true);
+    // legato, the views and export work as with any pattern
+    const legato = sound('saw').note('c3 e3').rhythm(0.75).legato(0.5);
+    eq(legato.query(0, 2).map((e2) => `${e2.begin}-${e2.end}:${e2.value.legato}`).join(' '), '0-0.75:0.5 0.75-1.5:0.5 1.5-2.25:0.5');
+    const exported = t.exportPattern(note('c4 e4').rhythm(0.75), 2);
+    eq(exported.events.map((e2) => `${e2.begin}-${e2.end}`).join(' '), '0-0.75 0.75-1.5 1.5-2.25');
+    r = t.eval('d1(note("c4 e4 g4").slow(3).s("superpiano").rhythm(choose([0.25, 0.5])))');
+    eq(r.success && t.queryActive(10, 12).length > 0, true);
+    t.stopAll();
+    let threwRhythm = false;
+    try { note('c').rhythm(); } catch (e) { threwRhythm = e instanceof TypeError; }
+    eq(threwRhythm, true);
+
+    // controlLayout(title, rows): groups of the Controls panel, replaced like the controls
+    const layoutsSeen = [];
+    const stopLayouts = t.onControls((list, layouts) => layoutsSeen.push(layouts));
+    r = t.eval('d1(sound("saw").lpf(slider("cut", 800, 200, 4000)).resonance(slider("res", 0.2)).gain(toggle("on", true)))\ncontrolLayout("Synth", [["cut", "res"], ["on", "ghost"]])\ncontrolLayout("More", ["amp"])');
+    eq(r.success && r.activePatterns === 1, true);
+    eq(JSON.stringify(t.controlLayouts()), JSON.stringify([{ title: 'Synth', rows: [['cut', 'res'], ['on', 'ghost']] }, { title: 'More', rows: [['amp']] }]));
+    eq(JSON.stringify(layoutsSeen[layoutsSeen.length - 1]), JSON.stringify(t.controlLayouts()));
+    r = t.eval('controlLayout("Synth", [["cut"]])\nsound("saw").lpf(slider("cut", 800, 200, 4000))'); // before the pattern: it still plays
+    eq(r.success && r.activePatterns === 1 && t.controlLayouts().length === 1, true);
+    t.eval('controlLayout("X", [["cut"]])\nsound("saw").fast("xyz")'); // fails: the layouts stay
+    eq(t.controlLayouts()[0].title, 'Synth');
+    r = t.eval('controlLayout("X", "cut")');
+    eq(r.success, false);
+    t.eval('sound("saw").lpf(slider("cut", 800, 200, 4000))');
+    eq(t.controlLayouts().length, 0);
+    stopLayouts();
+    t.stopAll();
+
+    // tie: a tied event changes effects, the synth's parameters and the orbit's effects
+    useAudio();
+    ctx.currentTime = 0.5; // curve changes are due now
+    const tie1 = t.playEvent({ s: 'saw', note: 48, legato: 1, tie: 't' }, 0, 0.5);
+    const shapers = nodes.filter((n) => n.kind === 'shaper');
+    eq(shapers.length >= 5 && shapers.every((n) => n.curve === null), true); // built, passing the sound as it is
+    const vowelWet = tie1.params.vowel.wet;
+    eq(vowelWet.value, 0);
+    const tie2 = t.playEvent({
+        s: 'saw', note: 52, legato: 1, tie: 't', shape: 0.5, crush: 4, distort: 0.5, vowel: 'o', tremolorate: 4, tremolodepth: 0.6,
+        ring: 0.5, ringf: 200, phaserrate: 2, phaserdepth: 0.4, leslie: 0.5, lrate: 2, peak: 800, peakgain: 10, djf: 0.2,
+        hpf: 300, bpf: 1000, lpf: 2000, vib: 5, vibmod: 1, delay: 0.5, delaytime: 0.25, delayfeedback: 0.4, reverb: 0.3, size: 0.8, dry: 0.2,
+    }, 0.5, 0.5);
+    eq(tie2 === tie1, true);
+    const p1 = tie1.params;
+    eq(shapers.some((n) => n.curve === t._curve('shape', 50)), true);
+    eq(shapers.some((n) => n.curve === t._curve('crush', 400)), true);
+    eq(shapers.some((n) => n.curve === t._curve('distortion', Math.round(1 + 0.5 * 99))), true);
+    eq(lastSet(vowelWet).join(), 'set,2,0.5');
+    eq(lastSet(p1.vowel.dry).join(), 'set,0,0.5');
+    eq(lastSet(p1.tremolo.rate).join(), 'set,4,0.5');
+    eq(lastSet(p1.tremolo.amount)[1], 0.3);
+    eq(lastSet(p1.ring.gain)[1], 0.5);
+    eq(lastSet(p1.ring.freq)[1], 200);
+    eq(p1.phaser.sweeps.every((s2) => lastSet(s2.freq)[1] === 2 && Math.abs(lastSet(s2.amount)[1] - 360) < 1e-9), true);
+    eq(lastSet(p1.leslie.wet)[1], 0.5);
+    eq(p1.leslie.rates.every((x) => lastSet(x)[1] === 2), true);
+    eq(lastSet(p1.peak.freq)[1] === 800 && lastSet(p1.peak.gain)[1] === 10, true);
+    near(lastSet(p1.djf.low)[1], 20 * Math.pow(500, 0.4), 1e-6, 'djf');
+    eq(lastSet(p1.hpf.freq)[1] === 300 && lastSet(p1.bpf.freq)[1] === 1000 && lastSet(p1.lpf.freq)[1] === 2000, true);
+    const vibOsc = nodes.find((n) => n.kind === 'osc' && n.frequency.events.some((x) => x[0] === 'set' && x[1] === 5));
+    eq(!!vibOsc, true);
+    const fx = t._orbitEffects(0);
+    eq(!!fx.delay && fx.delay.amp.gain.events.some((x) => x[0] === 'set' && x[1] === 0.5 && x[2] === 0.5), true);
+    eq(p1.output.connections.includes(fx.delay.input), true);
+    eq(!!fx.reverb && fx.reverb.input.gain.events.some((x) => x[1] === 0.3 && x[2] === 0.5), true);
+    eq(p1.output.connections.filter((c) => c === fx.reverb.input).length, 1);
+    t.playEvent({ s: 'saw', note: 52, legato: 1, tie: 't', reverb: 0.1 }, 0.9, 0.5);
+    eq(p1.output.connections.filter((c) => c === fx.reverb.input).length, 1); // connected once
+    eq(lastSet(p1.tremolo.rate)[1], 4); // left out: kept
+    // the synth's own parameters
+    useAudio();
+    const saw7 = t.playEvent({ s: 'supersaw', note: 48, legato: 1, tie: 's' }, 0, 0.5);
+    t.playEvent({ s: 'supersaw', note: 48, legato: 1, tie: 's', detune: 1, voice: 0.9 }, 0.5, 0.5);
+    eq(!!saw7.tune && nodes.filter((n) => n.kind === 'osc' && n.detune.events.some((x) => x[0] === 'set' && Math.abs(Math.abs(x[1]) - 100) < 1e-9)).length, 2);
+    eq(nodes.filter((n) => n.kind === 'gain' && n.gain.events.some((x) => x[0] === 'set' && Math.abs(x[1] - 0.9 / 2.2) < 1e-9)).length, 6);
+    useAudio();
+    t.playEvent({ s: 'superfm', note: 48, legato: 1, tie: 'f' }, 0, 0.5);
+    t.playEvent({ s: 'superfm', note: 48, legato: 1, tie: 'f', semitone: 7 }, 0.5, 0.5);
+    eq(nodes.some((n) => n.kind === 'osc' && n.frequency.events.some((x) => x[0] === 'set' && Math.abs(x[1] - (440 * Math.pow(2, (48 - 69) / 12)) * Math.pow(2, 7 / 12)) < 1e-6)), true);
+    // follow() on a tied event, and on a newly followable control
+    useAudio();
+    const tiedFollow = sound('saw').note('c3 e3').legato(1).tie(1).follow('tremolorate', saw.range(1, 9)).query(0, 1).map((e2) => e2.value);
+    const tf = t.playEvent(tiedFollow[0], 0, 0.5);
+    t.playEvent(tiedFollow[1], 0.5, 0.5);
+    near(valueAt(tf.params.tremolo.rate, 0.75), 7, 0.3, 'a tied event follows tremolorate');
+    useAudio();
+    r = t.eval('sound("saw").legato(1).follow("tremolodepth", saw).follow("ringf", saw.range(100, 200))');
+    eq(r.success && !r.warnings.some((w) => /cannot change/.test(w)), true);
+    t.stopAll();
+    // AudioWorklet effects take a tied event's settings (a message at its time)
+    {
+        const posted = [];
+        globalThis.AudioWorkletNode = class {
+            constructor() { this.parameters = new Map(); this.port = { postMessage: (m) => posted.push(m) }; }
+            connect() {}
+            disconnect() {}
+        };
+        t._fxState = 'ready';
+        useAudio();
+        t.playEvent({ s: 'saw', note: 48, legato: 1, tie: 'w', coarse: 4 }, 0, 0.5);
+        t.playEvent({ s: 'saw', note: 48, legato: 1, tie: 'w', coarse: 8 }, 0.5, 0.5);
+        eq(JSON.stringify(posted), JSON.stringify([{ at: 0.5, options: { coarse: 8 } }]));
+        delete globalThis.AudioWorkletNode;
+        t._fxState = 'none';
+        const procs = {};
+        new Function('sampleRate', 'registerProcessor', 'AudioWorkletProcessor', '(' + TidalJS.workletModule.toString() + ')();')(
+            48000, (name, cls) => { procs[name] = cls; }, class {});
+        const coarse = new procs['tidal-fx']({ processorOptions: { kind: 'coarse', coarse: 4 } });
+        const input = Float32Array.from({ length: 8 }, (_, i) => i + 1);
+        const out = new Float32Array(8);
+        coarse.process([[input]], [[out]]);
+        eq(Array.from(out).join(), '1,1,1,1,5,5,5,5');
+        coarse.pending.push({ at: 0, options: { coarse: 1 } });
+        coarse.process([[input]], [[out]]);
+        eq(Array.from(out).join(), '1,2,3,4,5,6,7,8');
+    }
+
+    // follow() of a live input: moving it changes the sounding notes from now
+    /** The value laid out at a time since the last re-layout (the fake keeps cancelled events). */
+    const liveAt = (p, at) => valueAt({ events: p.events.slice(Math.max(0, p.events.map((x) => x[0]).lastIndexOf('hold'))) }, at);
+    useAudio();
+    t._liveVoices.clear();
+    t.eval('d1(sound("saw").legato(1).follow("lpf", slider("cut", 500, 100, 5000)))');
+    t.playEvent(t.channels.get('d1').query(0, 1)[0].value, 0, 4);
+    eq(t._liveVoices.size, 1);
+    let liveFilt = nodes.find((n) => n.kind === 'filter' && n.type === 'lowpass');
+    eq(liveFilt.frequency.events[0][1], 500);
+    ctx.currentTime = 1;
+    t._liveFlushedAt = -Infinity;
+    t.setControl('cut', 2000);
+    eq(liveFilt.frequency.events.some((x) => x[0] === 'hold' && x[1] === 1), true);
+    near(liveAt(liveFilt.frequency, 2), 2000, 1e-6, 'the slider moves the sounding note');
+    t.setControl('cut', 3000); // too soon: waits for the next re-layout
+    eq(!!t._liveTimer, true);
+    clearTimeout(t._liveTimer);
+    t._liveTimer = null;
+    t._relayLive();
+    near(liveAt(liveFilt.frequency, 2), 3000, 1e-6, 'then follows');
+    ctx.currentTime = 10;
+    t._relayLive();
+    eq(t._liveVoices.size, 0); // the finished voice is dropped
+    t.stopAll();
+    // a voice whose signal reads no live input is not remembered
+    useAudio();
+    t.playEvent(sound('saw').legato(1).follow('lpf', sine.range(200, 400)).query(0, 1)[0].value, 0, 1);
+    eq(t._liveVoices.size, 0);
+    // MIDI knobs, buses and OSC; a pitch with no note or freq of its own but follow()'s
+    useAudio();
+    ctx.currentTime = 0;
+    t._midiIn([0xb0, 7, 0]);
+    t.playEvent(sound('saw').legato(1).follow('pan', midicc(7).range(-1, 1)).follow('gain', bus('g', 1)).query(0, 1)[0].value, 0, 4);
+    const livePan = nodes.find((n) => n.kind === 'panner').pan;
+    eq(livePan.events[0][1], -1);
+    ctx.currentTime = 1;
+    t._liveFlushedAt = -Infinity;
+    t._midiIn([0xb0, 7, 127]);
+    near(liveAt(livePan, 2), 1, 1e-6, 'a MIDI knob moves the pan');
+    t._liveFlushedAt = -Infinity;
+    setBus('g', 0.5);
+    const liveLevel = nodes.find((n) => n.kind === 'gain' && n.gain.events.some((x) => x[0] === 'hold'));
+    near(liveAt(liveLevel.gain, 2), Math.pow(0.5, 4), 1e-6, 'setBus moves the gain');
+    {
+        const savedWs = globalThis.WebSocket;
+        globalThis.WebSocket = class { constructor() { this.readyState = 0; } send() {} close() {} };
+        t._socket = null;
+        useAudio();
+        ctx.currentTime = 0;
+        t.playEvent(sound('saw').legato(1).follow('freq', oscIn('/pitch', 1)).query(0, 1)[0].value, 0, 4);
+        const pitchSrc = nodes.find((n) => n.kind === 'constant' && n.connections.some((c) => c.label === 'detune'));
+        eq(!!pitchSrc, true); // built at 20 Hz (the 0 oscIn gives before a message), following from there
+        ctx.currentTime = 1;
+        t._liveFlushedAt = -Infinity;
+        t._oscReceive(TidalJS.oscMessage('/pitch', [0, 440]));
+        near(liveAt(pitchSrc.offset, 2), 1200 * Math.log2(440 / 20), 1e-6, 'an OSC fader moves the pitch');
+        globalThis.WebSocket = savedWs;
+        t._socket = null;
+    }
+    useAudio();
+    t.playEvent(sound('saw').legato(1).follow('note', '~ c5').query(0, 1)[0].value, 0, 1);
+    const sawRef = 69 + 12 * Math.log2(t.samples.get('saw').freq / 440);
+    const notePitch = nodes.find((n) => n.kind === 'constant' && n.connections.some((c) => c.label === 'detune'));
+    near(liveAt(notePitch.offset, 0.75), 100 * (72 - sawRef), 1e-6, 'a note that follow() gives only later');
+    // tied voices and held MIDI keys follow live inputs too
+    useAudio();
+    ctx.currentTime = 0;
+    t._midiIn([0xb0, 1, 0]);
+    const liveTie = sound('saw').note('c3 e3').legato(1).tie(9).follow('lpf', midicc(1).range(200, 2000)).query(0, 1).map((e2) => e2.value);
+    const lt = t.playEvent(liveTie[0], 0, 0.5);
+    t.playEvent(liveTie[1], 0.5, 0.5);
+    eq(t._liveVoices.get(lt.params).handle === lt, true);
+    ctx.currentTime = 0.75;
+    t._liveFlushedAt = -Infinity;
+    t._midiIn([0xb0, 1, 127]);
+    near(liveAt(lt.params.lpf.freq, 1), 2000, 1e-6, 'a tied voice follows the knob');
+    useAudio();
+    ctx.currentTime = 0;
+    t._midiIn([0xb0, 1, 0]);
+    t.eval('midikeys(sound("saw").follow("lpf", midicc(1).range(200, 2000)))');
+    t._midiIn([0x90, 64, 100]);
+    const key = t._midiHeld.get('0:64')[0];
+    eq(t._liveVoices.get(key.params).handle === key, true);
+    ctx.currentTime = 2;
+    t._liveFlushedAt = -Infinity;
+    t._midiIn([0xb0, 1, 127]);
+    near(liveAt(key.params.lpf.freq, 3), 2000, 1e-6, 'a held key follows the knob');
+    t._midiIn([0x80, 64, 0]);
+    eq(key.timing.stopAt < 3, true);
+    t.eval('sound("bd")');
+    t.stopAll();
+    t._liveVoices.clear();
+
+    t._session = null;
+    t.audioContext = savedCtx;
+}
+
 console.log(`all ${passed} checks passed`);

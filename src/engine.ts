@@ -40,6 +40,23 @@ export interface StreamInfo {
   audible: boolean;
 }
 
+/** A live control from slider() or toggle() in the code that plays. */
+export interface LiveControl {
+  name: string;
+  kind: "slider" | "toggle";
+  value: number;
+  min: number;
+  max: number;
+  /** 0 allows any value. */
+  step: number;
+}
+
+/** A group of the Controls panel from controlLayout(title, rows): rows of control names. */
+export interface ControlLayout {
+  title: string;
+  rows: string[][];
+}
+
 export interface Tidal {
   cps: number;
   readonly isPlaying: boolean;
@@ -68,6 +85,16 @@ export interface Tidal {
   loadSamples(source: string | Record<string, unknown>, base?: string): Promise<number>;
   isLoadingSamples(): boolean;
   whenSamplesLoaded(): Promise<void>;
+  /** The sliders and toggles of the code that plays. */
+  controls(): LiveControl[];
+  /** Sets a control's value (kept within its range and step). */
+  setControl(name: string, value: number | boolean): number | undefined;
+  /** The controlLayout() groups of the code that plays, in call order. */
+  controlLayouts(): ControlLayout[];
+  /** Calls fn whenever the controls, their values or the layouts change; returns a function that stops it. */
+  onControls(fn: (controls: LiveControl[], layouts: ControlLayout[]) => void): () => void;
+  /** Values to give controls by name, e.g. saved in this browser. */
+  restoreControls(values: Record<string, number>): void;
 }
 
 interface TidalStatic {

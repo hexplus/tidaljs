@@ -68,7 +68,7 @@ interface Position {
 }
 
 /** Extended help: what it does, an example, a tip and related names. */
-function DocView(doc: Doc, cls: string): HTMLElement {
+export function DocView(doc: Doc, cls: string): HTMLElement {
   return div({ class: "doc " + cls }, [
     div("doc-about", [doc.about]),
     doc.example ? pre({ class: "doc-example" }, [code(doc.example)]) : "",
