@@ -2,3 +2,4 @@ node_modules/
 dist/
 *.log
 null/
+AGENTS.md
