@@ -287,6 +287,17 @@ export class RoutineV {
   }
 }
 
+/**
+ * What a pattern's .play gives (an EventStreamPlayer): one playback of it, with its own start and stops
+ * (`playback`: its index in the interpreter's playbacks).
+ */
+export class PlayerV {
+  playback: number;
+  constructor(playback: number) {
+    this.playback = playback;
+  }
+}
+
 /** A Synth started from code: Synth(\name, [\freq, 440]). */
 export class SynthV {
   name: string;
@@ -371,7 +382,7 @@ export class RandToken {
 export type Value =
   | number | string | boolean | null
   | Sym | Value[] | SCFunc | SCEvent | SCClass | RestV | ClockV | ScaleV | Opaque | Assoc
-  | GNode | EnvSpec | SynthDefV | RoutineV | SynthV | RandToken
+  | GNode | EnvSpec | SynthDefV | RoutineV | PlayerV | SynthV | RandToken
   | BusV | BufferV | ProxyV | MidiOutV | NetAddrV | WidgetV | WindowV | LayoutV | TextV
   | PatternLike;
 

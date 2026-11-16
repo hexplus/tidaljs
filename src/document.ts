@@ -1,9 +1,10 @@
 /**
  * The editor's document as kept in this browser between visits: its code,
- * where it came from (see provenance.ts), an identity, and the tempo an
- * external song brought, waiting for its first run. All of it is written
- * together, as one record, so a reload can never pair code with another
- * document's provenance (external code restored as local). No DOM here.
+ * where it came from (see provenance.ts), an identity, and its tempo (the
+ * draft tempo, which playback takes only when the code runs successfully).
+ * All of it is written together, as one record, so a reload can never pair
+ * code with another document's provenance (external code restored as
+ * local). No DOM here.
  */
 import { DEFAULT_CODE } from "./data/examples.ts";
 import { LOCAL, isExternal, readProvenance, type Provenance } from "./provenance.ts";
@@ -17,8 +18,8 @@ export interface StoredDocument {
   provenance: Provenance;
   /** Changes whenever another document is put in the editor; typing keeps it. */
   id: string;
-  /** The tempo an external song or sketch brought, applied when it first runs; null when none. */
-  pendingCps: number | null;
+  /** The document's tempo in cycles per second, or null when none was stored. */
+  cps: number | null;
 }
 
 export function newDocumentId(): string {
@@ -26,8 +27,40 @@ export function newDocumentId(): string {
 }
 
 export function serializeDocument(doc: StoredDocument): string {
-  return JSON.stringify({ v: 1, code: doc.code, provenance: doc.provenance, id: doc.id, pendingCps: doc.pendingCps });
+  return JSON.stringify({ v: 2, code: doc.code, provenance: doc.provenance, id: doc.id, cps: doc.cps });
 }
+
+/** What writeDocument needs of a Storage. */
+export interface DocumentStorage {
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/**
+ * Writes the document. The older records are removed only after the new one
+ * is written: if writing fails (the storage is full or refused), they stay,
+ * and a reload reads them as before (conservatively, see readDocument).
+ * Returns whether the document was written.
+ */
+export function writeDocument(storage: DocumentStorage | null, doc: StoredDocument): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(DOCUMENT_KEY, serializeDocument(doc));
+  } catch {
+    return false;
+  }
+  for (const key of Object.values(LEGACY_KEYS)) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      /* removing is best effort: a snapshot, once written, is what is read */
+    }
+  }
+  return true;
+}
+
+const tempoOf = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 
 /**
  * The document to restore. A snapshot is used as it is (an empty draft stays
@@ -47,7 +80,8 @@ export function readDocument(get: (key: string) => string | null): StoredDocumen
           code: v.code,
           provenance: v.provenance === undefined ? readProvenance(null) : readProvenance(v.provenance),
           id: typeof v.id === "string" && v.id ? v.id : newDocumentId(),
-          pendingCps: typeof v.pendingCps === "number" && Number.isFinite(v.pendingCps) && v.pendingCps > 0 ? v.pendingCps : null,
+          // Version 1 kept only the tempo an external song brought (pendingCps).
+          cps: tempoOf(v.cps) ?? tempoOf(v.pendingCps),
         };
       }
     } catch {
@@ -55,7 +89,7 @@ export function readDocument(get: (key: string) => string | null): StoredDocumen
     }
   }
   const code = get(LEGACY_KEYS.code);
-  if (code === null) return { code: DEFAULT_CODE, provenance: LOCAL, id: newDocumentId(), pendingCps: null };
+  if (code === null) return { code: DEFAULT_CODE, provenance: LOCAL, id: newDocumentId(), cps: null };
   let provenance: Provenance = LOCAL;
   const legacy = get(LEGACY_KEYS.provenance);
   if (legacy !== null) {
@@ -69,5 +103,5 @@ export function readDocument(get: (key: string) => string | null): StoredDocumen
   } else if (get(LEGACY_KEYS.shared) === "1") {
     provenance = { origin: "shared", label: "" };
   }
-  return { code, provenance, id: newDocumentId(), pendingCps: null };
+  return { code, provenance, id: newDocumentId(), cps: null };
 }

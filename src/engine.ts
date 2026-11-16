@@ -67,7 +67,8 @@ export interface Tidal {
   /** True while a first(), once() or asap() still sounds. */
   readonly playingOneShots: boolean;
   init(): Promise<boolean>;
-  eval(code: string, options?: { keepOnWarnings?: boolean; keepUnchanged?: boolean }): EvalResult;
+  /** cps: the tempo the document brings, applied only if the code commits (a setCPS() in it wins). */
+  eval(code: string, options?: { keepOnWarnings?: boolean; keepUnchanged?: boolean; cps?: number }): EvalResult;
   streamInfo(): StreamInfo[];
   mute(name: string, on?: boolean): void;
   solo(name: string, on?: boolean): void;

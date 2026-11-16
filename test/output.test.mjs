@@ -602,5 +602,59 @@ const released = (dest, output) => !output.connections.has(dest) && dest.stream.
     ok(!heard.some(([type, key]) => type === 0x90 && key === 0), 'the loop note is cancelled');
 }
 
+// =====================================================================
+// Review round 3: a note restarted right after Stop is not cut by the old note-off; OSC ownership.
+// =====================================================================
+for (const Port of [FakeOutput, OutputWithoutClear]) {
+    setTime(500);
+    const t = makeEngine();
+    const port = new Port('Keys');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 60, sustain: 1 }, 500, 1); // sounds from 500 to 501
+    setTime(500.2);
+    t.stopAll();                                                     // Stop while it sounds
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 60, sustain: 1 }, 500.25, 1); // restarted at once, same key, until 501.25
+    // At every moment between the restart and its own end, the key must be sounding.
+    const soundingAt = (seconds) => {
+        let on = false;
+        for (const m of port.heard()) {
+            if (m.at > seconds * 1000) break;
+            const type = m.data[0] & 0xf0;
+            if (m.data[1] !== 60) continue;
+            if (type === 0x90 && m.data[2] > 0) on = true;
+            else if (type === 0x80 || type === 0x90 || (type === 0xb0 && m.data[1] === 123)) on = false;
+        }
+        return on;
+    };
+    // With clear() the old note-off is cancelled. Without it, it still arrives at 501: the note is struck
+    // again 1 ms later (a blip, but the note goes on).
+    const checks = Port === FakeOutput ? [500.3, 500.9, 501.0005, 501.01, 501.2] : [500.3, 500.9, 501.002, 501.01, 501.2];
+    for (const s of checks) eq(soundingAt(s), true, `${Port.name}: the restarted note sounds at ${s}`);
+    eq(soundingAt(501.3), false, `${Port.name}: and ends at its own end`);
+    setTime(510);
+    eq(port.hanging(), [], `${Port.name}: nothing hangs`);
+}
+{
+    // A one-shot's OSC waiting for the socket survives the loops stopping; Stop drops both.
+    setTime(600);
+    const t = makeEngine();
+    t._sendOsc({ s: 'loop', n: 1, osc: '/dirt/play' }, 600.05, 0.25);
+    t._midiOwner = { session: null, timer: null };
+    const shot = t._midiOwner;
+    t._sendOsc({ s: 'shot', n: 2, osc: '/dirt/play' }, 600.06, 0.25);
+    t._midiOwner = null;
+    t._oneShots.add(shot);
+    t._cancelExternalOutput(); // the loops stop (what _halt does)
+    eq(t._socketQueue.map((p) => p.owner === shot), [true], 'only the one-shot packet waits');
+    t._sendOsc({ s: 'loop', n: 3, osc: '/dirt/play' }, 600.07, 0.25);
+    t.stopAll();
+    eq(t._socketQueue.length, 0, 'Stop drops them all');
+    const ws = FakeSocket.all.at(-1);
+    ws.open();
+    eq(ws.sent.length, 0);
+}
+
 Date.now = realDateNow;
 console.log(`output tests: ${passed} passed`);

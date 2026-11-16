@@ -8,7 +8,7 @@ import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
 import { TidalJS, type ControlLayout, type LiveControl, type StreamInfo, type Tidal } from "./engine.ts";
-import { DOCUMENT_KEY, LEGACY_KEYS, newDocumentId, readDocument, serializeDocument } from "./document.ts";
+import { newDocumentId, readDocument, writeDocument } from "./document.ts";
 import { LOCAL, approve, describeOrigin, holds, isExternal, type Approval, type Provenance } from "./provenance.ts";
 import { Tickets, singleFlight } from "./runs.ts";
 import { scanCode, type CodeScan } from "./share.ts";
@@ -95,7 +95,12 @@ function exampleFor(text: string, current: Example | null): Example | null {
 
 export function createSession() {
   const [status, setStatus] = signal<Status>({ kind: "", text: "Ready. Press Play or Ctrl+Enter to start.", warnings: [] });
-  const [tempo, setTempo] = signal(0.8); // cycles per second
+  /**
+   * The document's tempo in cycles per second (the draft tempo): what the tempo field shows and what
+   * saving, exporting and sharing use. Playback takes it only within a successful evaluation (see
+   * runCode); the tempo field changes both at once.
+   */
+  const [tempo, setTempo] = signal(0.8);
   const [recording, setRecording] = signal(false);
   const [liveEnabled, setLiveEnabled] = signal(storage.get(KEYS.live) !== "off");
   const savedCategory = storage.get(KEYS.category);
@@ -113,13 +118,17 @@ export function createSession() {
   const [provenance, setProvenanceSignal] = signal<Provenance>(restored.provenance);
   /** Identifies the document in the editor (a new one for each sketch, example, import or link; typing keeps it). */
   const [documentId, setDocumentId] = signal(restored.id);
-  /** The tempo an external song brought: applied when it first runs, never before (see play). */
-  let pendingCps: number | null = restored.pendingCps;
-  /** Writes the code, provenance, identity and pending tempo together (see document.ts). */
+  if (restored.cps !== null) setTempo(restored.cps);
+  /** Writes the code, provenance, identity and tempo together; older records go only once it is written (see document.ts). */
   const persistDocument = () => {
     clearTimeout(saveTimer);
-    storage.set(DOCUMENT_KEY, serializeDocument({ code: editor.getValue(), provenance: provenance(), id: documentId(), pendingCps }));
-    for (const key of Object.values(LEGACY_KEYS)) storage.remove(key);
+    let store: Storage | null = null;
+    try {
+      store = localStorage;
+    } catch {
+      store = null;
+    }
+    writeDocument(store, { code: editor.getValue(), provenance: provenance(), id: documentId(), cps: tempo() });
   };
   const setProvenance = (p: Provenance) => {
     setProvenanceSignal(p);
@@ -315,11 +324,13 @@ export function createSession() {
   /** Evaluates the code and reports the result. Live updates keep the old music on warnings. */
   function evaluate(engine: Tidal, live: boolean, text: string) {
     // Live updates keep streams whose code has not changed (and their transitions) as they are.
-    const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live });
+    // The document's tempo goes in with the code: it applies only if the evaluation commits.
+    const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live, cps: tempo() });
     lastRunCode = text;
     markPatternsChanged();
     syncPlaying();
-    setTempo(+engine.cps.toFixed(3));
+    // After a commit the document's tempo is what plays (the code may set its own); otherwise it is kept.
+    if (result.success) setTempo(+engine.cps.toFixed(3));
     if (editor.getValue() === text) editor.showProblems(result, text);
     const where = result.location ? " (line " + result.location.line + ")" : "";
 
@@ -422,10 +433,8 @@ export function createSession() {
     } else {
       text = editor.getValue(); // local code: what is in the editor now
     }
-    // The approved text runs: from now on it is the person's own code, and the tempo it came with applies.
+    // The approved text runs: from now on it is the person's own code (its tempo applies with the run's commit).
     if (isExternal(provenance())) {
-      if (pendingCps !== null) changeTempo(pendingCps);
-      pendingCps = null;
       setProvenance(LOCAL);
       approval = null;
     }
@@ -492,9 +501,12 @@ export function createSession() {
     }
   }
 
+  /** The tempo field: the document's tempo and, at once, what plays. */
   function changeTempo(cps: number) {
     setTempo(cps);
     tidal?.setCPS(cps);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(persistDocument, SAVE_DELAY);
   }
 
   /**
@@ -508,11 +520,9 @@ export function createSession() {
     approval = null;
     plays.cancel();
     editor.setValue(code);
-    // The tempo it came with: at once for local code; for external code only when it first runs, so
-    // opening it never changes the music that plays.
-    const tempoGiven = cps !== undefined && !/setCPS|setcps|setTempo|setbpm/.test(code) ? cps : null;
-    pendingCps = isExternal(from) ? tempoGiven : null;
-    if (!isExternal(from) && tempoGiven !== null) changeTempo(tempoGiven);
+    // The tempo it came with becomes the document's tempo (saved, exported and shared from now on).
+    // Playback takes it only when the code next runs successfully, so opening never changes the music.
+    if (cps !== undefined && !/setCPS|setcps|setTempo|setbpm/.test(code)) setTempo(cps);
     setDocumentId(newDocumentId());
     setProvenance(from); // writes the new document's snapshot at once (code, provenance, identity, tempo)
     setCurrentExample(isExternal(from) ? null : exampleFor(code, null));

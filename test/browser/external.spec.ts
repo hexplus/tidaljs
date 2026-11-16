@@ -90,6 +90,64 @@ test("a shared song's tempo applies only when it runs, and an empty draft surviv
   await expect(page.locator("#codeEditor")).toHaveValue("");
 });
 
+test("an incoming song's tempo is the draft's: exported before its first Play, applied only by a successful run", async ({ page }) => {
+  await page.goto("/");
+  await setCode(page, 'd1(sound("bd*2"))');
+  await playAndWait(page);
+  const cps = () => page.evaluate(() => (window as unknown as { tidal: { cps: number } }).tidal.cps);
+  const before = await cps();
+  const failing = 'd1(sound("hh*4"))\nthrow new Error("broken on purpose")';
+  const hash = await encodeShareHash({ title: "Fast song", code: failing, cps: 1.75 });
+  await page.evaluate((h) => { location.hash = h; }, hash);
+  await page.getByRole("button", { name: "Open in editor" }).click();
+  await page.getByRole("button", { name: "Replace it" }).click();
+  // Exported before it ever played: with its own tempo.
+  await page.click("#tabLibrary");
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export sketch" }).click();
+  const file = await download;
+  const text = await (await import("node:fs/promises")).readFile(await file.path(), "utf8");
+  expect(text).toContain("setCPS(1.75)");
+  expect(await cps()).toBe(before);
+  // Allowed, but it fails: the music keeps its tempo.
+  await page.click("#playBtn");
+  await page.getByRole("button", { name: "Allow and run" }).click();
+  await expect.poll(() => statusText(page)).toContain("broken on purpose");
+  expect(await cps()).toBe(before);
+});
+
+test("when the browser refuses to save the document, the older records stay and a reload still asks", async ({ page }) => {
+  await page.addInitScript(() => {
+    // An older version left code from a link, not played yet.
+    if (!sessionStorage.getItem("seeded")) {
+      sessionStorage.setItem("seeded", "1");
+      localStorage.clear();
+      localStorage.setItem("tidaljs:code", 'window.__ranShared = (window.__ranShared || 0) + 1\nd1(sound("hh*4"))');
+      localStorage.setItem("tidaljs:sharedUnplayed", "1");
+    }
+    // The storage is full: the new document record cannot be written.
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key === "tidaljs:document") throw new DOMException("full", "QuotaExceededError");
+      return setItem.call(this, key, value);
+    };
+  });
+  await page.goto("/");
+  await expect(page.locator("#codeEditor")).toHaveValue(SHARED);
+  // Another document comes and goes; its record cannot be written, so the old ones must not be removed.
+  await page.locator("#exampleList .example").first().click();
+  const discard = page.getByRole("button", { name: "Discard and load" });
+  await discard.click();
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => localStorage.getItem("tidaljs:sharedUnplayed"))).toBe("1");
+  await page.reload();
+  await expect(page.locator("#codeEditor")).toHaveValue(SHARED);
+  await page.click("#playBtn");
+  await expect(page.getByRole("dialog")).toContainText("Run code someone else wrote?");
+  await page.getByRole("button", { name: "Don't run" }).click();
+  expect(await ranShared(page)).toBeUndefined();
+});
+
 test("an approval goes stale when the code changes while the audio starts", async ({ page }) => {
   await holdAudioStart(page);
   await page.goto("/");

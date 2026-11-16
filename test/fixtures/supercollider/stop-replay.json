@@ -1,0 +1,30 @@
+{
+  "about": "Expected events, worked out from SuperCollider's semantics with a small script (sclang was not run). Tempo 1 beat per second; degrees 0, 2, 4 of the major scale are MIDI notes 60, 64, 67; each note lasts dur 0.5 * legato 0.8 = 0.4 beats. The first playback plays event k at beat k / 2 and is stopped at beat 3.75 (x.stop: its last event is the one at 3.5, which still sounds its 0.4 beats). Nothing plays from 3.75 to 6. p.play at beat 6 is a new playback: it starts again from degree 0, event k at beat 6 + k / 2, for ever (at beat 1000, event 1988: degree 4). Windows far past the 512 beats the importer follows check that the gap is not repeated and the second playback does not stop.",
+  "seconds": 1001.5,
+  "windows": [[0, 10], [497, 499], [1000, 1001.5]],
+  "events": [
+    { "time": 0.0, "note": 60, "duration": 0.4 },
+    { "time": 0.5, "note": 64, "duration": 0.4 },
+    { "time": 1.0, "note": 67, "duration": 0.4 },
+    { "time": 1.5, "note": 60, "duration": 0.4 },
+    { "time": 2.0, "note": 64, "duration": 0.4 },
+    { "time": 2.5, "note": 67, "duration": 0.4 },
+    { "time": 3.0, "note": 60, "duration": 0.4 },
+    { "time": 3.5, "note": 64, "duration": 0.4 },
+    { "time": 6.0, "note": 60, "duration": 0.4 },
+    { "time": 6.5, "note": 64, "duration": 0.4 },
+    { "time": 7.0, "note": 67, "duration": 0.4 },
+    { "time": 7.5, "note": 60, "duration": 0.4 },
+    { "time": 8.0, "note": 64, "duration": 0.4 },
+    { "time": 8.5, "note": 67, "duration": 0.4 },
+    { "time": 9.0, "note": 60, "duration": 0.4 },
+    { "time": 9.5, "note": 64, "duration": 0.4 },
+    { "time": 497.0, "note": 64, "duration": 0.4 },
+    { "time": 497.5, "note": 67, "duration": 0.4 },
+    { "time": 498.0, "note": 60, "duration": 0.4 },
+    { "time": 498.5, "note": 64, "duration": 0.4 },
+    { "time": 1000.0, "note": 67, "duration": 0.4 },
+    { "time": 1000.5, "note": 60, "duration": 0.4 },
+    { "time": 1001.0, "note": 64, "duration": 0.4 }
+  ]
+}

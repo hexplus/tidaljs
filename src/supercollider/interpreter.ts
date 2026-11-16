@@ -13,7 +13,7 @@ import {
   Pswitch, Psync, Punop, Pwhite, Stream, mod, type Host,
 } from "./patterns.ts";
 import {
-  Assoc, BufferV, BusV, ClockV, EnvSpec, GNode, MidiOutV, NetAddrV, Opaque, ProxyV, RandToken, RestV, RoutineV, SCClass,
+  Assoc, BufferV, BusV, ClockV, EnvSpec, GNode, MidiOutV, NetAddrV, Opaque, PlayerV, ProxyV, RandToken, RestV, RoutineV, SCClass,
   SCEvent, SCFunc, ScaleV, Scope, Sym, SynthDefV, SynthV, WidgetV, WindowV, LayoutV, TextV, describe, isPattern, seededRandom, type Value,
 } from "./values.ts";
 
@@ -36,8 +36,8 @@ export interface PlayRecord {
   start: number;
   /** A routine that loops forever (it ran until the horizon). */
   endless?: boolean;
-  /** Where a routine stops it (.stop), in beats of its clock. */
-  until?: number;
+  /** A pattern's playback (its index in `playbacks`): where it is stopped. */
+  playback?: number;
   /** midikeys: the MIDI channel its notes come from (null: any). */
   channel?: number | null;
   /** midikeys: how far the pitch-bend wheel bends the held notes, in semitones (0: not at all). */
@@ -47,6 +47,33 @@ export interface PlayRecord {
   clock: ClockV;
   line: number;
   label: string;
+}
+
+/** A moment of the program: beats of a clock (converted to the common timeline with the clock's tempo). */
+export interface Moment {
+  beats: number;
+  clock: ClockV;
+}
+
+/**
+ * One playback of a pattern (each .play, a routine's included): its own start and end. A routine's playback
+ * starts at the routine's time (the event that holds it has `__playback`, its index); a pattern played without
+ * a clock plays on the default clock, as in SuperCollider, wherever it is played from.
+ */
+export interface Playback {
+  pattern: Value;
+  /** The clock it plays on. */
+  clock: ClockV;
+  /** When .play was called (0 at the top of the file). */
+  at: Moment;
+  /** quant: it starts on the next multiple of `quant` beats of its clock, plus `phase` (0: at once). */
+  quant: number;
+  phase: number;
+  /** Where it is stopped (each x.stop, Pdef(\x).stop): it ends at the first of them after its start. */
+  stops: Moment[];
+  /** x.play or x.resume after x.stop: the playback it continues (its stream goes on from where it stopped). */
+  resumes?: number;
+  line: number;
 }
 
 /** A timed event from a routine: Synth(...) or an event's play. */
@@ -234,6 +261,8 @@ export class Interpreter implements Host {
   readonly notes = new Set<string>();
   readonly synthDefs = new Map<string, SynthDefV>();
   readonly played: PlayRecord[] = [];
+  /** Every playback of a pattern, in the order .play was called. */
+  readonly playbacks: Playback[] = [];
   readonly defaultClock = new ClockV(1);
   private readonly global = new Scope();
   private readonly envir = new Map<string, Value>();
@@ -241,7 +270,7 @@ export class Interpreter implements Host {
   private readonly pdefns = new Map<string, Value>();
   private work = 0;
   /** While a routine runs: its time in beats, the events it plays, and the work done when it last waited. */
-  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV; waited: number; sameTime: number } | null = null;
+  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV; waited: number; sameTime: number; rate: number } | null = null;
   /** While a Prout runs to collect its values. */
   private collecting: Value[] | null = null;
   /** Whether the bounds of the Pwhite being made were written as floats (1.0), as SuperCollider tells. */
@@ -607,6 +636,7 @@ export class Interpreter implements Host {
     if (recv instanceof RandToken) return this.tokenSend(recv, method, args);
     if (recv instanceof SynthDefV) return this.synthDefSend(recv, method, line);
     if (recv instanceof RoutineV) return this.routineSend(recv, method, args, kwargs, line);
+    if (recv instanceof PlayerV) return this.playerSend(recv, method, args, kwargs, line);
     if (recv instanceof ClockV) return this.clockSend(recv, method, args);
     if (recv instanceof ScaleV) return this.scaleSend(recv, method, args);
     if (recv instanceof Assoc) return method === "key" ? recv.key : method === "value" ? recv.value : null;
@@ -976,24 +1006,24 @@ export class Interpreter implements Host {
   private patternSend(p: Pattern, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
     switch (method) {
       case "play": {
+        // Pattern.play(clock, protoEvent, quant) and Pdef(\x).play(clock, protoEvent, quant): a new playback,
+        // from the start of the pattern (a Pdef played again after it stopped starts again too). A pattern's play
+        // gives its player (x.stop stops that playback); a Pdef's gives the Pdef.
         const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
-        this.recordPattern(p, clock instanceof ClockV ? clock : this.defaultClock, line, labelOf(p));
-        return p;
+        // A Pdef starts on the next beat by default (EventPatternProxy.defaultQuant is 1); a pattern at once.
+        const quant = quantOf(kwargs.quant ?? args[2] ?? (p instanceof PdefRef ? 1 : 0));
+        // A Pdef that plays already is not started again (a new definition plays in its player): at the top of the
+        // file, where nothing has ended yet, here; in a routine, when it is played (emit.ts).
+        if (p instanceof PdefRef && !this.routine && this.played.some((r) => r.pattern instanceof PdefRef && r.pattern.key === p.key)) return p;
+        const index = this.recordPattern(p, clock instanceof ClockV ? clock : this.defaultClock, line, labelOf(p), quant);
+        return p instanceof PdefRef ? p : new PlayerV(index);
       }
       case "stop": {
+        // Pdef(\x).stop stops its player: every playback of it that is playing. (A Pbind has no stop in
+        // SuperCollider; here it stops its last playback.)
         const same = (q: Value | undefined) => q === p || (q instanceof PdefRef && p instanceof PdefRef && q.key === p.key);
-        if (this.routine) {
-          // Stopped by a routine, at its time: the last playback of it that the routine started, else the one the
-          // file started. It ends there (a pattern a routine starts plays on when the routine ends, until stopped).
-          const now = this.routine.time;
-          const started = [...this.routine.events].reverse().find((e) => same(e.event.get("__pattern")) && !e.event.has("__stopAfter"));
-          if (started) { started.event.set("__stopAfter", Math.max(0, now - started.time)); return p; }
-          const rec = [...this.played].reverse().find((r) => r.kind === "pattern" && same(r.pattern));
-          if (rec) rec.until = Math.min(rec.until ?? Infinity, Math.max(rec.start, now));
-          return p;
-        }
-        const i = this.played.findIndex((r) => same(r.pattern));
-        if (i >= 0) this.played.splice(i, 1);
+        const playing = this.playbacks.map((_, i) => i).filter((i) => same(this.playbacks[i].pattern) && this.isPlaying(i));
+        for (const i of p instanceof PdefRef ? playing : playing.slice(-1)) this.stopPlayback(i);
         return p;
       }
       case "repeat": case "loop": return new Pn(p, method === "loop" ? Infinity : num(args[0], Infinity));
@@ -1095,6 +1125,49 @@ export class Interpreter implements Host {
     }
     if (method === "name") return new Sym(def.name);
     return def;
+  }
+
+  /** A pattern's player (x = p.play): x.stop ends that playback; x.play or x.resume after it goes on from there. */
+  private playerSend(x: PlayerV, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
+    const b = this.playbacks[x.playback];
+    switch (method) {
+      case "stop": case "pause": this.stopPlayback(x.playback); return x;
+      case "play": case "resume": case "start": {
+        if (this.isPlaying(x.playback)) return x;
+        const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
+        const quant = quantOf(kwargs.quant ?? args[2] ?? 0);
+        x.playback = this.recordPattern(b.pattern, clock instanceof ClockV ? clock : b.clock, line, labelOf(b.pattern as Pattern), quant, x.playback);
+        return x;
+      }
+      case "isPlaying": return this.isPlaying(x.playback);
+      case "stream": case "originalStream": return b.pattern;
+    }
+    return x;
+  }
+
+  /** Now: the routine's time, or 0 at the top of the file. */
+  private now(): Moment {
+    return this.routine ? { beats: this.routine.time, clock: this.routine.clock } : { beats: 0, clock: this.defaultClock };
+  }
+
+  /** Whether a playback was started by now and not stopped since (the routines run one after another, each from 0). */
+  private isPlaying(i: number): boolean {
+    const b = this.playbacks[i];
+    const now = seconds(this.now());
+    const at = seconds(b.at);
+    return at <= now + 1e-9 && !b.stops.some((s) => seconds(s) <= now + 1e-9 && seconds(s) >= at - 1e-9);
+  }
+
+  /**
+   * Stops a playback now. At the top of the file (code run before anything plays, or to stop it by hand later)
+   * a playback the file started does not play at all.
+   */
+  private stopPlayback(i: number) {
+    if (!this.routine) {
+      const r = this.played.findIndex((rec) => rec.playback === i);
+      if (r >= 0) this.played.splice(r, 1);
+    }
+    this.playbacks[i].stops.push(this.now());
   }
 
   private routineSend(r: RoutineV, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
@@ -2262,12 +2335,16 @@ export class Interpreter implements Host {
 
   // ------------------------------------------------------------ playing
 
-  private recordPattern(p: Value, clock: ClockV, line: number, label: string) {
+  /** A new playback of a pattern, from now: returns its index. */
+  private recordPattern(p: Value, clock: ClockV, line: number, label: string, [quant, phase] = [0, 0], resumes?: number): number {
+    const index = this.playbacks.length;
+    this.playbacks.push({ pattern: p, clock, at: this.now(), quant, phase, stops: [], line, ...(resumes === undefined ? {} : { resumes }) });
     if (this.routine) {
-      this.routine.events.push({ time: this.routine.time, event: new SCEvent([["__pattern", p as Value], ["__line", line]]) });
-      return;
+      this.routine.events.push({ time: this.routine.time, event: new SCEvent([["__pattern", p as Value], ["__line", line], ["__playback", index]]) });
+      return index;
     }
-    this.played.push({ kind: "pattern", pattern: p, start: 0, clock, line, label });
+    this.played.push({ kind: "pattern", pattern: p, start: 0, clock, line, label, playback: index });
+    return index;
   }
 
   private recordSynth(synth: SynthV, line: number, tie?: number) {
@@ -2310,13 +2387,16 @@ export class Interpreter implements Host {
     let endless = false;
     if (!play) return r;
     if (this.routine) {
-      // A routine started from a routine: run it inline, at the current time.
+      // A routine started from a routine: run it inline, at the current time. On a clock of another tempo, its
+      // waits are in beats of that clock (the outer routine's time is in beats of its own).
       const saved = this.routine.time;
-      try { this.call(r.fn, []); } catch (err) { if (!(err instanceof Horizon)) throw err; }
+      const rate = this.routine.rate;
+      if (clock.tempo > 0 && this.routine.clock.tempo > 0) this.routine.rate = this.routine.clock.tempo / clock.tempo;
+      try { this.call(r.fn, []); } catch (err) { if (!(err instanceof Horizon)) throw err; } finally { if (this.routine) this.routine.rate = rate; }
       this.routine.time = saved;
       return r;
     }
-    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock, waited: this.work, sameTime: 0 };
+    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock, waited: this.work, sameTime: 0, rate: 1 };
     this.routine = state;
     try {
       this.call(r.fn, []);
@@ -2374,7 +2454,7 @@ export class Interpreter implements Host {
       }
     }
     if (this.routine && typeof x === "number") {
-      this.routine.time += x;
+      this.routine.time += x * this.routine.rate;
       this.routine.waited = this.work;
       if (this.routine.time >= this.routine.horizon) throw new Horizon();
     }
@@ -2431,6 +2511,19 @@ export class Interpreter implements Host {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/** A moment in seconds, at its clock's tempo now. */
+function seconds(m: Moment): number {
+  return m.beats / (m.clock.tempo > 0 ? m.clock.tempo : 1);
+}
+
+/** quant as [quant, phase]: a number, or [quant, phase, timingOffset]. */
+function quantOf(v: Value | undefined): [number, number] {
+  const list = Array.isArray(v) ? v : [v ?? 0];
+  const q = typeof list[0] === "number" && list[0] > 0 && Number.isFinite(list[0]) ? list[0] : 0;
+  const phase = typeof list[1] === "number" && Number.isFinite(list[1]) ? list[1] : 0;
+  return [q, q > 0 ? phase : 0];
+}
 
 /** A routine's events as an event pattern: each event at its time, then rests. */
 function routinePattern(events: RoutineEvent[], end: number, line: number): Value {

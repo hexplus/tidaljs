@@ -29,7 +29,7 @@ function readStoredDraft(): DraftState | null {
 }
 
 /** The saved sketches and the actions on them: save, open, rename, delete, export and import. */
-export function createLibrary(session: Session) {
+export function createLibrary(session: Session, storeSource?: Promise<Store>) {
   const { editor } = session;
   const [sketches, setSketches] = signal<Sketch[]>([]);
   const [current, setCurrent] = signal<Sketch | null>(null);
@@ -40,7 +40,7 @@ export function createLibrary(session: Session) {
   const stored = storedState && storedState.documentId === session.documentId() ? storedState : null;
   const [title, setTitle] = signal(stored?.title ?? "");
   const [kind, setKind] = signal<StorageKind | null>(null);
-  const storePromise: Promise<Store> = openStore();
+  const storePromise: Promise<Store> = storeSource ?? openStore();
 
   /**
    * What the draft was opened or saved as (code, title, tempo): replacing a
@@ -49,7 +49,6 @@ export function createLibrary(session: Session) {
    * version counts as unsaved.
    */
   const [baseline, setBaseline] = signal<Draft>(stored?.baseline ?? { code: DEFAULT_CODE, title: "", cps: session.tempo() });
-  if (stored && Math.abs(stored.cps - session.tempo()) > 1e-9) session.changeTempo(stored.cps);
   const draftNow = (): Draft => ({ code: editor.getValue(), title: title(), cps: session.tempo() });
   const markBaseline = (draft: Draft) => setBaseline({ ...draft });
 
@@ -79,31 +78,41 @@ export function createLibrary(session: Session) {
     setKind(store.kind);
     setSketches(await store.list());
   }
+  const restoringFor = session.documentId();
   void refresh()
     .then(() => {
-      // The sketch that was open before the reload is open again.
+      // The sketch that was open before the reload is open again, unless another document was put
+      // in the editor while the library loaded: a late answer never reattaches an old sketch.
+      if (session.documentId() !== restoringFor) return;
       if (stored?.sketchId && !current()) setCurrent(sketches().find((s) => s.id === stored.sketchId) ?? null);
     })
     .catch((err) => fail("Could not read the library", err));
 
   /** Saves the editor's code: over the open sketch, or as a new one. Code that has not run keeps its provenance. */
   async function save(asNew = false) {
+    // Everything is read now, before anything is awaited: the document saved is the one in the editor
+    // when Save was pressed.
+    const documentAtSave = session.documentId();
+    const code = editor.getValue();
+    const name = title().trim();
+    const open = current();
+    const base: Sketch = open && !asNew
+      ? { ...open, code, cps: session.tempo(), title: name || open.title, updated: Date.now() }
+      : makeSketch(code, name, session.tempo());
+    const from = session.provenance();
+    const sketch: Sketch = { ...base };
+    if (isExternal(from)) sketch.provenance = from;
+    else delete sketch.provenance;
     try {
       const store = await storePromise;
-      const code = editor.getValue();
-      const name = title().trim();
-      const open = current();
-      const base: Sketch = open && !asNew
-        ? { ...open, code, cps: session.tempo(), title: name || open.title, updated: Date.now() }
-        : makeSketch(code, name, session.tempo());
-      const from = session.provenance();
-      const sketch: Sketch = { ...base };
-      if (isExternal(from)) sketch.provenance = from;
-      else delete sketch.provenance;
       await store.put(sketch);
-      setCurrent(sketch);
-      setTitle(sketch.title);
-      markBaseline({ code: sketch.code, title: sketch.title, cps: sketch.cps });
+      // If another document was opened meanwhile, it does not become this sketch: its next Save
+      // still goes where it should, and its unsaved changes stay unsaved.
+      if (session.documentId() === documentAtSave) {
+        setCurrent(sketch);
+        setTitle(sketch.title);
+        markBaseline({ code: sketch.code, title: sketch.title, cps: sketch.cps });
+      }
       await refresh();
       session.notify("", 'Saved "' + sketch.title + '".');
     } catch (err) {

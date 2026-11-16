@@ -3249,6 +3249,140 @@
         return depth === 0 && quote === null ? names : all;
     }
 
+    // Global names TidalJS installs (gathered by setupGlobalFunctions): calls to them build patterns,
+    // except the commands below, which change what plays or reach outside the music.
+    const TIDAL_GLOBALS = new Set();
+    const COMMAND_GLOBALS = new Set([
+        'hush', 'stopAll', 'panic', 'setCPS', 'setcps', 'setTempo', 'setbpm', 'once', 'first', 'asap', 'samples', 'setBus',
+        'record', 'stopRecording', 'exportPattern', 'setOscUrl', 'mute', 'unmute', 'solo', 'unsolo', 'unmuteAll', 'unsoloAll',
+        'resetCycles', 'setCycle', 'setOutput', 'controlLayout', 'midikeys', 'oscplay', 'testAudio', 'only', 'p', 'jump',
+        'jumpIn', 'jumpMod', 'jumpInNext', 'jumpModOffset', 'xfade', 'xfadeIn', 'clutch', 'clutchIn', 'anticipate',
+        'anticipateIn', 'interpolate', 'interpolateIn', 'wait', 'waitT', 'mortal', 'histpan',
+        ...Array.from({ length: 16 }, (_, i) => 'd' + (i + 1)),
+    ]);
+    // Pattern methods that do more than make a pattern.
+    const COMMAND_METHODS = new Set(['play', 'stop', 'once', 'setCPS', 'setTempo']);
+    const WRITES = new Set(['=', '+=', '-=', '*=', '/=', '%=', '**=', '<<=', '>>=', '>>>=', '&=', '|=', '^=', '&&=', '||=', '??=', '++', '--']);
+
+    /**
+     * True when running a declaration can only define its names: a function
+     * or class (without static parts), or initialisers that build values
+     * from literals, TidalJS's pattern functions, pattern methods on those,
+     * and functions (whose bodies run only when called). Anything else (a
+     * call to another function, an assignment, new, delete, await...) may
+     * write something a stream reads, so the declaration counts as a write
+     * for every stream (see streamSources). When unsure: not pure.
+     */
+    function pureDeclaration(text) {
+        if (/^\s*(?:export\s+)?(?:async\s+)?function\b/.test(text)) return true;
+        if (/^\s*(?:export\s+)?class\b/.test(text)) return !/\bstatic\b/.test(text) && !text.includes('[');
+        const head = /^\s*(?:export\s+)?(?:const|let|var)\s+/.exec(text);
+        if (!head) return false;
+        const toks = scanTokens(text, head[0].length, false).tokens;
+        // Each declarator: its binding (defaults in a pattern run too) and its initialiser.
+        let depth = 0;
+        let start = 0;
+        const parts = [];
+        for (let k = 0; k <= toks.length; k++) {
+            const t = toks[k];
+            if (k === toks.length || (depth === 0 && isPunct(t, ','))) {
+                parts.push(toks.slice(start, k));
+                start = k + 1;
+                continue;
+            }
+            if (t.type === 'punct' && OPENERS.has(t.value)) depth++;
+            else if (t.type === 'punct' && CLOSERS.has(t.value)) depth--;
+            else if (depth === 0 && isPunct(t, ';')) { parts.push(toks.slice(start, k)); start = k + 1; }
+        }
+        return parts.every((part) => {
+            const eq = part.findIndex((t, k) => isPunct(t, '=') && depthBefore(part, k) === 0);
+            if (eq < 0) return pureExpression(part);
+            return pureExpression(part.slice(0, eq)) && pureExpression(part.slice(eq + 1));
+        });
+    }
+
+    /** Bracket depth before token k. */
+    function depthBefore(toks, k) {
+        let depth = 0;
+        for (let j = 0; j < k; j++) {
+            if (toks[j].type !== 'punct') continue;
+            if (OPENERS.has(toks[j].value)) depth++;
+            else if (CLOSERS.has(toks[j].value)) depth--;
+        }
+        return depth;
+    }
+
+    /** See pureDeclaration: whether evaluating these tokens can only build a value. */
+    function pureExpression(toks) {
+        if (!toks.length) return true;
+        // A function value: its body runs only when it is called.
+        const f = isWord(toks[0], 'async') ? 1 : 0;
+        if (isWord(toks[f], 'function')) return true;
+        if (toks[f] && toks[f].type === 'name' && isPunct(toks[f + 1], '=>')) return true;
+        if (isPunct(toks[f], '(')) {
+            let depth = 0;
+            let close = -1;
+            for (let j = f; j < toks.length; j++) {
+                if (toks[j].type !== 'punct') continue;
+                if (OPENERS.has(toks[j].value)) depth++;
+                else if (CLOSERS.has(toks[j].value) && --depth === 0) { close = j; break; }
+            }
+            // (params) => body: an arrow function's body reaches the end of the initialiser.
+            if (close > 0 && isPunct(toks[close + 1], '=>')) return true;
+        }
+        // Parameters of arrow functions inside (x => x.fast(2)): pattern methods on them are fine.
+        const params = new Set();
+        for (let k = 0; k < toks.length; k++) {
+            if (!isPunct(toks[k], '=>')) continue;
+            if (toks[k - 1] && toks[k - 1].type === 'name') params.add(toks[k - 1].value);
+            else if (isPunct(toks[k - 1], ')')) {
+                for (let j = k - 2, d = 0; j >= 0; j--) {
+                    if (isPunct(toks[j], ')')) d++;
+                    else if (isPunct(toks[j], '(')) { if (d === 0) break; d--; }
+                    else if (toks[j].type === 'name' && !toks[j].prop) params.add(toks[j].value);
+                }
+            }
+        }
+        const patternMethods = new Set(Object.getOwnPropertyNames(PatternBuilder.prototype));
+        const allowedRoot = (name) => params.has(name) || (TIDAL_GLOBALS.has(name) && !COMMAND_GLOBALS.has(name));
+        // The name a member chain starts from (a.b(c).d -> a), or null when it is not a plain name.
+        const rootOf = (k) => {
+            let j = k;
+            for (;;) {
+                if (!(isPunct(toks[j - 1], '.') || isPunct(toks[j - 1], '?.'))) return toks[j] && toks[j].type === 'name' ? toks[j].value : null;
+                let r = j - 2;
+                if (isPunct(toks[r], ')')) {
+                    for (let d = 0; r >= 0; r--) {
+                        if (isPunct(toks[r], ')')) d++;
+                        else if (isPunct(toks[r], '(') && --d === 0) break;
+                    }
+                    r--;
+                }
+                if (!toks[r] || toks[r].type !== 'name') return null;
+                j = r;
+            }
+        };
+        for (let k = 0; k < toks.length; k++) {
+            const t = toks[k];
+            const prev = toks[k - 1];
+            if (t.type === 'punct' && WRITES.has(t.value)) return false;
+            if (isWord(t) && ['new', 'delete', 'await', 'yield', 'import', 'eval'].includes(t.value)) return false;
+            if (t.type === 'tpl' && (t.value.includes('${') || (prev && (prev.type === 'name' || isPunct(prev, ')') || isPunct(prev, ']'))))) return false;
+            if (!isPunct(t, '(') || !prev) continue;
+            if (prev.type === 'name' && !prev.prop) {
+                if (['if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'void', 'in', 'of', 'case'].includes(prev.value)) continue;
+                if (!(TIDAL_GLOBALS.has(prev.value) && !COMMAND_GLOBALS.has(prev.value))) return false; // another function: it may write
+            } else if (prev.type === 'name' && prev.prop) {
+                if (!patternMethods.has(prev.value) || COMMAND_METHODS.has(prev.value)) return false;
+                const root = rootOf(k - 1);
+                if (!root || !allowedRoot(root)) return false; // a method of some object: it may write
+            } else if (isPunct(prev, ')') || isPunct(prev, ']')) {
+                return false; // calling what a call returned
+            }
+        }
+        return true;
+    }
+
     /** The index of the bracket closing the one at `open`, skipping strings; -1 if none. */
     function matchingBracket(text, open) {
         let depth = 0;
@@ -3291,8 +3425,9 @@
             }
         });
         const others = [];
+        // A declaration whose initialiser may write (an unused one too) counts like any other statement.
         info.forEach((s, j) => {
-            if (!s.decl && !producing.has(j) && s.text.trim()) others.push(j);
+            if (!producing.has(j) && s.text.trim() && (!s.decl || !pureDeclaration(s.text))) others.push(j);
         });
         const cache = new Map();
         return (k) => {
@@ -5702,6 +5837,8 @@
             this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
+            this._bankSeq = 0;                 // numbers samples() registrations in the order they were made
+            this._bankSeqs = new Map();        // bank -> the number of the registration that set it
         }
 
         // --- Setup -----------------------------------------------------
@@ -5774,6 +5911,7 @@
         /** Installs sound(), stack(), cat() and friends on the global object. */
         setupGlobalFunctions() {
             const g = root;
+            const before = new Set(Object.keys(g));
             const patternsOf = (args, name) => flatArgs(args).map((p) => toPattern(this, p, name));
             g.tidal = this;
             g.sound = (pattern) => soundPattern(this, pattern);
@@ -6048,6 +6186,9 @@
                 osc.start(t);
                 osc.stop(t + 0.5);
             };
+
+            // The names installed here, for the live-update analysis (see pureDeclaration).
+            for (const name of Object.keys(g)) if (!before.has(name)) TIDAL_GLOBALS.add(name);
         }
 
         // --- Clock -----------------------------------------------------
@@ -6482,6 +6623,7 @@
             clearTimeout(shot.timer);
             this._teardownSession(shot.session);
             this._cancelMidi(shot);
+            this._socketQueue = this._socketQueue.filter((p) => p.owner !== shot);
         }
 
         /** True while a first(), once() or asap() is still sounding. */
@@ -6784,7 +6926,9 @@
             // firing a burst of late events.
             if (this.timeAt(from) < now - 0.5) from = this.cycleAt(now);
             const to = this.cycleAt(now + this.lookahead);
-            if (to <= from) return;
+            // No new cycles to ask for (after a sharp slowdown the frontier can be far ahead): events
+            // held back still go out when their time comes.
+            if (to <= from) return this._dispatch([], now);
             this._nextCycle = to;
 
             // Every audible stream's events in the window. Simultaneous events
@@ -6802,7 +6946,9 @@
                     this._streamFailed(id, error);
                     continue;
                 }
-                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i });
+                // Each event keeps its stream and the pattern it came from, so one held back can be dropped
+                // when that stream is muted, replaced or removed before it goes out.
+                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i, id, pattern });
             }
             if (!this.isPlaying) return; // the last stream failed
             items.sort((a, b) => a.ev.begin - b.ev.begin || a.stream - b.stream || a.i - b.i);
@@ -6826,12 +6972,22 @@
                 time: this.timeAt(it.ev.begin) + (isNum(it.v.nudge) ? it.v.nudge : 0),
                 duration: (it.ev.end - it.ev.begin) / this._cpsAt(it.ev.begin),
             }));
-            // An event nudged past this tick's horizon waits for the tick that
-            // reaches its time, so events from later ticks that sound before it
-            // go first. (A negative nudge cannot move an event before what was
-            // already sent: it is sent at once, at its time.)
+            this._dispatch(timed, now);
+        }
+
+        /**
+         * Sends the events whose time is within this tick's horizon, in the
+         * order they sound. One beyond it (nudged later, or after a slowdown)
+         * waits for the tick that reaches its time, so events from later ticks
+         * that sound before it go first. (A negative nudge cannot move an event
+         * before what was already sent: it is sent at once, at its time.) An
+         * event held back is dropped if its stream was muted, replaced or
+         * removed meanwhile.
+         */
+        _dispatch(timed, now) {
             const horizon = now + this.lookahead;
-            const all = this._nudged.concat(timed);
+            const current = (it) => this.channels.get(it.id) === it.pattern && this.isAudible(it.id);
+            const all = this._nudged.filter(current).concat(timed);
             all.sort((a, b) => a.time - b.time || a.seq - b.seq);
             this._nudged = all.filter((it) => it.time >= horizon);
             for (const it of all) {
@@ -6925,6 +7081,9 @@
             this._txn = txn;
             this._txnCps = undefined;
             this._txnBanks = new Set(); // banks samples() stages in this code
+            // options.cps: the tempo the document brings (the editor's draft tempo). It is staged first, so
+            // it applies only if the code commits, and a setCPS() in the code has the last word.
+            if (isNum(options.cps) && options.cps > 0) this.setCPS(options.cps);
             let committed = false;
             try {
                 const body = statements
@@ -8021,9 +8180,16 @@
          */
         loadSamples(source, base = '') {
             const entry = this._samplePlan(source, base);
-            // The banks replace those of the same name only now: in code being evaluated, when it commits.
+            // The banks replace those of the same name only now (in code being evaluated, when it
+            // commits), in the order the samples() calls ran: each registration has a number, and a
+            // bank is never replaced by an older one that arrives later. Banks known at once (given
+            // in code) are in use at once, so a first() after them in the same code plays them.
+            // A failed manifest rejects the promise for whoever awaits it and is reported to the
+            // editor (sampleFailures); a promise nobody awaits is not an unhandled rejection.
             const register = () => {
-                const job = entry.promise.then((plan) => this._registerBanks(plan));
+                const seq = ++this._bankSeq;
+                const job = entry.plan ? Promise.resolve(this._registerBanks(entry.plan, seq))
+                    : entry.promise.then((plan) => this._registerBanks(plan, seq));
                 job.catch(() => { /* reported where the manifest failed */ });
                 return job;
             };
@@ -8032,6 +8198,7 @@
                 if (entry.plan) for (const bank of entry.plan) this._txnBanks.add(bank.name);
                 let settle;
                 const result = new Promise((resolve) => { settle = resolve; });
+                result.catch(() => { /* as above */ });
                 this._stage('samples', () => settle(register()), () => settle(0));
                 return result;
             }
@@ -8075,9 +8242,11 @@
             return entry;
         }
 
-        /** Puts planned banks in use (see planBanks); returns how many. */
-        _registerBanks(plan) {
+        /** Puts planned banks in use (see planBanks), unless a newer registration (seq) set them; returns how many. */
+        _registerBanks(plan, seq = ++this._bankSeq) {
             for (const bank of plan) {
+                if ((this._bankSeqs.get(bank.name) ?? 0) > seq) continue; // a newer samples() set it
+                this._bankSeqs.set(bank.name, seq);
                 this.sampleBanks.set(bank.name, bank.urls);
                 if (bank.pitched) this.pitchedBanks.set(bank.name, bank.pitched);
                 else this.pitchedBanks.delete(bank.name);
@@ -9614,6 +9783,9 @@
                 if (!note) return;
                 const off = toPerf(time + note.length);
                 out.send([0x90 | channel, note.key, note.velocity], at);
+                // A note-off from before a Stop (which could not be cancelled) lands inside this note: strike it again just after.
+                const stale = this._staleOffAt(out, channel, note.key, now);
+                if (stale !== null && stale >= at && stale < off) out.send([0x90 | channel, note.key, note.velocity], stale + 1);
                 out.send([0x80 | channel, note.key, 0], off);
                 this._trackMidi(out, { owner, note: { channel, key: note.key, velocity: note.velocity }, at, off }, now);
             } catch (err) {
@@ -9662,7 +9834,8 @@
                 if (keep.length) sent.set(out, keep);
                 else sent.delete(out);
                 if (!cancel.length || out.state === 'disconnected') continue;
-                const pending = cancel.some((r) => r.at > now);
+                // Pending: a note-on or control still to come, or the note-off of a note that sounds.
+                const pending = cancel.some((r) => r.at > now || (r.note && r.off > now));
                 let cleared = false;
                 if (pending && typeof out.clear === 'function') {
                     try {
@@ -9676,6 +9849,9 @@
                         const off = [0x80 | r.note.channel, r.note.key, 0];
                         if (r.at <= now) out.send(off);              // sounding: ends now
                         else if (!cleared) out.send(off, r.at);      // could not be cancelled: ends as it starts
+                        // Without clear(), its own note-off is still on its way: a note restarted on that key
+                        // before then would be cut by it (see _sendMidi, which strikes it again).
+                        if (!cleared) this._staleNoteOff(out, r.note.channel, r.note.key, r.off);
                     }
                     // clear() took the others' pending messages too: send them again.
                     if (cleared) {
@@ -9692,10 +9868,34 @@
             }
         }
 
+        /** Remembers a note-off still on its way to an output (it could not be cancelled), until it arrives. */
+        _staleNoteOff(out, channel, key, at) {
+            if (!this._staleOffs) this._staleOffs = new Map();
+            let keys = this._staleOffs.get(out);
+            if (!keys) this._staleOffs.set(out, keys = new Map());
+            const id = channel + ':' + key;
+            keys.set(id, Math.max(keys.get(id) ?? 0, at));
+        }
+
+        /** When a stale note-off for that key will arrive (see _staleNoteOff), or null. */
+        _staleOffAt(out, channel, key, now) {
+            const keys = this._staleOffs && this._staleOffs.get(out);
+            if (!keys) return null;
+            const id = channel + ':' + key;
+            const at = keys.get(id);
+            if (at === undefined) return null;
+            if (at <= now) {
+                keys.delete(id);
+                return null;
+            }
+            return at;
+        }
+
         /** The loops stopped: none of their MIDI or OSC scheduled ahead goes out any more (called by _halt). */
         _cancelExternalOutput() {
             this._cancelMidi('loop');
-            this._socketQueue = [];
+            // OSC packets waiting for the socket: the loops' go; a one-shot's stay (Stop ends those, see _endOneShot).
+            this._socketQueue = this._socketQueue.filter((p) => p.owner !== 'loop');
         }
 
         /** All notes off (CC 123) on every channel of every output; unplugged outputs are skipped. */
@@ -9995,7 +10195,7 @@
             const packet = oscBundle(wall, oscMessage(String(v.osc), args));
             // Until the socket opens, packets wait (dropped by Stop and setOscUrl).
             if (this._socket.readyState === 1) this._socket.send(packet);
-            else if (this._socketQueue.length < 256) this._socketQueue.push({ packet, at: wall });
+            else if (this._socketQueue.length < 256) this._socketQueue.push({ packet, at: wall, owner: this._midiOwner || 'loop' });
         }
 
         // --- Recording and export --------------------------------------

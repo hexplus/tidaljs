@@ -7,8 +7,8 @@
  */
 import { CONTROL_NAMES } from "../data/signatures.ts";
 import { phase, tick } from "./budget.ts";
-import { describeText, degreeToKey, gcd, SCALES, TooMuchWork, type Interpreter, type PlayRecord } from "./interpreter.ts";
-import { advanceOf, DONE, ownDelta, Stream } from "./patterns.ts";
+import { describeText, degreeToKey, gcd, SCALES, TooMuchWork, type Interpreter, type Playback, type PlayRecord } from "./interpreter.ts";
+import { advanceOf, DONE, ownDelta, PdefRef, Stream } from "./patterns.ts";
 import { analyseSynthDef, envSignalOf, FOLLOWABLE, isEffectControl, lfoSignalOf, mapSignal, soundByName, TIDAL_SOUNDS, type EnvSignal, type Fixed, type LfoSignal, type SynthInfo } from "./synthdef.ts";
 import {
   BufferV, BusV, GNode, MidiOutV, NetAddrV, ProxyV, RandToken, RestV, SCEvent, SCFunc, ScaleV, Sym, SynthDefV, SynthV, isPattern, type Value,
@@ -130,19 +130,21 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     tempo = 1;
   }
 
-  // Play everything. Each source (a Pbind, a routine's instrument) keeps how far it was played and whether
-  // the stream that played it ended there: each playback (a pattern a routine starts, a Ppar's pattern) has its
-  // own, so a routine that ends does not end the patterns it started.
+  // Play everything, on one timeline (beats at `tempo`). Each source is a pattern (a Pbind, a routine's instrument)
+  // in one playback (each .play, a routine's included): it keeps when it starts, how far it was played and whether
+  // the stream that played it ended there, so a pattern played, stopped and played again keeps the gap between,
+  // and a routine that ends does not end the patterns it started.
   phase("playing the patterns");
   const events: SimEvent[] = [];
   const restsBySrc = new Map<string, SimEvent[]>();
   const reach = new Map<string, Reach>();
+  const simCtx: SimCtx = { interp, tempo, note, streams: new Map(), pdefs: new Map() };
   // Whether something plays on past where it was followed (a routine that loops forever, even when each pattern
   // it starts ends): then the piece does not end.
   let open = false;
-  for (const rec of played) {
+  for (const [index, rec] of played.entries()) {
     const scale = tempo / (rec.clock.tempo > 0 ? rec.clock.tempo : 1);
-    const sim = simulate(interp, rec, scale, note);
+    const sim = simulate(simCtx, rec, index, scale);
     if (sim.open) open = true;
     for (const [src, r] of sim.reach) mergeReach(reach, src, r);
     for (const e of sim.events) {
@@ -365,7 +367,7 @@ interface Reach {
   stop?: number;
 }
 
-/** A source played more than once (by several playbacks) ends only when every playback of it ended. */
+/** A source a playback gives more than once (a Pbind twice in a Ppar or a Pseq) ends only when every one of its streams ended. */
 function mergeReach(reach: Map<string, Reach>, src: string, r: Reach) {
   const old = reach.get(src);
   if (!old) { reach.set(src, r); return; }
@@ -432,7 +434,43 @@ interface Sim {
   open: boolean;
 }
 
-function simulate(interp: Interpreter, rec: PlayRecord, scale: number, note: (s: string) => void): Sim {
+/** What every playback is simulated with: the common tempo (beats per second), and the streams playbacks stopped. */
+interface SimCtx {
+  interp: Interpreter;
+  tempo: number;
+  note: (s: string) => void;
+  /** Each playback's stream where it stopped: x.resume (or x.play) after x.stop goes on from there. */
+  streams: Map<number, Stream>;
+  /** When each Pdef played (from, to: null while it plays on), in beats of the common timeline. */
+  pdefs: Map<string, [number, number | null][]>;
+}
+
+/**
+ * Whether a Pdef plays already at `at` (in beats of the common timeline): then its play does nothing, as in
+ * SuperCollider. Otherwise `played` notes when this playback plays (once it was played).
+ */
+function pdefPlaying(ctx: SimCtx, pattern: Value | undefined, at: number): ((sim: Sim) => void) | null | undefined {
+  if (!(pattern instanceof PdefRef)) return undefined;
+  const list = ctx.pdefs.get(pattern.key) ?? [];
+  if (list.some(([from, to]) => at >= from - 1e-9 && (to === null || at < to - 1e-9))) return null;
+  return (sim) => {
+    list.push([at, sim.end]);
+    ctx.pdefs.set(pattern.key, list);
+  };
+}
+
+/** Where a playback is stopped, in beats of the common timeline: the first stop at or after its start. */
+function stopOf(pb: Playback, start: number, tempo: number): number | undefined {
+  let stop: number | undefined;
+  for (const s of pb.stops) {
+    const at = s.beats * tempo / (s.clock.tempo > 0 ? s.clock.tempo : 1);
+    if (at >= start - 1e-9 && (stop === undefined || at < stop)) stop = at;
+  }
+  return stop === undefined ? undefined : Math.max(start, stop);
+}
+
+function simulate(ctx: SimCtx, rec: PlayRecord, index: number, scale: number): Sim {
+  const { interp } = ctx;
   const out: SimEvent[] = [];
   if (rec.kind === "event" && rec.event) {
     const ev = rec.event;
@@ -443,8 +481,27 @@ function simulate(interp: Interpreter, rec: PlayRecord, scale: number, note: (s:
   }
   const source = rec.pattern;
   if (!isPattern(source)) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
-  return run(interp, source, rec.start, rec.line, scale, out, 0, note, { endless: rec.endless, until: rec.until });
+  const pb = rec.playback === undefined ? undefined : interp.playbacks[rec.playback];
+  const until = pb ? stopOf(pb, rec.start * scale, ctx.tempo) : undefined;
+  const pdef = pdefPlaying(ctx, pb?.pattern, rec.start * scale);
+  if (pdef === null) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
+  const sim = run(ctx, source, rec.start, rec.line, scale, out, 0, { endless: rec.endless, ...(until === undefined ? {} : { until: until / scale }) },
+    (rec.kind === "routine" ? "R" : "P") + index, rec.playback);
+  pdef?.(sim);
+  return sim;
 }
+
+/** One playback a routine started, while the routine is played: its own key, which pattern, its events (out[from..to)). */
+interface Launch {
+  key: string;
+  group: string;
+  from: number;
+  to: number;
+  sim: Sim;
+}
+
+/** The most playbacks of one pattern a routine that loops forever starts that are written each as a part of its own. */
+const MAX_SPLIT = 16;
 
 /**
  * How a playback ends besides its pattern running out: `endless`, a routine that was cut at the horizon (its
@@ -456,12 +513,17 @@ interface Life {
 }
 
 /**
- * Plays a pattern from `start` until it ends, reaches the horizon (512 beats) or has given MAX_EVENTS events.
- * A pattern that stops giving events (an empty pattern repeated forever: SuperCollider hangs there) ends where
- * it stopped, with a note; so do events that take no time, again and again.
+ * Plays a pattern from `start` (in beats of its clock; `scale` turns them into beats of the common timeline) until
+ * it ends, reaches the horizon (512 beats) or has given MAX_EVENTS events. A pattern that stops giving events (an
+ * empty pattern repeated forever: SuperCollider hangs there) ends where it stopped, with a note; so do events that
+ * take no time, again and again. `key` names this playback: its sources are its patterns in it (`src@key`).
+ * `playback`: the pattern's playback (where it is stopped; a resumed one goes on with the stream it continues).
  */
-function run(interp: Interpreter, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number, note: (s: string) => void, life: Life = {}): Sim {
-  const stream = new Stream(source, { host: interp });
+function run(ctx: SimCtx, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number, life: Life, key: string, playback?: number): Sim {
+  const { interp, note } = ctx;
+  const resumes = playback === undefined ? undefined : interp.playbacks[playback]?.resumes;
+  const stream = (resumes !== undefined ? ctx.streams.get(resumes) : undefined) ?? new Stream(source, { host: interp });
+  if (playback !== undefined) ctx.streams.set(playback, stream);
   const first = out.length;
   let t = start;
   let count = 0;
@@ -472,9 +534,10 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
   // ran out while the others play on); the patterns it starts (a routine's) are playbacks of their own.
   const own = new Map<string, boolean>();
   const reach = new Map<string, Reach>();
-  // Whether a pattern it started plays on past where it was followed, and how many playbacks it started of each source.
+  // Whether a pattern it started plays on past where it was followed, and the playbacks it started.
   let open = false;
-  const launches = new Map<string, number>();
+  const launches: Launch[] = [];
+  const groups = new Map<Value, string>();
   // Where the playback ends (null: it plays on), how far it was played, and why not further. A routine cut at the
   // horizon has not ended: it was not played further.
   const finish = (end: number | null, horizon: number, cap: Cap): Sim => {
@@ -487,12 +550,7 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
         : { horizon, ended: false, cap: why };
       mergeReach(reach, src, r);
     }
-    if (life.endless) {
-      // A routine that loops forever starts its patterns again and again: a source it started more than once plays
-      // on past where it was followed, even though each playback of it ended.
-      for (const [src, n] of launches) if (n > 1) reach.set(src, { horizon, ended: false, cap: "horizon" });
-    }
-    if (life.endless && [...launches.values()].some((n) => n === 1)) {
+    if (series(launches, groups.size, key, horizon, life, out, reach)) {
       note("Line " + line + ": the routine loops forever; the patterns it starts are followed for its first " + fmt(horizon) + " beats: the new ones it would start after that are not written.");
     }
     return { events: out, end: ended ? end : null, horizon, cap: ended ? null : why, reach, open: open || !ended };
@@ -528,16 +586,30 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
     if (ev === DONE || !(ev instanceof SCEvent)) return finish(t * scale, t * scale, null);
     const sub = ev.get("__pattern");
     if (sub !== undefined && depth < 4) {
-      // A pattern a routine started: played from now, until it ends or is stopped (it outlives the routine).
-      const after = ev.get("__stopAfter");
-      const inner = run(interp, sub, t, numOf(ev.get("__line"), line), scale, out, depth + 1, note, typeof after === "number" ? { until: t + after } : {});
-      for (const [src, r] of inner.reach) mergeReach(reach, src, r);
-      if (inner.open) open = true;
-      for (const src of inner.reach.keys()) launches.set(src, (launches.get(src) ?? 0) + 1);
+      // A pattern a routine started: a playback of its own, from now (on the next multiple of its quant), on its own
+      // clock (the default clock unless it was given one), until it ends or is stopped (it outlives the routine).
+      const index = ev.get("__playback");
+      const pb = typeof index === "number" ? interp.playbacks[index] : undefined;
+      const own = pb ? ctx.tempo / (pb.clock.tempo > 0 ? pb.clock.tempo : 1) : scale;
+      let at = (t * scale) / own;
+      if (pb && pb.quant > 0) at = Math.ceil((at - pb.phase) / pb.quant - 1e-9) * pb.quant + pb.phase;
+      const until = pb ? stopOf(pb, at * own, ctx.tempo) : undefined;
+      const pattern = pb?.pattern ?? sub;
+      const pdef = pdefPlaying(ctx, pattern, at * own);
+      if (pdef !== null) {
+        const id = pattern instanceof PdefRef ? "pdef:" + pattern.key : pattern;
+        if (!groups.has(id)) groups.set(id, String(groups.size));
+        const launchKey = key + "/" + launches.length;
+        const from = out.length;
+        const inner = run(ctx, sub, at, numOf(ev.get("__line"), line), own, out, depth + 1, until === undefined ? {} : { until: until / own }, launchKey, typeof index === "number" ? index : undefined);
+        launches.push({ key: launchKey, group: groups.get(id) as string, from, to: out.length, sim: inner });
+        pdef?.(inner);
+        if (inner.open) open = true;
+      }
     } else {
       const offset = numOf(ev.get("timingOffset"), 0);
       earliest = Math.min(earliest, offset);
-      const src = String(ev.get("__src") ?? "p" + line);
+      const src = String(ev.get("__src") ?? "p" + line) + "@" + key;
       const delta = ownDelta(ev) * scale;
       // A Ppar marks the last event of a pattern of its that ran out; a later event of that source plays on.
       own.set(src, ev.get("__srcEnd") === true);
@@ -547,6 +619,58 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
     const adv = advanceOf(ev);
     t += adv > 0 || adv === 0 ? adv : 0;
   }
+}
+
+/**
+ * The playbacks a routine started, as sources: each its own (with its own start and end), except the playbacks of
+ * one pattern that a routine that loops forever starts again and again, or that all end, which are one source (a
+ * series: their loop holds the gaps between them). The playbacks of one pattern a looping routine starts that do
+ * not repeat (one that plays on while the next starts) stay apart, unless there are more than MAX_SPLIT of them.
+ * Returns whether some playback is its own source in a routine that loops forever (the new patterns it would start
+ * after the horizon are not written).
+ */
+function series(launches: Launch[], count: number, key: string, horizon: number, life: Life, out: SimEvent[], reach: Map<string, Reach>): boolean {
+  let single = false;
+  for (let g = 0; g < count; g++) {
+    const list = launches.filter((l) => l.group === String(g));
+    const ended = list.every((l) => [...l.sim.reach.values()].every((r) => r.ended));
+    // The events of a playback's own patterns (not those of the playbacks it started in turn).
+    const ownEvents = (l: Launch) => out.slice(l.from, l.to).filter((e) => e.src.endsWith("@" + l.key));
+    let merge = list.length > 1 && ended && !life.endless;
+    // The window the series was followed in: up to where the routine, or a playback of it that plays on, was cut.
+    let until = horizon;
+    for (const l of list) for (const r of l.sim.reach.values()) if (!r.ended) until = Math.min(until, r.horizon);
+    if (list.length > 1 && life.endless) {
+      const evs = list.flatMap(ownEvents).filter((e) => !e.rest).sort((a, b) => a.t - b.t);
+      const keys = evs.map((e) => fmtKey(e.delta) + "|" + e.src.slice(0, e.src.lastIndexOf("@")) + "|" + e.instrument);
+      merge = list.length > MAX_SPLIT || findPeriod(evs, keys, until) !== null;
+    }
+    if (!merge) {
+      for (const l of list) for (const [src, r] of l.sim.reach) mergeReach(reach, src, r);
+      if (life.endless) single = true;
+      continue;
+    }
+    // One source per pattern of the series: `src@key/g` (named after the routine's playback and the pattern).
+    const name = key + "/s" + g;
+    const merged = new Map<string, { ends: number[]; open: boolean }>();
+    for (const l of list) {
+      for (const [src, r] of l.sim.reach) {
+        if (!src.endsWith("@" + l.key)) { mergeReach(reach, src, r); continue; }
+        const base = src.slice(0, src.length - l.key.length - 1);
+        const m = merged.get(base) ?? { ends: [], open: false };
+        if (!r.ended) m.open = true;
+        else m.ends.push(r.stop ?? Math.max(0, ...out.slice(l.from, l.to).filter((e) => e.src === src).map((e) => e.t + Math.max(0, e.delta))));
+        merged.set(base, m);
+      }
+      for (const e of ownEvents(l)) e.src = e.src.slice(0, e.src.length - l.key.length) + name;
+    }
+    for (const [base, m] of merged) {
+      const src = base + "@" + name;
+      // A routine that loops forever plays the series on; one that ends, until the last of its playbacks ends.
+      reach.set(src, m.open || life.endless ? { horizon: until, ended: false, cap: "horizon" } : { horizon: Math.max(...m.ends), ended: true, cap: null, stop: Math.max(...m.ends) });
+    }
+  }
+  return single;
 }
 
 function resolve(ev: SCEvent, t: number, delta: number, src: string, line: number, scale: number): SimEvent {

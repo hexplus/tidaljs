@@ -946,9 +946,9 @@ passed++;
 
 /**
  * The golden fixtures: a SuperCollider file and the events it plays, compared one by one (within `windows`, in
- * seconds, when given: else from 0 to `seconds`).
+ * seconds, when given: else from 0 to `seconds`). `sounding`: [time, n] pairs, how many notes sound at that time.
  */
-for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset']) {
+for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset', 'stop-replay', 'periodic-gaps', 'overlap', 'second-clock']) {
   const dir = new URL('./fixtures/supercollider/', import.meta.url);
   const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
   const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
@@ -966,6 +966,9 @@ for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset'
       near(g[key], value, name + ' event ' + i + ' ' + key);
     }
   });
+  for (const [time, n] of golden.sounding ?? []) {
+    eq(events.filter((e) => e.time <= time + 1e-9 && time < e.time + e.legato * e.length - 1e-9).length, n, name + ': notes sounding at ' + time);
+  }
   if (name === 'voices') near(got[1].amp / got[0].amp, 0.5, 'the second voice keeps its own level');
 }
 
@@ -1032,6 +1035,62 @@ for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset'
   const ptpar = play('Ptpar([0, Pbind(\\note, 0, \\dur, 1), 0.5, Pbind(\\note, 7, \\dur, 1)]).play;', 2).events;
   eq(ptpar.map((e) => [e.time, e.note]), [[0, 60], [0.5, 67], [1, 60], [1.5, 67]]);
   ptpar.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+}
+
+// Each .play is a playback of its own (the fixtures stop-replay, periodic-gaps, overlap and second-clock check more).
+// Played, stopped and played again by a routine that then loops forever: the gap stays, the second playback plays
+// on from its own first note (degrees 0 and 2 alternate: event k of it at beat 6 + k).
+{
+  const { js, events } = play('p = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1);\nRoutine({ x = p.play; 4.wait; x.stop; 2.wait; p.play; loop { 1.wait } }).play;', 10);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 64], [2, 60], [3, 64], [6, 60], [7, 64], [8, 60], [9, 64]]);
+  ok(js.includes('.playFor(0, 1)') && js.includes('.stopFor(0, 1.5)'), 'one part per playback, each from its own start');
+  const late = play('p = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1);\nRoutine({ x = p.play; 4.wait; x.stop; 2.wait; p.play; loop { 1.wait } }).play;', 802).events;
+  eq(late.filter((e) => e.time >= 798).map((e) => [e.time, e.note]), [[798, 60], [799, 64], [800, 60], [801, 64]]);
+}
+// A routine that ends after playing and stopping the same pattern 8 times: one part, its gaps in its loop, once.
+{
+  const { js, parts, events } = play('p = Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1);\nRoutine({ 8.do { x = p.play; 3.wait; x.stop; 1.wait } }).play;', 31);
+  eq(parts, 1);
+  ok(/plays once \(31 beats\)/.test(js), 'it ends where the last playback is stopped');
+  eq(events.map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, n) => [[4 * n, 60], [4 * n + 1, 62], [4 * n + 2, 64]]).flat());
+}
+// x.resume after x.stop goes on from where the stream stopped (an EventStreamPlayer is not reset).
+{
+  const { events } = play('x = Pbind(\\degree, Pseq([0, 1, 2, 3, 4, 5], inf), \\dur, 1).play;\nRoutine({ 2.wait; x.stop; 2.wait; x.resume; }).play;', 9);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [4, 64], [5, 65], [6, 67], [7, 69], [8, 60]]);
+}
+// A Pdef stopped and played again: each play starts it again, from its first note.
+{
+  const { events } = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5));\nRoutine({ Pdef(\\a).play; 2.wait; Pdef(\\a).stop; 1.wait; Pdef(\\a).play; 2.wait; Pdef(\\a).stop }).play;', 5);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64], [1, 60], [1.5, 64], [3, 60], [3.5, 64], [4, 60], [4.5, 64]]);
+}
+// A Pdef that plays already does not start again: played twice at the top of the file it is one part (its last
+// definition), and played again by a routine while it plays it goes on, not from its first note. A finite one that
+// ended does start again.
+{
+  const twice = play('Pdef(\\a, Pbind(\\degree, 0)).play;\nPdef(\\a, Pbind(\\degree, 4)).play;', 3);
+  eq([twice.parts, twice.events.map((e) => [e.time, e.note])], [1, [[0, 67], [1, 67], [2, 67]]]);
+  const again = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1)).play;\nRoutine({ 2.wait; Pdef(\\a).play }).play;', 6);
+  eq(again.events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65], [4, 60], [5, 62]]);
+  const ended = play('Pdef(\\f, Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5));\nRoutine({ loop { Pdef(\\f).play; 4.wait } }).play;', 9);
+  eq(ended.events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 62], [4, 60], [4.5, 62], [8, 60], [8.5, 62]]);
+}
+// quant: a pattern played at beat 0.5 with quant 2 starts at beat 2; a Pdef starts on the next beat (its default quant is 1).
+{
+  const { events } = play('p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\nPdef(\\a, Pbind(\\degree, 7, \\dur, 1));\nRoutine({ 0.5.wait; p.play(quant: 2); Pdef(\\a).play; }).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[1, 72], [2, 60], [2, 72], [3, 62], [3, 72]]);
+}
+// Clocks: a pattern played in a routine on TempoClock(2) without a clock plays on the default clock (1 beat per
+// second); the routine stops it 1.5 of its beats (0.75 s) after each start, every 4 of its beats (2 s), for ever.
+{
+  const { events } = play('p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\nRoutine({ loop { x = p.play; 1.5.wait; x.stop; 2.5.wait } }).play(TempoClock(2));', 606);
+  eq(events.filter((e) => e.time < 7 || e.time >= 600).map((e) => [e.time, e.note]), [[0, 60], [2, 60], [4, 60], [6, 60], [600, 60], [602, 60], [604, 60]]);
+}
+// A routine started by a routine on a faster clock waits in beats of that clock: 4 beats at 4 per second are 1 s.
+{
+  const { js, events } = play('x = Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 0.5).play;\nRoutine({ 1.wait; Routine({ 4.wait; x.stop }).play(TempoClock(4)) }).play;', 2);
+  ok(/plays once \(2 beats\)/.test(js), 'stopped at 2 s');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 62], [1, 64], [1.5, 65]]);
 }
 
 // ---------------------------------------------------------------- safe code, tempo

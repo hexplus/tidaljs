@@ -367,5 +367,119 @@ const reset = () => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 3
+{
+    // 2. The document's tempo goes in with the code: applied only by a commit; a setCPS() in the code wins.
+    reset();
+    t.eval('d1(sound("bd"))');
+    eq(t.cps, 1);
+    eq(t.eval('d1(sound("sn"))\nthrow new Error("no")', { cps: 1.75 }).success, false);
+    eq(t.cps, 1, 'a failed evaluation keeps the previous tempo');
+    eq(t.eval('d1(sound("sn*4"))\nd1(sound("hh"))', { cps: 1.75, keepOnWarnings: true }).pending, true);
+    eq(t.cps, 1, 'so does one held back by warnings');
+    t.eval('d1(sound("sn"))', { cps: 1.75 });
+    eq(t.cps, 1.75, 'a commit applies it');
+    t.eval('setCPS(0.5)\nd1(sound("sn"))', { cps: 1.75 });
+    eq(t.cps, 0.5, 'the code\'s own setCPS has the last word');
+}
+{
+    // 3. Bank registration is deterministic: in the order the samples() calls ran, whatever arrives first.
+    reset();
+    const slow = {};
+    // Manifests answer when the test says so; sample files at once.
+    globalThis.fetch = (url) => (url.endsWith('.json')
+        ? new Promise((resolve) => { slow[url] = () => resolve({ ok: true, url, json: async () => ({ bd: ['old.wav'] }) }); })
+        : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    const older = samples('https://slow.test/a/strudel.json');
+    await samples({ bd: ['https://cdn.test/newer.wav'] });
+    slow['https://slow.test/a/strudel.json']();
+    await older;
+    eq(t.sampleBanks.get('bd'), ['https://cdn.test/newer.wav'], 'an older manifest does not replace a newer bank');
+    // Within one evaluation, the same: the later samples() wins.
+    t.eval('samples("https://slow.test/b/strudel.json")\nsamples({ bd: ["https://cdn.test/later.wav"] })\nd1(sound("bd"))');
+    await Promise.resolve();
+    slow['https://slow.test/b/strudel.json']();
+    await t.whenSamplesLoaded();
+    await Promise.resolve();
+    eq(t.sampleBanks.get('bd'), ['https://cdn.test/later.wav']);
+    // An inline bank is in use for a first() after it in the same code.
+    const seen = [];
+    const savedPlay = t.playEvent;
+    t.playEvent = function (v) { seen.push(this.sampleBanks.get(v.s)); };
+    t.eval('samples({ kit2: ["https://cdn.test/kit2.wav"] })\nfirst(sound("kit2"))');
+    t.playEvent = savedPlay;
+    eq(seen, [['https://cdn.test/kit2.wav']]);
+    // A failed manifest: rejects for whoever awaits it, is reported, and is never an unhandled rejection.
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled++; };
+    process.on('unhandledRejection', onUnhandled);
+    globalThis.fetch = async () => ({ ok: false, status: 500 });
+    t.eval('samples("https://broken.test/x/strudel.json")\nd1(sound("bd"))');
+    samples('https://broken.test/y/strudel.json'); // nobody awaits it
+    await assert.rejects(() => samples('https://broken.test/z/strudel.json'), /HTTP 500/); passed++;
+    await t.whenSamplesLoaded();
+    await new Promise((r) => realSetTimeout(r, 20));
+    process.off('unhandledRejection', onUnhandled);
+    eq(unhandled, 0, 'no unhandled rejections');
+    ok(t.sampleFailures().some((f) => f.source.includes('broken.test/x')), 'reported to the editor');
+    t.retrySamples();
+}
+{
+    // 4. Held events know their stream: muted, replaced or removed before their time, they do not play.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a").nudge(0.5))\nd2(sound("b"))');
+    run(0, 50);
+    ok(t._nudged.some((it) => it.v.s === 'a'), 'held back');
+    t.mute('d1');
+    let played = run(75, 700);
+    ok(!played.some((e) => e.s === 'a'), 'muted before its time: not played');
+    t.unmuteAll();
+    reset();
+    t.eval('d1(sound("a").nudge(0.5))\nd2(sound("b"))');
+    run(0, 50);
+    t.eval('d1(sound("c"))\nd2(sound("b"))'); // replaced
+    played = run(75, 700);
+    ok(!played.some((e) => e.s === 'a'), 'replaced: not played');
+    reset();
+    t.eval('d1(sound("a").nudge(0.5))\nd2(sound("b"))');
+    run(0, 50);
+    t.eval('d2(sound("b"))'); // removed
+    played = run(75, 700);
+    ok(!played.some((e) => e.s === 'a'), 'removed: not played');
+
+    // A sharp slowdown with a dense pattern: every event still goes out, on time and in order,
+    // also on ticks that have no new cycles to ask for.
+    reset();
+    t.eval('d1(sound("x*16"))\nd2(sound("~ s").cps(0.1))');
+    played = run(0, 6000).filter((e) => e.s === 'x');
+    const firstCycle = played.slice(0, 16).map((e) => e.time);
+    const expected = [];
+    for (let k = 0; k < 8; k++) expected.push(+(0.05 + k / 16).toFixed(6));
+    for (let k = 0; k < 8; k++) expected.push(+(0.55 + k * 0.625).toFixed(6));
+    eq(firstCycle, expected);
+    for (let i = 1; i < played.length; i++) ok(played[i].time > played[i - 1].time, 'in order');
+}
+{
+    // 6. An unused declaration whose initialiser writes what a stream reads makes that stream change.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    t.eval('const config = { level: 0.2 }\nconst unused = (config.level = 0.9)\nd1(sound("bd").gain(config.level))');
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.9);
+    t.eval('const config = { level: 0.2 }\nconst unused = (config.level = 0.5)\nd1(sound("bd").gain(config.level))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.5);
+    // A call to another function in an initialiser counts the same.
+    t.eval('const config = { level: 0.2 }\nconst bump = (x) => { config.level = x; return x }\nconst unused = bump(0.3)\nd1(sound("bd").gain(config.level))');
+    t.eval('const config = { level: 0.2 }\nconst bump = (x) => { config.level = x; return x }\nconst unused = bump(0.6)\nd1(sound("bd").gain(config.level))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.6);
+    // Plain pattern definitions still let unrelated streams run on (a transition is not restarted).
+    t.eval('const drums = sound("bd*2").every(2, (x) => x.fast(2))\nconst fx = (p) => p.gain(0.5)\nxfadeIn(1, 8, fx(sound("sn")))\nd2(drums)');
+    const d1 = t.channels.get('d1');
+    t.eval('const drums = sound("bd*4").every(2, (x) => x.fast(2))\nconst fx = (p) => p.gain(0.5)\nxfadeIn(1, 8, fx(sound("sn")))\nd2(drums)', live);
+    eq(t.channels.get('d1'), d1, 'd1 runs on');
+    eq(t.channels.get('d2').query(1, 2).length, 4, 'd2 changed');
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
