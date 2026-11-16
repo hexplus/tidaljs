@@ -7249,9 +7249,11 @@
                     // when that stream is muted, replaced or removed before it goes out.
                     const item = audible ? { ev: events[i], v, stream, i, id, pattern, after: fresh ? this._sentHorizon : -Infinity } : null;
                     if (item) items.push(item);
-                    // Tidal's cps control (onsets before what was sent were the old pattern's to make), settled
-                    // when its event is sent or dropped (see _commitTempo).
-                    if (isNum(v.cps) && v.cps > 0 && events[i].begin >= this._dispatchCycle) {
+                    // Tidal's cps control, settled when its event is sent or dropped (see _commitTempo). Onsets
+                    // before what was sent were the old pattern's to make, except those a replacement recovers:
+                    // still unsent, moved by a positive nudge to sound after the boundary (the tempo there follows
+                    // the new version's control; the clock up to what was sent stays as it was).
+                    if (isNum(v.cps) && v.cps > 0 && (events[i].begin >= this._dispatchCycle || (item && fresh && this._recovers(item, now)))) {
                         requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i, item });
                     }
                 }
@@ -7287,6 +7289,18 @@
         }
 
         /**
+         * True when a replacement's event from before what was sent will still
+         * sound, and in time: its onset is behind the boundary, but a positive
+         * nudge moves it past what was sent. Its time comes from the clock as
+         * sent, which does not change.
+         */
+        _recovers(item, now) {
+            const nudge = isNum(item.v.nudge) ? item.v.nudge : 0;
+            const time = this.timeAt(item.ev.begin) + nudge;
+            return time >= item.after && time >= now - 0.02;
+        }
+
+        /**
          * Sends the events whose time is within this tick's horizon, in the
          * order they sound. Events are known NUDGE_EARLY ahead of it, so one
          * that a negative nudge (up to NUDGE_EARLY) moves earlier still goes
@@ -7294,7 +7308,7 @@
          * after a slowdown) waits for the tick that reaches its time. An
          * event held back is dropped if its stream was muted, replaced or
          * removed meanwhile. An event whose time has passed (after a stall)
-         * is skipped.
+         * is skipped, and dropped like those.
          */
         _dispatch(fresh, now) {
             const horizon = now + this.lookahead;
@@ -7324,8 +7338,13 @@
             if (horizon > this._sentHorizon) this._sentHorizon = horizon;
             for (const it of live) {
                 if (it.time >= horizon) break;
+                if (it.time < now - 0.02) {
+                    // Too late (after a stall): skipped, so never sent; a tempo change it carries is undone from
+                    // what is sent now on (see _commitTempo), the clock for what was already sent stays.
+                    it.dropped = true;
+                    continue;
+                }
                 it.sent = true;
-                if (it.time < now - 0.02) continue;
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
                 } catch (error) {

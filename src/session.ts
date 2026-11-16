@@ -59,6 +59,9 @@ export interface Status {
 
 export type Session = ReturnType<typeof createSession>;
 
+/** Why code runs: Play or an edit, the automatic check after samples settled, or an explicit sample Retry. */
+type RunOrigin = "run" | "recheck" | "retry";
+
 /** What the person is asked before external code first runs: the scan is advice, the answer is theirs. */
 export interface ExternalReview {
   provenance: Provenance;
@@ -262,11 +265,12 @@ export function createSession() {
   /**
    * A live update held back until the manifests it asks for arrive: checked again once, when those loads
    * settle (arrived or failed), and only if it is still current: the same document and text, no run since
-   * (Play, Stop or another update), live update still on, and music still playing. Anything else drops it.
+   * (Play, Stop or another update), live update still on (or the run was an explicit Retry), and music still
+   * playing. Anything else drops it.
    */
-  let pendingRecheck: { text: string; revision: number } | null = null;
+  let pendingRecheck: { text: string; revision: number; retry: boolean } | null = null;
   /** An edit whose check was dropped when live update went off: it runs again when live update is back on, if still current. */
-  let canceledDraft: { text: string; revision: number } | null = null;
+  let canceledDraft: { text: string; revision: number; retry: boolean } | null = null;
 
   /**
    * Sample loads finished (or failed, or were retried). Nothing runs again:
@@ -309,7 +313,7 @@ export function createSession() {
     engine.retrySamples();
     reportedFailures.clear();
     if (engine.isPlaying && lastRunCode !== null && editor.getValue() === lastRunCode && !isExternal(provenance())) {
-      runCode(engine, true, lastRunCode);
+      runCode(engine, true, lastRunCode, "retry");
     } else {
       report(engine.isPlaying ? "playing" : "", "The samples will be asked for again the next time the code runs.");
     }
@@ -317,13 +321,14 @@ export function createSession() {
 
   /**
    * Runs `text` (the editor code) and remembers the message it leaves (see samplesSettled).
-   * recheck: the one automatic check of an edit after the samples it waited for settled (see evaluate).
+   * origin: "recheck" for the one automatic check of an edit after the samples it waited for settled,
+   * "retry" for an explicit Retry (see evaluate).
    */
-  function runCode(engine: Tidal, live: boolean, text = editor.getValue(), recheck = false) {
+  function runCode(engine: Tidal, live: boolean, text = editor.getValue(), origin: RunOrigin = "run") {
     waitingForSamples = false;
     pendingRecheck = null; // a newer run: a recheck waiting for samples is not current any more
     canceledDraft = null;
-    evaluate(engine, live, text, recheck);
+    evaluate(engine, live, text, origin);
     // While loads stay failed (they are not asked for again by themselves), every run says so and offers Retry.
     const failed = engine.sampleFailures();
     if (failed.length && !status().action) {
@@ -341,7 +346,7 @@ export function createSession() {
   }
 
   /** Evaluates the code and reports the result. Live updates keep the old music on warnings. */
-  function evaluate(engine: Tidal, live: boolean, text: string, recheck = false) {
+  function evaluate(engine: Tidal, live: boolean, text: string, origin: RunOrigin = "run") {
     // Live updates keep streams whose code has not changed (and their transitions) as they are.
     // The document's tempo goes in with the code only when the document starts (nothing plays, or it was
     // just opened) or its tempo was set on purpose: then it applies only if the evaluation commits. Other
@@ -361,7 +366,7 @@ export function createSession() {
 
     if (result.pending && result.waitingForSamples) {
       const names = result.waitingForSamples.join(", ");
-      if (recheck) {
+      if (origin === "recheck") {
         // Its one automatic check, and it asks for samples again (code whose samples() source changes on
         // every run): it is not checked again by itself, so nothing runs or loads in a loop.
         report("playing warn", "Still waiting for samples (" + names + "): when checked again after its samples loaded, "
@@ -370,17 +375,29 @@ export function createSession() {
         return;
       }
       // Checked again once, when the manifests it waits for arrive or fail: it commits if the sounds came,
-      // and stays held back with the warning if they did not. The playing streams stay meanwhile.
-      const waiting = { text, revision: documentRevision };
+      // and stays held back with the warning if they did not. The playing streams stay meanwhile. A Retry
+      // asked for it explicitly, so its check happens with live update off too.
+      const waiting = { text, revision: documentRevision, retry: origin === "retry" };
       pendingRecheck = waiting;
+      let shown = -1;
       void result.samplesSettled?.then(() => {
         if (pendingRecheck !== waiting) return; // dropped: a newer run, Stop, Play, another document, live off
         pendingRecheck = null;
         const current = editor.getValue() === text && documentRevision === waiting.revision;
-        if (current && liveEnabled() && engine.isPlaying && !isExternal(provenance())) runCode(engine, true, text, true);
-        else samplesSettled(engine);
+        if (current && (liveEnabled() || waiting.retry) && engine.isPlaying && !isExternal(provenance())) {
+          runCode(engine, true, text, "recheck");
+          return;
+        }
+        if (statusSeq === shown && engine.isPlaying && !engine.isLoadingSamples()) {
+          // Its "waiting" message is still shown: the code changed meanwhile (not run with live update off).
+          report("playing warn", "The samples it waited for settled, but the code changed since, so it was not checked again. "
+            + "The previous patterns keep playing; press Play to run it.");
+          runStatus = statusSeq;
+        }
+        samplesSettled(engine);
       });
       report("playing warn", "Waiting for samples (" + names + "); the previous patterns keep playing.");
+      shown = statusSeq;
       return;
     }
     if (result.pending) {

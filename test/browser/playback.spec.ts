@@ -291,6 +291,83 @@ for (const arrives of ["before", "after"] as const) {
   });
 }
 
+/** A short silent 16-bit mono WAV file. */
+function silentWav(): Buffer {
+  const samples = 800;
+  const b = Buffer.alloc(44 + samples * 2);
+  b.write("RIFF", 0);
+  b.writeUInt32LE(36 + samples * 2, 4);
+  b.write("WAVEfmt ", 8);
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20); // PCM
+  b.writeUInt16LE(1, 22); // mono
+  b.writeUInt32LE(8000, 24);
+  b.writeUInt32LE(16000, 28);
+  b.writeUInt16LE(2, 32);
+  b.writeUInt16LE(16, 34);
+  b.write("data", 36);
+  b.writeUInt32LE(samples * 2, 40);
+  return b;
+}
+
+for (const then of ["completes", "an edit", "Stop", "Play"] as const) {
+  test(`Retry with live update off after a 404: ${then === "completes" ? "the bank registers and the status settles" : `${then} drops its check`}`, async ({ page }) => {
+    // The first request for the manifest fails (404); the Retry's request is held until released.
+    let requests = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("https://r8.test/**", async (route) => {
+      if (!route.request().url().endsWith(".json")) return route.fulfill({ contentType: "audio/wav", body: silentWav() });
+      requests++;
+      if (requests === 1) return route.fulfill({ status: 404, body: "" });
+      await held;
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ kick: ["kick.wav"] }) });
+    });
+    await page.goto("/");
+    await page.locator("#liveToggle").uncheck();
+    const code = 'samples("https://r8.test/kit/strudel.json")\nd1(sound("kick*2"))';
+    await setCode(page, code);
+    await playAndWait(page);
+    await expect(page.locator("#statusAction")).toHaveText("Retry", { timeout: 5000 });
+    const evaluations = await countEvaluations(page);
+    const banks = () => page.evaluate(() => (window as unknown as { tidal: { sampleBanks: Map<string, string[]> } }).tidal.sampleBanks.get("kick") ?? null);
+    await page.click("#statusAction");
+    await expect.poll(() => requests).toBe(2);
+    await expect.poll(() => statusText(page)).toContain("Waiting for samples (kick)");
+    expect(await evaluations()).toBe(1); // the Retry's run
+    if (then === "completes") {
+      release();
+      // Checked again although live update is off: it commits with the bank.
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Updated: playing 1 pattern");
+      expect(await banks()).toEqual(["https://r8.test/kit/kick.wav"]);
+      expect(await evaluations()).toBe(2);
+      await expect(page.locator("#statusAction")).toHaveCount(0);
+      await page.waitForTimeout(1000);
+      expect(await statusText(page)).toContain("Updated: playing 1 pattern"); // settled
+      expect(await evaluations()).toBe(2);
+      expect(requests).toBe(2);
+      return;
+    }
+    if (then === "an edit") {
+      await page.locator("#codeEditor").press("End");
+      await page.locator("#codeEditor").type(" ");
+    } else if (then === "Stop") {
+      await page.click("#stopBtn");
+    } else {
+      await page.click("#playBtn"); // runs the code itself, once
+      await expect.poll(evaluations).toBe(2);
+    }
+    release();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { tidal: { isLoadingSamples(): boolean } }).tidal.isLoadingSamples())).toBe(false);
+    await page.waitForTimeout(1000);
+    expect(await evaluations()).toBe(then === "Play" ? 2 : 1); // the Retry's check never ran
+    const status = await statusText(page);
+    expect(status).not.toContain("Waiting for samples");
+    if (then === "an edit") expect(status).toContain("the code changed since");
+    if (then === "Stop") expect(status).toContain("Stopped");
+  });
+}
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');

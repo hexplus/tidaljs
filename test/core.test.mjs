@@ -943,5 +943,34 @@ const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).ma
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 8
+{
+    // 1. A replacement recovers an unsent control held by a positive nudge (onset 0.2 passed, sounding at 0.55 s):
+    // its own tempo (3 cps) takes over from what was sent (cycle 0.5), and the times already sent stay.
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).nudge(0.3).playFor(0, 1))');
+    let played = run(0, 300);
+    eq([t._dispatchCycle, t._tempoRequests.map((r) => [r.cycle, r.cps, r.committed])], [0.5, [[0.2, 2, false]]], 'onset passed, control not sent');
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(3).nudge(0.3).playFor(0, 1))', live);
+    played = played.concat(run(325, 1500));
+    eq(hitsOf(played, 'x', 2), [0.55], 'recovered and played once');
+    eq(t.cps, 3);
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0.2, 2], [0.5, 3]], 0.125, 1.45), '2 cps up to what was sent, then 3 cps');
+
+    // 2. A stall past an unsent nudged control: the event is skipped as too late, so its tempo change is undone
+    // from what this tick sends on (cycle 1.9 on the clock as it was); what was sent keeps its times.
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).nudge(0.3).playFor(0, 1))');
+    played = run(0, 300);
+    played = played.concat(run(1000, 1600)); // the clock jumps from 0.3 s to 1 s
+    eq(hitsOf(played, 'x', 2), [], 'skipped');
+    eq([t.cps, t._tempoRequests.length], [1, 0], 'undone');
+    eq(hitsOf(played, 'a', 1.6), [0.05, 0.175, 0.275, 0.3375, 1.025, 1.0875, 1.2, 1.325, 1.45, 1.575]);
+    eq(hitsOf(played, 'a', 1.6).filter((x) => x > 1), gridOf([[0.2, 2], [1.9, 1]], 0.125, 1.6).filter((x) => x > 1));
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
