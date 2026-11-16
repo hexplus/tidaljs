@@ -1678,6 +1678,9 @@
     }
 
     // Seconds a one-shot's session lives on after its last event, for delay and reverb tails.
+    // How far a negative nudge can move an event earlier and still play on time: events are asked for
+    // this many seconds before they are sent (see _tick). Earlier ones play this much early, with a warning.
+    const NUDGE_EARLY = 0.2;
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -3262,6 +3265,12 @@
     ]);
     // Pattern methods that do more than make a pattern.
     const COMMAND_METHODS = new Set(['play', 'stop', 'once', 'setCPS', 'setTempo']);
+    // In a statement that makes a stream, making the stream itself is not a write.
+    const STREAM_GLOBALS = new Set([
+        'p', 'only', 'jump', 'jumpIn', 'jumpMod', 'jumpInNext', 'jumpModOffset', 'xfade', 'xfadeIn', 'clutch', 'clutchIn',
+        'anticipate', 'anticipateIn', 'interpolate', 'interpolateIn', 'wait', 'waitT', 'mortal', 'histpan',
+        ...Array.from({ length: 16 }, (_, i) => 'd' + (i + 1)),
+    ]);
     const WRITES = new Set(['=', '+=', '-=', '*=', '/=', '%=', '**=', '<<=', '>>=', '>>>=', '&=', '|=', '^=', '&&=', '||=', '??=', '++', '--']);
 
     /**
@@ -3273,9 +3282,15 @@
      * write something a stream reads, so the declaration counts as a write
      * for every stream (see streamSources). When unsure: not pure.
      */
-    function pureDeclaration(text) {
+    function pureDeclaration(text, ctx = {}) {
         if (/^\s*(?:export\s+)?(?:async\s+)?function\b/.test(text)) return true;
-        if (/^\s*(?:export\s+)?class\b/.test(text)) return !/\bstatic\b/.test(text) && !text.includes('[');
+        if (/^\s*(?:export\s+)?class\b/.test(text)) {
+            // Its body only defines methods, but static parts, computed names and the extends
+            // expression run when the class is defined.
+            if (/\bstatic\b/.test(text) || text.includes('[')) return false;
+            const ext = /\bextends\b([^{]*)\{/.exec(text);
+            return !ext || /^\s*[\p{ID_Start}$_][\p{ID_Continue}$.]*\s*$/u.test(ext[1]);
+        }
         const head = /^\s*(?:export\s+)?(?:const|let|var)\s+/.exec(text);
         if (!head) return false;
         const toks = scanTokens(text, head[0].length, false).tokens;
@@ -3296,9 +3311,80 @@
         }
         return parts.every((part) => {
             const eq = part.findIndex((t, k) => isPunct(t, '=') && depthBefore(part, k) === 0);
-            if (eq < 0) return pureExpression(part);
-            return pureExpression(part.slice(0, eq)) && pureExpression(part.slice(eq + 1));
+            if (eq < 0) return pureExpression(part, false, ctx);
+            return pureExpression(part.slice(0, eq), false, ctx) && pureExpression(part.slice(eq + 1), false, ctx);
         });
+    }
+
+    /**
+     * The code's own functions that only compute (see pureExpression): a
+     * function declaration, or a declaration of one function value, whose
+     * body writes nothing outside itself (locals are fine) and calls only
+     * TidalJS's pattern functions, pattern methods on its parameters, and
+     * other such functions. Found from the bottom up, so a function calling
+     * itself is not counted. Calling one is not a write.
+     */
+    function pureFunctions(texts) {
+        const candidates = new Map(); // name -> { params, body }
+        for (const text of texts) {
+            const toks = scanTokens(text, 0, false).tokens;
+            let k = 0;
+            if (isWord(toks[k], 'export')) k++;
+            let name = null;
+            if (isWord(toks[k], 'async')) k++;
+            if (isWord(toks[k], 'function')) {
+                k++;
+                if (isPunct(toks[k], '*')) continue; // generators: not counted
+                if (!toks[k] || toks[k].type !== 'name') continue;
+                name = toks[k++].value;
+            } else if (isWord(toks[k], 'const') || isWord(toks[k], 'let') || isWord(toks[k], 'var')) {
+                k++;
+                if (!toks[k] || toks[k].type !== 'name' || !isPunct(toks[k + 1], '=')) continue;
+                name = toks[k].value;
+                k += 2;
+                if (isWord(toks[k], 'async')) k++;
+                if (isWord(toks[k], 'function')) {
+                    k++;
+                    if (toks[k] && toks[k].type === 'name') k++;
+                }
+            } else {
+                continue;
+            }
+            // Parameters: one name, or a group.
+            const params = new Set();
+            if (toks[k] && toks[k].type === 'name' && isPunct(toks[k + 1], '=>')) {
+                params.add(toks[k].value);
+                k += 2;
+            } else if (isPunct(toks[k], '(')) {
+                let depth = 0;
+                for (; k < toks.length; k++) {
+                    const t = toks[k];
+                    if (t.type === 'punct' && OPENERS.has(t.value)) depth++;
+                    else if (t.type === 'punct' && CLOSERS.has(t.value)) { if (--depth === 0) { k++; break; } }
+                    else if (t.type === 'name' && !t.prop) params.add(t.value);
+                }
+                if (isPunct(toks[k], '=>')) k++;
+            } else {
+                continue;
+            }
+            let body = toks.slice(k);
+            if (isPunct(body[0], '{') && isPunct(body[body.length - 1], '}')) body = body.slice(1, -1);
+            // One function, nothing after it (a declaration list or a call on it is not a plain function).
+            if (!body.length || depthBefore(toks, toks.length) !== 0) continue;
+            candidates.set(name, { params, body });
+        }
+        const pure = new Set();
+        for (let changed = true; changed;) {
+            changed = false;
+            for (const [name, fn] of candidates) {
+                if (pure.has(name)) continue;
+                if (pureExpression(fn.body, false, { fns: pure, params: fn.params, locals: true })) {
+                    pure.add(name);
+                    changed = true;
+                }
+            }
+        }
+        return pure;
     }
 
     /** Bracket depth before token k. */
@@ -3313,7 +3399,7 @@
     }
 
     /** See pureDeclaration: whether evaluating these tokens can only build a value. */
-    function pureExpression(toks) {
+    function pureExpression(toks, streams = false, ctx = {}) {
         if (!toks.length) return true;
         // A function value: its body runs only when it is called.
         const f = isWord(toks[0], 'async') ? 1 : 0;
@@ -3344,7 +3430,11 @@
             }
         }
         const patternMethods = new Set(Object.getOwnPropertyNames(PatternBuilder.prototype));
-        const allowedRoot = (name) => params.has(name) || (TIDAL_GLOBALS.has(name) && !COMMAND_GLOBALS.has(name));
+        // ctx.fns: the code's own functions found pure (see pureFunctions); ctx.params: names a function body may use freely.
+        if (ctx.params) for (const name of ctx.params) params.add(name);
+        const callable = (name) => (ctx.fns && ctx.fns.has(name))
+            || (TIDAL_GLOBALS.has(name) && (!COMMAND_GLOBALS.has(name) || (streams && STREAM_GLOBALS.has(name))));
+        const allowedRoot = (name) => params.has(name) || callable(name);
         // The name a member chain starts from (a.b(c).d -> a), or null when it is not a plain name.
         const rootOf = (k) => {
             let j = k;
@@ -3365,15 +3455,22 @@
         for (let k = 0; k < toks.length; k++) {
             const t = toks[k];
             const prev = toks[k - 1];
-            if (t.type === 'punct' && WRITES.has(t.value)) return false;
+            if (t.type === 'punct' && WRITES.has(t.value)) {
+                // In a function body, declaring a local (const x = ...) is not a write outside it.
+                const local = ctx.locals && isPunct(t, '=') && prev && prev.type === 'name' && !prev.prop
+                    && (isWord(toks[k - 2], 'const') || isWord(toks[k - 2], 'let') || isWord(toks[k - 2], 'var'));
+                if (!local) return false;
+                params.add(prev.value);
+                continue;
+            }
             if (isWord(t) && ['new', 'delete', 'await', 'yield', 'import', 'eval'].includes(t.value)) return false;
             if (t.type === 'tpl' && (t.value.includes('${') || (prev && (prev.type === 'name' || isPunct(prev, ')') || isPunct(prev, ']'))))) return false;
             if (!isPunct(t, '(') || !prev) continue;
             if (prev.type === 'name' && !prev.prop) {
                 if (['if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'void', 'in', 'of', 'case'].includes(prev.value)) continue;
-                if (!(TIDAL_GLOBALS.has(prev.value) && !COMMAND_GLOBALS.has(prev.value))) return false; // another function: it may write
+                if (!callable(prev.value)) return false; // another function: it may write
             } else if (prev.type === 'name' && prev.prop) {
-                if (!patternMethods.has(prev.value) || COMMAND_METHODS.has(prev.value)) return false;
+                if (!patternMethods.has(prev.value) || (COMMAND_METHODS.has(prev.value) && !(streams && prev.value === 'play'))) return false;
                 const root = rootOf(k - 1);
                 if (!root || !allowedRoot(root)) return false; // a method of some object: it may write
             } else if (isPunct(prev, ')') || isPunct(prev, ']')) {
@@ -3413,7 +3510,7 @@
             return { text: s.text, decl, ids: identifiersIn(s.text), names: decl ? declaredNames(s.text) : [] };
         });
         // When the reading is not certain, no stream is kept: a declaration whose names were not
-        // all found in it, escaped names (a), or names that reach variables dynamically.
+        // all found in it, escaped names (written with a backslash-u escape), or names that reach variables dynamically.
         const uncertain = info.some((s) => (s.decl && (!s.names.length || s.names.some((name) => !s.ids.includes(name))))
             || /\\u/.test(s.text) || s.ids.some((id) => DYNAMIC_SCOPE.has(id)));
         if (uncertain) return () => '\u0000uncertain' + Math.random();
@@ -3425,16 +3522,25 @@
             }
         });
         const others = [];
-        // A declaration whose initialiser may write (an unused one too) counts like any other statement.
+        // A declaration whose initialiser may write (an unused one too) counts like any other statement, and so
+        // does a statement making another stream when it may write something besides making its stream.
+        // Calling one of the code's own functions that only compute is not a write.
+        const fns = pureFunctions(info.filter((s) => s.decl).map((s) => s.text));
         info.forEach((s, j) => {
-            if (!producing.has(j) && s.text.trim() && (!s.decl || !pureDeclaration(s.text))) others.push(j);
+            if (!s.text.trim()) return;
+            if (producing.has(j)) {
+                if (!pureExpression(scanTokens(s.text, 0, false).tokens, true, { fns })) others.push(j);
+            } else if (!s.decl || !pureDeclaration(s.text, { fns })) {
+                others.push(j);
+            }
         });
         const cache = new Map();
         return (k) => {
             if (cache.has(k)) return cache.get(k);
             if (!info[k]) return '\u0000unknown' + Math.random(); // never the same: such a stream always counts as changed
+            // The statement, the others (each may write anything), and everything any of them uses.
             const seen = new Set([k, ...others]);
-            const queue = [k];
+            const queue = [k, ...others];
             while (queue.length) {
                 const j = queue.pop();
                 for (const id of info[j].ids) {
@@ -5833,12 +5939,16 @@
             this._txnBanks = null;             // names of the banks samples() staged in that code
             this._oneShots = new Set();        // { session, timer } of first(), once() and asap()
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
-            this._nudged = [];                 // events nudged past the last tick's horizon, waiting for their tick
+            this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
+            this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
+            this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
             this._bankSeq = 0;                 // numbers samples() registrations in the order they were made
             this._bankSeqs = new Map();        // bank -> the number of the registration that set it
+            this._pendingRegistrations = 0;    // committed samples() registrations still waiting for their manifest
+            this._txnBanksPending = false;
         }
 
         // --- Setup -----------------------------------------------------
@@ -6676,7 +6786,8 @@
             }
             // Re-anchor at the scheduling frontier so already scheduled
             // events keep their times and new ones follow the new tempo.
-            if (this.isPlaying) this._retempo(this._nextCycle, next);
+            // (from what was already sent: events asked for ahead get their times when they go out)
+            if (this.isPlaying) this._retempo(Math.max(this._dispatchCycle, this._anchorCycle), next);
             else this.cps = next;
             return this.cps;
         }
@@ -6723,26 +6834,30 @@
         setCycle(cycle) {
             const c = requireNumber('setCycle', cycle);
             if (this._stage('setCycle', () => this.setCycle(c))) return c;
-            if (this.isPlaying) {
-                // The cycles are numbered afresh from here: earlier anchors no longer apply.
-                this._anchorTime = this.timeAt(this._nextCycle);
-                this._anchorCycle = c;
-                this._nextCycle = c;
-                this._tempoHistory = [];
-            }
+            if (this.isPlaying) this._renumber(c);
             return c;
         }
 
         /** Starts counting cycles from 0 again, from the next cycle scheduled (Tidal's resetCycles). */
         resetCycles() {
             if (this._stage('resetCycles', () => this.resetCycles())) return 0;
-            if (this.isPlaying) {
-                this._anchorTime = this.timeAt(this._nextCycle);
-                this._anchorCycle = 0;
-                this._nextCycle = 0;
-                this._tempoHistory = [];
-            }
+            if (this.isPlaying) this._renumber(0);
             return 0;
+        }
+
+        /**
+         * Numbers the cycles afresh from what was already sent: the next cycle
+         * becomes `cycle`. Earlier anchors no longer apply, and events asked
+         * for ahead (in the old numbering) are asked for again.
+         */
+        _renumber(cycle) {
+            this._anchorTime = this.timeAt(this._dispatchCycle);
+            this._anchorCycle = cycle;
+            this._nextCycle = cycle;
+            this._dispatchCycle = cycle;
+            this._tempoHistory = [];
+            this._queried.clear();
+            this._nudged = [];
         }
 
         // --- Transport -------------------------------------------------
@@ -6757,6 +6872,8 @@
             this._anchorTime = ctx.currentTime + 0.05;
             this._anchorCycle = 0;
             this._nextCycle = 0;
+            this._dispatchCycle = 0;
+            this._queried.clear();
             this._tempoHistory = [];
             this._nudged = [];
             this.isPlaying = true;
@@ -6768,6 +6885,7 @@
             this.isPlaying = false;
             this._stopTimer();
             this._nudged = []; // events held back for a later tick never play
+            this._queried.clear();
             const session = this._session;
             this._session = null;
             this._teardownSession(session);
@@ -6921,23 +7039,26 @@
             const ctx = this.audioContext;
             if (!this.isPlaying || !ctx) return;
             const now = ctx.currentTime;
-            let from = this._nextCycle;
-            // After a long stall (e.g. a suspended tab) skip ahead instead of
-            // firing a burst of late events.
-            if (this.timeAt(from) < now - 0.5) from = this.cycleAt(now);
-            const to = this.cycleAt(now + this.lookahead);
-            // No new cycles to ask for (after a sharp slowdown the frontier can be far ahead): events
-            // held back still go out when their time comes.
-            if (to <= from) return this._dispatch([], now);
-            this._nextCycle = to;
+            // Events are asked for NUDGE_EARLY seconds before the horizon at which they are sent, so
+            // one that a negative nudge moves earlier (up to NUDGE_EARLY) is known in time to play.
+            const to = this.cycleAt(now + this.lookahead + NUDGE_EARLY);
 
-            // Every audible stream's events in the window. Simultaneous events
-            // keep a fixed order: the streams' order, then the order each
-            // stream gives them.
+            // Every audible stream's events since that stream was last asked. A stream that is new or
+            // whose pattern changed is asked from what was already sent (what was only held back of
+            // the old pattern is dropped), so a live update leaves no gap and no repeats. Simultaneous
+            // events keep a fixed order: the streams' order, then the order each stream gives them.
             const items = [];
             let order = 0;
             for (const [id, pattern] of [...this.channels]) {
                 const stream = order++;
+                const asked = this._queried.get(id);
+                let from = asked && asked.pattern === pattern ? asked.to : this._dispatchCycle;
+                // After a long stall (e.g. a suspended tab) skip ahead instead of firing a burst of late events.
+                if (this.timeAt(from) < now - 0.5) from = this.cycleAt(now);
+                // No new cycles to ask for (after a sharp slowdown the frontier can be far ahead): events
+                // held back still go out when their time comes (below).
+                if (to <= from) continue;
+                this._queried.set(id, { pattern, to });
                 if (!this.isAudible(id)) continue;
                 let events;
                 try {
@@ -6950,6 +7071,8 @@
                 // when that stream is muted, replaced or removed before it goes out.
                 for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i, id, pattern });
             }
+            for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
+            if (to > this._nextCycle) this._nextCycle = to;
             if (!this.isPlaying) return; // the last stream failed
             items.sort((a, b) => a.ev.begin - b.ev.begin || a.stream - b.stream || a.i - b.i);
             for (const it of items) it.seq = this._eventSeq++; // the tie-break, also against events held back
@@ -6967,29 +7090,41 @@
             // length is its length in cycles at the tempo in force at its onset,
             // fixed when it starts (as SuperDirt's sustain): a tempo change met
             // later does not stretch or shorten notes already sounding.
-            const timed = items.map((it) => ({
-                ...it,
-                time: this.timeAt(it.ev.begin) + (isNum(it.v.nudge) ? it.v.nudge : 0),
-                duration: (it.ev.end - it.ev.begin) / this._cpsAt(it.ev.begin),
-            }));
-            this._dispatch(timed, now);
+            for (const it of items) {
+                it.nudge = isNum(it.v.nudge) ? it.v.nudge : 0;
+                if (it.nudge < -NUDGE_EARLY) {
+                    // Earlier than the scheduler looks ahead for: it plays as early as it can (late).
+                    this._warnOnce(`nudge ${+it.nudge.toFixed(3)} is earlier than ${-NUDGE_EARLY} s, the most the scheduler can honour: those events play ${-NUDGE_EARLY} s early`);
+                    it.nudge = -NUDGE_EARLY;
+                }
+            }
+            this._dispatch(items, now);
         }
 
         /**
          * Sends the events whose time is within this tick's horizon, in the
-         * order they sound. One beyond it (nudged later, or after a slowdown)
-         * waits for the tick that reaches its time, so events from later ticks
-         * that sound before it go first. (A negative nudge cannot move an event
-         * before what was already sent: it is sent at once, at its time.) An
+         * order they sound. Events are known NUDGE_EARLY ahead of it, so one
+         * that a negative nudge (up to NUDGE_EARLY) moves earlier still goes
+         * out in order and on time; one beyond the horizon (nudged later, or
+         * after a slowdown) waits for the tick that reaches its time. An
          * event held back is dropped if its stream was muted, replaced or
-         * removed meanwhile.
+         * removed meanwhile. An event whose time has passed (after a stall)
+         * is skipped.
          */
-        _dispatch(timed, now) {
+        _dispatch(fresh, now) {
             const horizon = now + this.lookahead;
             const current = (it) => this.channels.get(it.id) === it.pattern && this.isAudible(it.id);
-            const all = this._nudged.filter(current).concat(timed);
+            const all = this._nudged.filter(current).concat(fresh);
+            // Times from the clock as it is now (a tempo change since an event was asked for applies).
+            for (const it of all) {
+                it.base = this.timeAt(it.ev.begin);
+                it.time = it.base + it.nudge;
+                it.duration = (it.ev.end - it.ev.begin) / this._cpsAt(it.ev.begin);
+            }
             all.sort((a, b) => a.time - b.time || a.seq - b.seq);
             this._nudged = all.filter((it) => it.time >= horizon);
+            const sent = this.cycleAt(horizon);
+            if (sent > this._dispatchCycle) this._dispatchCycle = sent;
             for (const it of all) {
                 if (it.time >= horizon) break;
                 if (it.time < now - 0.02) continue;
@@ -7081,6 +7216,7 @@
             this._txn = txn;
             this._txnCps = undefined;
             this._txnBanks = new Set(); // banks samples() stages in this code
+            this._txnBanksPending = false; // and whether it asks for a manifest that has not arrived
             // options.cps: the tempo the document brings (the editor's draft tempo). It is staged first, so
             // it applies only if the code commits, and a setCPS() in the code has the last word.
             if (isNum(options.cps) && options.cps > 0) this.setCPS(options.cps);
@@ -7116,12 +7252,17 @@
                     current = origin.get(p);
                     for (const ev of p.query(0, 4)) {
                         const v = asObject(ev.value);
+                        if (isNum(v.nudge) && v.nudge < -NUDGE_EARLY) {
+                            warnings.add(`nudge ${+v.nudge.toFixed(3)} is earlier than ${-NUDGE_EARLY} s, the most the scheduler can honour: those events play ${-NUDGE_EARLY} s early`);
+                        }
                         if (v.midi !== undefined || v.osc !== undefined || !v.s) continue;
                         const bank = this.sampleBanks.get(v.s);
                         if (bank) {
                             const pitched = this._pitchedFile(v.s, isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60);
                             if (this.audioContext) this._sampleBuffer(pitched ? pitched.url : this._sampleUrl(bank, v), false);
-                        } else if (!this.samples.has(v.s) && !this.isLoadingSamples() && !this._txnBanks.has(v.s)) {
+                        } else if (!this.samples.has(v.s) && !this._txnBanks.has(v.s) && !this._txnBanksPending && this._pendingRegistrations === 0) {
+                            // Unknown, unless a bank this code adds, or a manifest it (or code that plays) still waits
+                            // for, may hold it. A fetch left by code that was rejected does not count.
                             warnings.add(`Unknown sound "${v.s}"`);
                         }
                     }
@@ -8188,14 +8329,21 @@
             // editor (sampleFailures); a promise nobody awaits is not an unhandled rejection.
             const register = () => {
                 const seq = ++this._bankSeq;
-                const job = entry.plan ? Promise.resolve(this._registerBanks(entry.plan, seq))
-                    : entry.promise.then((plan) => this._registerBanks(plan, seq));
-                job.catch(() => { /* reported where the manifest failed */ });
+                if (entry.plan) {
+                    const done = Promise.resolve(this._registerBanks(entry.plan, seq));
+                    return done;
+                }
+                // A committed registration still waiting for its manifest: its banks may be any name.
+                this._pendingRegistrations++;
+                const job = entry.promise.then((plan) => this._registerBanks(plan, seq));
+                job.catch(() => { /* reported where the manifest failed */ }).finally(() => { this._pendingRegistrations--; });
                 return job;
             };
             if (this._txn) {
-                // Known names count as loading for the warnings of this evaluation.
+                // For the warnings of this evaluation: names it adds count as known, and a manifest it
+                // asks for that has not arrived means any name may come (see eval).
                 if (entry.plan) for (const bank of entry.plan) this._txnBanks.add(bank.name);
+                else this._txnBanksPending = true;
                 let settle;
                 const result = new Promise((resolve) => { settle = resolve; });
                 result.catch(() => { /* as above */ });
@@ -9783,11 +9931,20 @@
                 if (!note) return;
                 const off = toPerf(time + note.length);
                 out.send([0x90 | channel, note.key, note.velocity], at);
-                // A note-off from before a Stop (which could not be cancelled) lands inside this note: strike it again just after.
+                // A note-off from before a Stop (which could not be cancelled) lands inside this note: strike it
+                // again just after it, always strictly before this note's own note-off (no recovery when there
+                // is no room: the note then ends with the stale note-off, a little early).
                 const stale = this._staleOffAt(out, channel, note.key, now);
-                if (stale !== null && stale >= at && stale < off) out.send([0x90 | channel, note.key, note.velocity], stale + 1);
+                let recovery = null;
+                if (stale !== null && stale >= at && stale < off) {
+                    const r = stale + Math.min(1, (off - stale) / 2);
+                    if (r > stale && r < off) {
+                        recovery = r;
+                        out.send([0x90 | channel, note.key, note.velocity], r);
+                    }
+                }
                 out.send([0x80 | channel, note.key, 0], off);
-                this._trackMidi(out, { owner, note: { channel, key: note.key, velocity: note.velocity }, at, off }, now);
+                this._trackMidi(out, { owner, note: { channel, key: note.key, velocity: note.velocity }, at, off, recovery }, now);
             } catch (err) {
                 // An unplugged output throws: skip its events instead of stopping the scheduler.
                 this._warnOnce(`MIDI output ${JSON.stringify(out.name || String(v.midi))} could not be used (${err && err.message})`);
@@ -9849,6 +10006,8 @@
                         const off = [0x80 | r.note.channel, r.note.key, 0];
                         if (r.at <= now) out.send(off);              // sounding: ends now
                         else if (!cleared) out.send(off, r.at);      // could not be cancelled: ends as it starts
+                        // A recovery note-on still on its way (see _sendMidi) is ended as it arrives too.
+                        if (!cleared && r.note && r.recovery !== null && r.recovery !== undefined && r.recovery > now) out.send(off, r.recovery);
                         // Without clear(), its own note-off is still on its way: a note restarted on that key
                         // before then would be cut by it (see _sendMidi, which strikes it again).
                         if (!cleared) this._staleNoteOff(out, r.note.channel, r.note.key, r.off);
@@ -9858,6 +10017,9 @@
                         for (const r of keep) {
                             if (r.note) {
                                 if (r.at > now) out.send([0x90 | r.note.channel, r.note.key, r.note.velocity], r.at);
+                                if (r.recovery !== null && r.recovery !== undefined && r.recovery > now) {
+                                    out.send([0x90 | r.note.channel, r.note.key, r.note.velocity], r.recovery);
+                                }
                                 out.send([0x80 | r.note.channel, r.note.key, 0], r.off);
                             } else if (r.at > now) {
                                 out.send(r.data, r.at);

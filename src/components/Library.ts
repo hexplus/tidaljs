@@ -110,7 +110,10 @@ export function createLibrary(session: Session, storeSource?: Promise<Store>) {
       // still goes where it should, and its unsaved changes stay unsaved.
       if (session.documentId() === documentAtSave) {
         setCurrent(sketch);
-        setTitle(sketch.title);
+        // The title field shows the saved title, unless it was edited while the save was on its way:
+        // then the newer title stays, and (like newer code) counts as unsaved against the baseline,
+        // which is what was saved.
+        if (title().trim() === name) setTitle(sketch.title);
         markBaseline({ code: sketch.code, title: sketch.title, cps: sketch.cps });
       }
       await refresh();

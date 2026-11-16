@@ -656,5 +656,68 @@ for (const Port of [FakeOutput, OutputWithoutClear]) {
     eq(ws.sent.length, 0);
 }
 
+// =====================================================================
+// Review round 4: a recovery note-on never at or after its own note-off; tracked through another Stop.
+// =====================================================================
+{
+    // Times in ms of the fake clock: a note from 1000 to 1200; Stop at 1100 (no clear(): its note-off at 1200
+    // still arrives); restarted at 1150 until 1200.5, half a millisecond after that stale note-off.
+    setTime(1);
+    const t = makeEngine();
+    const port = new OutputWithoutClear('Keys');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 60, sustain: 0.2 }, 1.0, 0.2);
+    setTime(1.1);
+    t.stopAll();
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 60, sustain: 0.0505 }, 1.15, 0.0505);
+    const ons = port.heard().filter((m) => (m.data[0] & 0xf0) === 0x90 && m.data[2] > 0 && m.at > 1100).map((m) => m.at);
+    const ownOff = 1200.5;
+    ok(ons.every((at) => at < ownOff), 'every note-on before its own note-off: ' + ons.join());
+    eq(ons.length, 2, 'the restart and one recovery, between the stale off and its own');
+    ok(ons[1] > 1200 && ons[1] < ownOff);
+    setTime(2);
+    eq(port.hanging(), [], 'nothing hangs');
+}
+{
+    // No room for a recovery (its own note-off right at the stale one): none is sent; nothing hangs.
+    setTime(3);
+    const t = makeEngine();
+    const port = new OutputWithoutClear('Keys');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 62, sustain: 0.2 }, 3.0, 0.2);  // off at 3200
+    setTime(3.1);
+    t.stopAll();
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 62, sustain: 0.1 }, 3.1, 0.1);  // off at 3200 too
+    ok(port.heard().filter((m) => (m.data[0] & 0xf0) === 0x90 && m.data[2] > 0 && m.at >= 3100).every((m) => m.at < 3200));
+    setTime(4);
+    eq(port.hanging(), []);
+}
+{
+    // A recovery still queued when Stop comes again is ended as it arrives (it cannot be recalled).
+    setTime(5);
+    const t = makeEngine();
+    const port = new OutputWithoutClear('Keys');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 64, sustain: 0.2 }, 5.0, 0.2);  // off at 5200
+    setTime(5.1);
+    t.stopAll();
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Keys', note: 64, sustain: 0.3 }, 5.15, 0.3); // recovery queued at 5201
+    setTime(5.17);
+    t.stopAll();                                                       // before the recovery arrives
+    // After the second Stop nothing sounds: any note-on after 5170 is followed by its note-off at the same time.
+    const after = port.heard().filter((m) => m.at > 5170);
+    for (const m of after.filter((x) => (x.data[0] & 0xf0) === 0x90 && x.data[2] > 0)) {
+        ok(after.some((x) => (x.data[0] & 0xf0) === 0x80 && x.data[1] === 64 && x.at === m.at && after.indexOf(x) > after.indexOf(m)), 'ended as it arrives');
+    }
+    setTime(6);
+    eq(port.hanging(), [], 'nothing hangs after the second Stop');
+}
+
 Date.now = realDateNow;
 console.log(`output tests: ${passed} passed`);

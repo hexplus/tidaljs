@@ -61,6 +61,28 @@ test("a failed sample load is reported once, with a deliberate retry", async ({ 
   await expect.poll(() => manifestRequests).toBe(2);
 });
 
+test("a tempo set by an event survives a live edit of another stream; the document's tempo applies when it starts", async ({ page }) => {
+  await page.goto("/");
+  const cps = () => page.evaluate(() => (window as unknown as { tidal: { cps: number } }).tidal.cps);
+  // A one-time cps(2) event in d2 (cycle 0 only).
+  await setCode(page, 'd1(sound("bd*4"))\nd2(sound("cp").cps(2).playFor(0, 1))');
+  await playAndWait(page);
+  await expect.poll(cps).toBe(2);
+  // Edit only d1: the live update keeps the tempo the event set.
+  await setCode(page, 'd1(sound("bd*8"))\nd2(sound("cp").cps(2).playFor(0, 1))');
+  await page.waitForTimeout(1500);
+  await expect.poll(() => statusText(page)).toContain("Updated");
+  expect(await cps()).toBe(2);
+  // Changing the tempo on purpose (the tempo field) still applies at once.
+  await page.fill("#tempoInput", "1.2");
+  await expect.poll(cps).toBe(1.2);
+  // After Stop, Play starts the document again at its tempo.
+  await page.click("#stopBtn");
+  await page.fill("#tempoInput", "0.9");
+  await playAndWait(page);
+  await expect.poll(cps).toBe(2); // the cps(2) event at cycle 0 runs again
+});
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');

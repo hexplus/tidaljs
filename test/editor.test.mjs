@@ -203,6 +203,29 @@ eq(readDraftState(JSON.stringify({ baseline: base, title: 'T', cps: 0.7, sketchI
     await again;
     eq(b.saved.length, 2);
     ok(b.saved[0].id !== b.saved[1].id, 'two sketches, not one overwritten');
+
+    // A title typed while a save is on its way stays, and counts as unsaved; what was saved is the baseline.
+    const doc3 = { current: 'doc-E' };
+    globalThis.localStorage.data = {};
+    const c = deferredStore();
+    const session3 = fakeSession(doc3);
+    const libC = createLibrary(session3, Promise.resolve(c.store));
+    await tick();
+    c.waiting.list.shift()();
+    await tick();
+    libC.setTitle('One');
+    const pending = libC.save();
+    await tick();
+    libC.setTitle('Two'); // typed meanwhile
+    c.waiting.put.shift()();
+    await tick();
+    c.waiting.list.shift()();
+    await pending;
+    eq(c.saved[0].title, 'One', 'the save has the title it started with');
+    eq(libC.title(), 'Two', 'the newer title is kept');
+    eq(libC.dirty(), true, 'and is unsaved');
+    libC.setTitle('One');
+    eq(libC.dirty(), false, 'the baseline is what was saved');
     delete globalThis.localStorage;
 }
 

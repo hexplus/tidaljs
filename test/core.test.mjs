@@ -177,12 +177,13 @@ const reset = () => {
     t.eval('d1(sound("a*4"))\nd2(sound("b").cps("<1 2 2 2 2 2 2 2>"))');
     played = run(0, 0);
     const a = played.filter((e) => e.s === 'a');
-    // Cycle 0 at 1 cps from 0.05 s; cycle 1 starts at 1.05 s at 2 cps (the window ends at cycle 1.45).
-    eq(a.map((e) => e.time), [0.05, 0.3, 0.55, 0.8, 1.05, 1.175]);
-    eq(a.map((e) => e.duration), [0.25, 0.25, 0.25, 0.25, 0.125, 0.125]);
+    // Cycle 0 at 1 cps from 0.05 s; cycle 1 starts at 1.05 s at 2 cps. What sounds before the 1.5 s horizon goes
+    // out (events are asked for 0.2 s further, so cycle 1.5, at 1.3 s, is known in time).
+    eq(a.map((e) => e.time), [0.05, 0.3, 0.55, 0.8, 1.05, 1.175, 1.3]);
+    eq(a.map((e) => e.duration), [0.25, 0.25, 0.25, 0.25, 0.125, 0.125, 0.125]);
     // Continuity: the next window carries on from the new mapping, with no repeats or gaps.
     const more = run(25, 400).filter((e) => e.s === 'a');
-    eq(more[0].time, 1.3);
+    eq(more[0].time, 1.425);
     for (let i = 1; i < more.length; i++) eq(+(more[i].time - more[i - 1].time).toFixed(6), 0.125);
 
     // setCPS while playing: the playhead does not jump, and what was scheduled keeps its times.
@@ -478,6 +479,72 @@ const reset = () => {
     t.eval('const drums = sound("bd*4").every(2, (x) => x.fast(2))\nconst fx = (p) => p.gain(0.5)\nxfadeIn(1, 8, fx(sound("sn")))\nd2(drums)', live);
     eq(t.channels.get('d1'), d1, 'd1 runs on');
     eq(t.channels.get('d2').query(1, 2).length, 4, 'd2 changed');
+    t.stopAll();
+}
+
+// ---------------------------------------------------------------- Review round 4
+{
+    // 1. A fetch left by a rejected evaluation does not hide an unknown sound in the next one.
+    reset();
+    let release;
+    globalThis.fetch = (url) => (url.endsWith('.json')
+        ? new Promise((resolve) => { release = () => resolve({ ok: true, url, json: async () => ({ hang: ['h.wav'] }) }); })
+        : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    eq(t.eval('samples("https://hang.test/kit/strudel.json")\nd1(sound("bd"))\nthrow new Error("rejected")').success, false);
+    ok(t.isLoadingSamples(), 'its manifest is still on its way');
+    t.eval('d1(sound("bd*2"))');
+    const working = t.channels.get('d1');
+    const r = t.eval('d1(sound("bdd*2"))', { keepOnWarnings: true, keepUnchanged: true });
+    eq([r.pending, r.warnings], [true, ['Unknown sound "bdd"']]);
+    eq(t.channels.get('d1'), working, 'the working stream stays');
+    // Code that asks for that manifest itself: any name may come from it, so no warning yet.
+    eq(t.eval('samples("https://hang.test/kit/strudel.json")\nd1(sound("hang"))', { keepOnWarnings: true }).warnings, []);
+    release();
+    await t.whenSamplesLoaded();
+}
+{
+    // 4. Writes the analysis must see: an unused IIFE, a class extends expression, a write in another stream.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    const gain = () => t.channels.get('d1').query(0, 1)[0].value.gain;
+    t.eval('const config = { level: 0.2 }\nconst unused = (() => { config.level = 0.9 })()\nd1(sound("bd").gain(config.level))');
+    t.eval('const config = { level: 0.2 }\nconst unused = (() => { config.level = 0.5 })()\nd1(sound("bd").gain(config.level))', live);
+    eq(gain(), 0.5, 'unused IIFE');
+    t.eval('const config = { level: 0.2 }\nconst mix = (v) => { config.level = v; return class {} }\nclass A extends mix(0.9) {}\nd1(sound("bd").gain(config.level))');
+    t.eval('const config = { level: 0.2 }\nconst mix = (v) => { config.level = v; return class {} }\nclass A extends mix(0.4) {}\nd1(sound("bd").gain(config.level))', live);
+    eq(gain(), 0.4, 'class extends expression');
+    t.eval('const config = { level: 0.2 }\nd2(sound("hh").gain((config.level = 0.9, 1)))\nd1(sound("bd").gain(config.level))');
+    t.eval('const config = { level: 0.2 }\nd2(sound("hh").gain((config.level = 0.3, 1)))\nd1(sound("bd").gain(config.level))', live);
+    eq(gain(), 0.3, 'a write in another stream');
+    // A helper that only computes, called by another stream, is not a write: that stream's transition runs on.
+    t.eval('const soft = (p) => { const level = 0.5; return p.gain(level) }\nxfadeIn(1, 8, sound("sn"))\nd2(soft(sound("hh")))');
+    const d1 = t.channels.get('d1');
+    t.eval('const soft = (p) => { const level = 0.5; return p.gain(level) }\nxfadeIn(1, 8, sound("sn"))\nd2(soft(sound("hh*2")))', live);
+    eq(t.channels.get('d1'), d1, 'calling a pure helper is not a write');
+    t.stopAll();
+}
+{
+    // 7. Negative nudge: up to 0.2 s, events are asked for early enough to play on time; beyond, a diagnostic.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*2").nudge(-0.15))');
+    let played = run(0, 2000).map((e) => e.time);
+    ok(played.includes(0.9) && played.includes(1.4) && played.includes(1.9), 'on time, 0.15 s early: ' + played.join());
+    reset();
+    const r = t.eval('d1(sound("a*2").nudge(-0.5))');
+    ok(r.warnings.some((w) => /nudge -0\.5 is earlier than -0\.2 s/.test(w)), 'a warning for what cannot be honoured');
+    played = run(0, 2000).map((e) => e.time);
+    ok(played.includes(0.85) && played.includes(1.35), 'played as early as it can: 0.2 s');
+    // A stream replaced while events were asked for ahead: no gap and no repeat at the switch.
+    reset();
+    t.eval('d1(sound("x*8"))');
+    const before = run(0, 500);
+    t.eval('d1(sound("y*8"))');
+    const after = run(525, 1500);
+    const all = before.concat(after).map((e) => e.time);
+    eq(new Set(all).size, all.length, 'no event twice');
+    for (let i = 1; i < all.length; i++) eq(+(all[i] - all[i - 1]).toFixed(6), 0.125, 'no gap at ' + all[i]);
+    ok(after.some((e) => e.s === 'y') && after.every((e, i) => i === 0 || e.s === 'y' || after[i - 1].s === 'x'), 'x then y');
     t.stopAll();
 }
 

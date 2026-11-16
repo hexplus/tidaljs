@@ -9,6 +9,7 @@ import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
 import { TidalJS, type ControlLayout, type LiveControl, type StreamInfo, type Tidal } from "./engine.ts";
 import { newDocumentId, readDocument, writeDocument } from "./document.ts";
+import { setsTempo } from "./drafts.ts";
 import { LOCAL, approve, describeOrigin, holds, isExternal, type Approval, type Provenance } from "./provenance.ts";
 import { Tickets, singleFlight } from "./runs.ts";
 import { scanCode, type CodeScan } from "./share.ts";
@@ -173,6 +174,8 @@ export function createSession() {
   const plays = new Tickets();
   /** Counts the documents put in the editor (sketches, examples, imports, links); typing does not count. */
   let documentRevision = 0;
+  /** True when the document's tempo should go in with the next run: a new document, or one restored on load. */
+  let draftTempoPending = true;
   /** The approval of the external code in the editor, for one text of one document. */
   let approval: Approval | null = null;
   /** Counts status messages, so a late message (samples loaded) does not replace a newer one. */
@@ -324,13 +327,19 @@ export function createSession() {
   /** Evaluates the code and reports the result. Live updates keep the old music on warnings. */
   function evaluate(engine: Tidal, live: boolean, text: string) {
     // Live updates keep streams whose code has not changed (and their transitions) as they are.
-    // The document's tempo goes in with the code: it applies only if the evaluation commits.
-    const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live, cps: tempo() });
+    // The document's tempo goes in with the code only when the document starts (nothing plays, or it was
+    // just opened) or its tempo was set on purpose: then it applies only if the evaluation commits. Other
+    // runs leave the tempo as it is, so one an event changed (a cps control) survives editing another line.
+    const startTempo = draftTempoPending || !engine.isPlaying;
+    const result = engine.eval(text, { keepOnWarnings: live, keepUnchanged: live, cps: startTempo ? tempo() : undefined });
     lastRunCode = text;
     markPatternsChanged();
     syncPlaying();
-    // After a commit the document's tempo is what plays (the code may set its own); otherwise it is kept.
-    if (result.success) setTempo(+engine.cps.toFixed(3));
+    if (result.success) {
+      draftTempoPending = false;
+      // The document's tempo is what this run set: its own (applied above) or the code's setCPS.
+      if (startTempo || setsTempo(text)) setTempo(+engine.cps.toFixed(3));
+    }
     if (editor.getValue() === text) editor.showProblems(result, text);
     const where = result.location ? " (line " + result.location.line + ")" : "";
 
@@ -501,10 +510,12 @@ export function createSession() {
     }
   }
 
-  /** The tempo field: the document's tempo and, at once, what plays. */
+  /** The tempo field: the document's tempo and, at once, what plays (a deliberate change). */
   function changeTempo(cps: number) {
     setTempo(cps);
     tidal?.setCPS(cps);
+    // Without an engine yet, the next run applies it.
+    if (!tidal) draftTempoPending = true;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(persistDocument, SAVE_DELAY);
   }
@@ -523,6 +534,7 @@ export function createSession() {
     // The tempo it came with becomes the document's tempo (saved, exported and shared from now on).
     // Playback takes it only when the code next runs successfully, so opening never changes the music.
     if (cps !== undefined && !/setCPS|setcps|setTempo|setbpm/.test(code)) setTempo(cps);
+    draftTempoPending = true; // a new document starts at its tempo with its first successful run
     setDocumentId(newDocumentId());
     setProvenance(from); // writes the new document's snapshot at once (code, provenance, identity, tempo)
     setCurrentExample(isExternal(from) ? null : exampleFor(code, null));

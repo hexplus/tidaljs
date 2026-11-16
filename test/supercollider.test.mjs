@@ -948,7 +948,8 @@ passed++;
  * The golden fixtures: a SuperCollider file and the events it plays, compared one by one (within `windows`, in
  * seconds, when given: else from 0 to `seconds`). `sounding`: [time, n] pairs, how many notes sound at that time.
  */
-for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset', 'stop-replay', 'periodic-gaps', 'overlap', 'second-clock']) {
+for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset', 'stop-replay', 'periodic-gaps', 'overlap', 'second-clock',
+  'quant-onsets', 'quant-stop', 'pdef-routine-order', 'pdef-stop-routines']) {
   const dir = new URL('./fixtures/supercollider/', import.meta.url);
   const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
   const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
@@ -1079,6 +1080,51 @@ for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset'
 {
   const { events } = play('p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\nPdef(\\a, Pbind(\\degree, 7, \\dur, 1));\nRoutine({ 0.5.wait; p.play(quant: 2); Pdef(\\a).play; }).play;', 4);
   eq(events.map((e) => [e.time, e.note]), [[1, 72], [2, 60], [2, 72], [3, 62], [3, 72]]);
+}
+// One quant rule at the top of the file and in routines (the fixture quant-onsets checks more): the same .play at
+// time 0 starts at the same beat (the phase counts at the top of the file too), a negative quant counts bars of 4
+// beats, a phase larger than the quant is added whole (beat 2.5 for [1, 2.5]), and Pdef(\x).quant = q is its quant.
+{
+  const p = 'p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\n';
+  const times = (code, seconds = 8) => play(p + code, seconds).events.map((e) => [e.time, e.note]);
+  for (const quant of ['[4, 1.5]', '[2, 0.5]', '[1, 2.5]', '-1']) {
+    const top = times('p.play(quant: ' + quant + ');');
+    eq(times('Routine({ p.play(quant: ' + quant + ') }).play;'), top, 'quant ' + quant + ' in a routine at time 0 as at the top of the file');
+    eq(times('Routine({ Routine({ p.play(quant: ' + quant + ') }).play(TempoClock(3)) }).play;'), top, 'quant ' + quant + ' in a routine on another clock');
+  }
+  eq(times('p.play(quant: [4, 1.5]);', 4), [[1.5, 60], [2.5, 62], [3.5, 60]]);
+  eq(times('p.play(quant: [1, 2.5]);', 4), [[2.5, 60], [3.5, 62]]);
+  eq(times('Routine({ 0.5.wait; p.play(quant: -1) }).play;', 6), [[4, 60], [5, 62]]);
+  eq(times('Pdef(\\a, p);\nPdef(\\a).quant = 4;\nRoutine({ 0.5.wait; Pdef(\\a).play }).play;', 6), [[4, 60], [5, 62]]);
+}
+// A player stopped while it waits for its quant never plays (the fixture quant-stop checks more): in a routine
+// (played at beat 0.5 with quant 4, stopped at beat 1.5), and at the top of the file (waiting for beat 2, stopped
+// at beat 1). Played again after the stop, a Pdef starts on its own quant from the second play.
+{
+  const p = 'p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\n';
+  const nested = play(p + 'Routine({ 0.5.wait; x = p.play(quant: 4); 1.wait; x.stop; }).play;', 12);
+  eq(nested.events, []);
+  ok(/Line 2: a pattern is stopped at beat 1.5 while it waits for its quant \(beat 4\): it does not play then/.test(nested.js), 'the code says why it does not play');
+  eq(play(p + 'x = p.play(quant: [4, 2]);\nRoutine({ 1.wait; x.stop; }).play;', 12).events, []);
+  const again = play(p + 'Pdef(\\a, p);\nRoutine({ 0.5.wait; Pdef(\\a).play(quant: 4); 1.wait; Pdef(\\a).stop; 1.wait; Pdef(\\a).play }).play;', 6);
+  eq(again.events.map((e) => [e.time, e.note]), [[3, 60], [4, 62], [5, 60]]);
+}
+// Pdef plays are taken in the order of their times, whichever routine (and however far in the file) calls them: a
+// later routine that starts the Pdef before an earlier routine plays it again leaves one voice at every onset (the
+// fixtures pdef-routine-order and pdef-stop-routines check more).
+{
+  const code = 'Pdef(\\a, Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 0.5));\nRoutine({ 4.wait; Pdef(\\a).play; loop { 8.wait; Pdef(\\a).play } }).play;\nRoutine({ 1.wait; Pdef(\\a).play }).play;';
+  const { events } = play(code, 600);
+  const voices = new Map();
+  for (const e of events) voices.set(e.time, (voices.get(e.time) ?? 0) + 1);
+  eq([...voices.values()].filter((n) => n !== 1), [], 'one voice at every onset');
+  eq(voices.size, 1198, 'an event every half beat from beat 1');
+  // Started by one routine, stopped by another and played again by a third: it restarts on the beat after the play.
+  const restart = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 1));\nRoutine({ 6.5.wait; Pdef(\\a).play }).play;\nRoutine({ 3.5.wait; Pdef(\\a).stop }).play;\nRoutine({ Pdef(\\a).play }).play;', 10);
+  eq(restart.events.map((e) => [e.time, e.note]), [[0, 60], [1, 64], [2, 67], [3, 60], [7, 60], [8, 64], [9, 67]]);
+  // Two routines play it at the same beat: the second finds it playing (one voice).
+  const same = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1));\nRoutine({ 2.wait; Pdef(\\a).play }).play;\nRoutine({ 2.wait; Pdef(\\a).play }).play;', 6);
+  eq(same.events.map((e) => [e.time, e.note]), [[2, 60], [3, 64], [4, 60], [5, 64]]);
 }
 // Clocks: a pattern played in a routine on TempoClock(2) without a clock plays on the default clock (1 beat per
 // second); the routine stops it 1.5 of its beats (0.75 s) after each start, every 4 of its beats (2 s), for ever.

@@ -66,14 +66,28 @@ export interface Playback {
   clock: ClockV;
   /** When .play was called (0 at the top of the file). */
   at: Moment;
-  /** quant: it starts on the next multiple of `quant` beats of its clock, plus `phase` (0: at once). */
+  /**
+   * quant: it starts on the next multiple of `quant` beats of its clock at or after `at`, plus `phase` (quant 0:
+   * `phase` beats after `at`), as TempoClock.nextTimeOnGrid does, wherever it is played from (emit.ts, onsetOf).
+   */
   quant: number;
   phase: number;
-  /** Where it is stopped (each x.stop, Pdef(\x).stop): it ends at the first of them after its start. */
+  /**
+   * Where it is stopped (each x.stop): it ends at the first of them after `at`; a stop before its onset (while it
+   * waits for its quant) means it never plays. A Pdef's stops are the Pdef's own (`pdefStops`).
+   */
   stops: Moment[];
   /** x.play or x.resume after x.stop: the playback it continues (its stream goes on from where it stopped). */
   resumes?: number;
+  /** Its order among the plays and stops of the file (statement by statement, each routine in turn). */
+  seq: number;
   line: number;
+}
+
+/** Pdef(\x).stop: when, and its order among the plays and stops of the file (as `Playback.seq`). */
+export interface PdefStop {
+  at: Moment;
+  seq: number;
 }
 
 /** A timed event from a routine: Synth(...) or an event's play. */
@@ -263,6 +277,15 @@ export class Interpreter implements Host {
   readonly played: PlayRecord[] = [];
   /** Every playback of a pattern, in the order .play was called. */
   readonly playbacks: Playback[] = [];
+  /**
+   * Each Pdef's stops (Pdef(\x).stop), in the order they were called. Which of its playbacks a stop ends is decided
+   * on the common timeline when the file is played (emit.ts), since the routines are run here one after another.
+   */
+  readonly pdefStops = new Map<string, PdefStop[]>();
+  /** Pdef(\x).quant = q: the quant of its plays that give none. */
+  private readonly pdefQuants = new Map<string, Value>();
+  /** How many plays and stops there were so far (`Playback.seq`). */
+  private seq = 0;
   readonly defaultClock = new ClockV(1);
   private readonly global = new Scope();
   private readonly envir = new Map<string, Value>();
@@ -1010,8 +1033,9 @@ export class Interpreter implements Host {
         // from the start of the pattern (a Pdef played again after it stopped starts again too). A pattern's play
         // gives its player (x.stop stops that playback); a Pdef's gives the Pdef.
         const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
-        // A Pdef starts on the next beat by default (EventPatternProxy.defaultQuant is 1); a pattern at once.
-        const quant = quantOf(kwargs.quant ?? args[2] ?? (p instanceof PdefRef ? 1 : 0));
+        // A Pdef starts on the next beat by default (EventPatternProxy.defaultQuant is 1; Pdef(\x).quant = q gives
+        // it its own); a pattern at once.
+        const quant = quantOf(kwargs.quant ?? args[2] ?? (p instanceof PdefRef ? this.pdefQuants.get(p.key) ?? 1 : 0));
         // A Pdef that plays already is not started again (a new definition plays in its player): at the top of the
         // file, where nothing has ended yet, here; in a routine, when it is played (emit.ts).
         if (p instanceof PdefRef && !this.routine && this.played.some((r) => r.pattern instanceof PdefRef && r.pattern.key === p.key)) return p;
@@ -1019,13 +1043,31 @@ export class Interpreter implements Host {
         return p instanceof PdefRef ? p : new PlayerV(index);
       }
       case "stop": {
-        // Pdef(\x).stop stops its player: every playback of it that is playing. (A Pbind has no stop in
-        // SuperCollider; here it stops its last playback.)
-        const same = (q: Value | undefined) => q === p || (q instanceof PdefRef && p instanceof PdefRef && q.key === p.key);
-        const playing = this.playbacks.map((_, i) => i).filter((i) => same(this.playbacks[i].pattern) && this.isPlaying(i));
-        for (const i of p instanceof PdefRef ? playing : playing.slice(-1)) this.stopPlayback(i);
+        if (p instanceof PdefRef) {
+          // Pdef(\x).stop stops its player, whichever routine started it: the Pdef's plays and stops are taken in
+          // the order of their times when the file is played (emit.ts). At the top of the file it also takes out
+          // the Pdef's plays at the top of the file (as stopPlayback does).
+          if (!this.routine) {
+            for (let r = this.played.length - 1; r >= 0; r--) {
+              const q = this.played[r].pattern;
+              if (this.played[r].playback !== undefined && q instanceof PdefRef && q.key === p.key) this.played.splice(r, 1);
+            }
+          }
+          const list = this.pdefStops.get(p.key) ?? [];
+          list.push({ at: this.now(), seq: this.seq++ });
+          this.pdefStops.set(p.key, list);
+          return p;
+        }
+        // A Pbind has no stop in SuperCollider; here it stops its last playback.
+        const playing = this.playbacks.map((_, i) => i).filter((i) => this.playbacks[i].pattern === p && this.isPlaying(i));
+        for (const i of playing.slice(-1)) this.stopPlayback(i);
         return p;
       }
+      case "quant_": {
+        if (p instanceof PdefRef) this.pdefQuants.set(p.key, args[0] ?? null);
+        return p;
+      }
+      case "quant": return p instanceof PdefRef ? this.pdefQuants.get(p.key) ?? 1 : 0;
       case "repeat": case "loop": return new Pn(p, method === "loop" ? Infinity : num(args[0], Infinity));
       case "stutter": case "dup": return new Pdup(args[0] ?? 2, p);
       case "collect": return args[0] instanceof SCFunc ? new Pcollect("Pcollect", args[0], p) : p;
@@ -1033,7 +1075,7 @@ export class Interpreter implements Host {
       case "reject": return args[0] instanceof SCFunc ? new Pcollect("Preject", args[0], p) : p;
       case "finDur": return new Pfindur(num(args[0], 4), p);
       case "fin": return new Pfin(args[0] ?? 1, p);
-      case "asStream": case "iter": case "trace": case "quant_": case "fadeTime_": case "source": return p;
+      case "asStream": case "iter": case "trace": case "fadeTime_": case "source": return p;
       case "embedInStream": return this.advance(0);
       case "asArray": case "all": {
         const s = new Stream(p, { host: this });
@@ -2338,7 +2380,7 @@ export class Interpreter implements Host {
   /** A new playback of a pattern, from now: returns its index. */
   private recordPattern(p: Value, clock: ClockV, line: number, label: string, [quant, phase] = [0, 0], resumes?: number): number {
     const index = this.playbacks.length;
-    this.playbacks.push({ pattern: p, clock, at: this.now(), quant, phase, stops: [], line, ...(resumes === undefined ? {} : { resumes }) });
+    this.playbacks.push({ pattern: p, clock, at: this.now(), quant, phase, stops: [], seq: this.seq++, line, ...(resumes === undefined ? {} : { resumes }) });
     if (this.routine) {
       this.routine.events.push({ time: this.routine.time, event: new SCEvent([["__pattern", p as Value], ["__line", line], ["__playback", index]]) });
       return index;
@@ -2517,12 +2559,15 @@ function seconds(m: Moment): number {
   return m.beats / (m.clock.tempo > 0 ? m.clock.tempo : 1);
 }
 
+/** A TempoClock's beatsPerBar (4: beatsPerBar_ is not followed). A negative quant is that many bars. */
+const BEATS_PER_BAR = 4;
+
 /** quant as [quant, phase]: a number, or [quant, phase, timingOffset]. */
 function quantOf(v: Value | undefined): [number, number] {
   const list = Array.isArray(v) ? v : [v ?? 0];
-  const q = typeof list[0] === "number" && list[0] > 0 && Number.isFinite(list[0]) ? list[0] : 0;
+  const q = typeof list[0] === "number" && Number.isFinite(list[0]) ? list[0] : 0;
   const phase = typeof list[1] === "number" && Number.isFinite(list[1]) ? list[1] : 0;
-  return [q, q > 0 ? phase : 0];
+  return [q < 0 ? -q * BEATS_PER_BAR : q, phase];
 }
 
 /** A routine's events as an event pattern: each event at its time, then rests. */

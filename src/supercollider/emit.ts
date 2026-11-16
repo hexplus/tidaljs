@@ -7,7 +7,7 @@
  */
 import { CONTROL_NAMES } from "../data/signatures.ts";
 import { phase, tick } from "./budget.ts";
-import { describeText, degreeToKey, gcd, SCALES, TooMuchWork, type Interpreter, type Playback, type PlayRecord } from "./interpreter.ts";
+import { describeText, degreeToKey, gcd, SCALES, TooMuchWork, type Interpreter, type Moment, type Playback, type PlayRecord } from "./interpreter.ts";
 import { advanceOf, DONE, ownDelta, PdefRef, Stream } from "./patterns.ts";
 import { analyseSynthDef, envSignalOf, FOLLOWABLE, isEffectControl, lfoSignalOf, mapSignal, soundByName, TIDAL_SOUNDS, type EnvSignal, type Fixed, type LfoSignal, type SynthInfo } from "./synthdef.ts";
 import {
@@ -139,12 +139,27 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
   const restsBySrc = new Map<string, SimEvent[]>();
   const reach = new Map<string, Reach>();
   const simCtx: SimCtx = { interp, tempo, note, streams: new Map(), pdefs: new Map() };
+  // Each record is simulated in turn, but a Pdef's play waits (the generator yields) until every play called before
+  // it on the common timeline, from whichever routine, has been decided: whether a Pdef plays already depends on
+  // the plays and stops before it in time, not in the order of the file.
+  const sims: Sim[] = new Array(played.length);
+  const waiting: { gen: Generator<Turn, Sim, void>; index: number; turn: Turn }[] = [];
+  const step = (gen: Generator<Turn, Sim, void>, index: number) => {
+    const r = gen.next();
+    if (r.done) sims[index] = r.value;
+    else waiting.push({ gen, index, turn: r.value });
+  };
+  for (const [index, rec] of played.entries()) step(simulate(simCtx, rec, index, tempo / clockTempo(rec.clock)), index);
+  while (waiting.length) {
+    let k = 0;
+    for (let i = 1; i < waiting.length; i++) if (before(waiting[i].turn, waiting[k].turn)) k = i;
+    const [next] = waiting.splice(k, 1);
+    step(next.gen, next.index);
+  }
   // Whether something plays on past where it was followed (a routine that loops forever, even when each pattern
   // it starts ends): then the piece does not end.
   let open = false;
-  for (const [index, rec] of played.entries()) {
-    const scale = tempo / (rec.clock.tempo > 0 ? rec.clock.tempo : 1);
-    const sim = simulate(simCtx, rec, index, scale);
+  for (const sim of sims) {
     if (sim.open) open = true;
     for (const [src, r] of sim.reach) mergeReach(reach, src, r);
     for (const e of sim.events) {
@@ -286,8 +301,10 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
       body += span > 1 ? "\n  .slow(" + ratioCode(span) + ")" : "\n  .fast(" + ratioCode(1 / span) + ")";
     }
     // The written loop starts at w.start: shifted there when that is not where its loops fall anyway.
-    const late = w.rhythm ? w.start : mod(w.start, w.period);
-    if (late > 1e-9 && (w.rhythm || w.period - late > 1e-9)) body += "\n  .late(" + cycles(late) + ")";
+    // Controls over several loops of the rhythm start there too: the shift is modulo all of them (w.span).
+    const loopSpan = w.span ?? w.period;
+    const late = w.rhythm ? w.start : mod(w.start, loopSpan);
+    if (late > 1e-9 && (w.rhythm || loopSpan - late > 1e-9)) body += "\n  .late(" + cycles(late) + ")";
     // When it plays: from its start (its first event or rest), until it stops.
     const from = part.drone ? 0 : Math.max(0, part.start);
     if (part.end !== null) {
@@ -441,35 +458,88 @@ interface SimCtx {
   note: (s: string) => void;
   /** Each playback's stream where it stopped: x.resume (or x.play) after x.stop goes on from there. */
   streams: Map<number, Stream>;
-  /** When each Pdef played (from, to: null while it plays on), in beats of the common timeline. */
-  pdefs: Map<string, [number, number | null][]>;
+  /**
+   * Each Pdef's playbacks so far, in the order of their plays: when it was played (in beats of the common timeline)
+   * and its order in the file (`Playback.seq`), and when it stopped playing (stopped or ran out; null: it plays on).
+   */
+  pdefs: Map<string, { at: number; seq: number; end: number | null }[]>;
+}
+
+/** A Pdef's play waiting for its turn: when it was called, in beats of the common timeline, and its order in the file. */
+interface Turn {
+  at: number;
+  seq: number;
+}
+
+/** Whether `a` happens before `b`: earlier, or at the same time and earlier in the file. */
+function before(a: Turn, b: Turn): boolean {
+  return a.at < b.at - 1e-9 || (Math.abs(a.at - b.at) <= 1e-9 && a.seq < b.seq);
+}
+
+function clockTempo(clock: { tempo: number }): number {
+  return clock.tempo > 0 ? clock.tempo : 1;
+}
+
+/** A moment (beats of a clock) in beats of the common timeline. */
+function beatsOf(m: Moment, tempo: number): number {
+  return m.beats * tempo / clockTempo(m.clock);
 }
 
 /**
- * Whether a Pdef plays already at `at` (in beats of the common timeline): then its play does nothing, as in
- * SuperCollider. Otherwise `played` notes when this playback plays (once it was played).
+ * TempoClock.nextTimeOnGrid: the first multiple of `quant` at or after `beats`, plus `phase` (quant 0: `phase`
+ * after `beats`), never before `beats`. One path for every .play, at the top of the file or in a routine.
  */
-function pdefPlaying(ctx: SimCtx, pattern: Value | undefined, at: number): ((sim: Sim) => void) | null | undefined {
-  if (!(pattern instanceof PdefRef)) return undefined;
-  const list = ctx.pdefs.get(pattern.key) ?? [];
-  if (list.some(([from, to]) => at >= from - 1e-9 && (to === null || at < to - 1e-9))) return null;
-  return (sim) => {
-    list.push([at, sim.end]);
-    ctx.pdefs.set(pattern.key, list);
+function onGrid(beats: number, quant: number, phase: number): number {
+  if (!(quant > 0)) return beats + Math.max(0, phase);
+  const p = phase < 0 ? ((phase % quant) + quant) % quant : phase;
+  const at = Math.ceil((beats - (p % quant)) / quant - 1e-9) * quant + p;
+  return Math.max(beats, at);
+}
+
+/** When a playback starts, in beats of the common timeline: its .play's time on its clock's grid. */
+function onsetOf(pb: Playback, tempo: number): number {
+  const own = tempo / clockTempo(pb.clock);
+  return onGrid(beatsOf(pb.at, tempo) / own, pb.quant, pb.phase) * own;
+}
+
+/**
+ * Whether a playback plays, and until when (in beats of the common timeline; undefined: until it runs out). A
+ * pattern's playback ends at its first stop (x.stop) after its .play. A Pdef's play does nothing while the Pdef
+ * plays already (from an earlier play, until it stopped or ran out), as in SuperCollider; otherwise it ends at the
+ * first Pdef(\x).stop after it. A stop before the onset (while the player waits for its quant) means it never
+ * plays: it ends at its onset. `done` notes when a Pdef's playback stopped playing, once it was played. null: the
+ * play does nothing.
+ */
+function decide(ctx: SimCtx, pb: Playback | undefined, onset: number): { until?: number; done: (sim: Sim) => void } | null {
+  const none = () => {};
+  if (!pb) return { done: none };
+  const tempo = ctx.tempo;
+  const call: Turn = { at: beatsOf(pb.at, tempo), seq: pb.seq };
+  const pdef = pb.pattern instanceof PdefRef ? pb.pattern.key : null;
+  const list = pdef === null ? [] : ctx.pdefs.get(pdef) ?? [];
+  if (list.some((p) => before(p, call) && (p.end === null || call.at < p.end - 1e-9))) return null;
+  let stop: number | undefined;
+  const stops = pdef === null ? pb.stops.map((at) => ({ at, seq: Infinity })) : ctx.interp.pdefStops.get(pdef) ?? [];
+  for (const s of stops) {
+    const at = beatsOf(s.at, tempo);
+    if (before(call, { at, seq: s.seq }) && (stop === undefined || at < stop)) stop = at;
+  }
+  if (stop !== undefined && stop < onset - 1e-9) {
+    ctx.note("Line " + pb.line + ": " + (pdef === null ? "a pattern" : "Pdef(\\" + pdef + ")") + " is stopped at beat " + fmt(stop)
+      + " while it waits for its quant (beat " + fmt(onset) + "): it does not play then, as in SuperCollider.");
+  }
+  return {
+    ...(stop === undefined ? {} : { until: Math.max(onset, stop) }),
+    done: (sim) => {
+      if (pdef === null) return;
+      // It stops playing where it is stopped (before its onset too) or where it runs out, whichever comes first.
+      list.push({ ...call, end: stop === undefined ? sim.end : Math.min(stop, sim.end ?? Infinity) });
+      ctx.pdefs.set(pdef, list);
+    },
   };
 }
 
-/** Where a playback is stopped, in beats of the common timeline: the first stop at or after its start. */
-function stopOf(pb: Playback, start: number, tempo: number): number | undefined {
-  let stop: number | undefined;
-  for (const s of pb.stops) {
-    const at = s.beats * tempo / (s.clock.tempo > 0 ? s.clock.tempo : 1);
-    if (at >= start - 1e-9 && (stop === undefined || at < stop)) stop = at;
-  }
-  return stop === undefined ? undefined : Math.max(start, stop);
-}
-
-function simulate(ctx: SimCtx, rec: PlayRecord, index: number, scale: number): Sim {
+function* simulate(ctx: SimCtx, rec: PlayRecord, index: number, scale: number): Generator<Turn, Sim, void> {
   const { interp } = ctx;
   const out: SimEvent[] = [];
   if (rec.kind === "event" && rec.event) {
@@ -482,12 +552,14 @@ function simulate(ctx: SimCtx, rec: PlayRecord, index: number, scale: number): S
   const source = rec.pattern;
   if (!isPattern(source)) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
   const pb = rec.playback === undefined ? undefined : interp.playbacks[rec.playback];
-  const until = pb ? stopOf(pb, rec.start * scale, ctx.tempo) : undefined;
-  const pdef = pdefPlaying(ctx, pb?.pattern, rec.start * scale);
-  if (pdef === null) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
-  const sim = run(ctx, source, rec.start, rec.line, scale, out, 0, { endless: rec.endless, ...(until === undefined ? {} : { until: until / scale }) },
+  // A pattern played at the top of the file starts on its clock's grid, as one played in a routine (run).
+  const start = pb ? onsetOf(pb, ctx.tempo) : rec.start * scale;
+  if (pb?.pattern instanceof PdefRef) yield { at: beatsOf(pb.at, ctx.tempo), seq: pb.seq };
+  const launch = decide(ctx, pb, start);
+  if (launch === null) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
+  const sim = yield* run(ctx, source, start / scale, rec.line, scale, out, 0, { endless: rec.endless, ...(launch.until === undefined ? {} : { until: launch.until / scale }) },
     (rec.kind === "routine" ? "R" : "P") + index, rec.playback);
-  pdef?.(sim);
+  launch.done(sim);
   return sim;
 }
 
@@ -519,7 +591,7 @@ interface Life {
  * take no time, again and again. `key` names this playback: its sources are its patterns in it (`src@key`).
  * `playback`: the pattern's playback (where it is stopped; a resumed one goes on with the stream it continues).
  */
-function run(ctx: SimCtx, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number, life: Life, key: string, playback?: number): Sim {
+function* run(ctx: SimCtx, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number, life: Life, key: string, playback?: number): Generator<Turn, Sim, void> {
   const { interp, note } = ctx;
   const resumes = playback === undefined ? undefined : interp.playbacks[playback]?.resumes;
   const stream = (resumes !== undefined ? ctx.streams.get(resumes) : undefined) ?? new Stream(source, { host: interp });
@@ -586,24 +658,24 @@ function run(ctx: SimCtx, source: Value, start: number, line: number, scale: num
     if (ev === DONE || !(ev instanceof SCEvent)) return finish(t * scale, t * scale, null);
     const sub = ev.get("__pattern");
     if (sub !== undefined && depth < 4) {
-      // A pattern a routine started: a playback of its own, from now (on the next multiple of its quant), on its own
-      // clock (the default clock unless it was given one), until it ends or is stopped (it outlives the routine).
+      // A pattern a routine started: a playback of its own, on its own clock (the default clock unless it was given
+      // one), from its onset (onsetOf: as at the top of the file), until it ends or is stopped (it outlives the
+      // routine). A Pdef's play first waits for its turn on the common timeline (emitTidal).
       const index = ev.get("__playback");
       const pb = typeof index === "number" ? interp.playbacks[index] : undefined;
-      const own = pb ? ctx.tempo / (pb.clock.tempo > 0 ? pb.clock.tempo : 1) : scale;
-      let at = (t * scale) / own;
-      if (pb && pb.quant > 0) at = Math.ceil((at - pb.phase) / pb.quant - 1e-9) * pb.quant + pb.phase;
-      const until = pb ? stopOf(pb, at * own, ctx.tempo) : undefined;
+      const own = pb ? ctx.tempo / clockTempo(pb.clock) : scale;
+      const onset = pb ? onsetOf(pb, ctx.tempo) : t * scale;
       const pattern = pb?.pattern ?? sub;
-      const pdef = pdefPlaying(ctx, pattern, at * own);
-      if (pdef !== null) {
+      if (pb && pattern instanceof PdefRef) yield { at: beatsOf(pb.at, ctx.tempo), seq: pb.seq };
+      const launch = decide(ctx, pb, onset);
+      if (launch !== null) {
         const id = pattern instanceof PdefRef ? "pdef:" + pattern.key : pattern;
         if (!groups.has(id)) groups.set(id, String(groups.size));
         const launchKey = key + "/" + launches.length;
         const from = out.length;
-        const inner = run(ctx, sub, at, numOf(ev.get("__line"), line), own, out, depth + 1, until === undefined ? {} : { until: until / own }, launchKey, typeof index === "number" ? index : undefined);
+        const inner = yield* run(ctx, sub, onset / own, numOf(ev.get("__line"), line), own, out, depth + 1, launch.until === undefined ? {} : { until: launch.until / own }, launchKey, typeof index === "number" ? index : undefined);
         launches.push({ key: launchKey, group: groups.get(id) as string, from, to: out.length, sim: inner });
-        pdef?.(inner);
+        launch.done(inner);
         if (inner.open) open = true;
       }
     } else {
@@ -720,6 +792,11 @@ interface WrittenPart {
   period: number;
   /** Where the written loop starts, in beats (with random durations: where the first step starts). */
   start: number;
+  /**
+   * How long the written controls take to come round, in beats: `period` times the loops of the rhythm they span
+   * together. They start at `start` too, so the code is shifted by `start` modulo this. Default: `period`.
+   */
+  span?: number;
   /**
    * Random durations: the body plays one step per beat (its values in order, a rest a silent step), and rhythm()
    * plays them one after another, step k as long as `durs[k % durs.length]` (a random duration or a number, in
@@ -945,6 +1022,9 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
   const order = ["note", "freq", "n", "legato"];
   keys.sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   let tokenIndex = 0;
+  // How many loops of the rhythm the controls span together (the least common multiple of theirs).
+  let spanLoops = 1;
+  const spans = (m: number) => { spanLoops = spanLoops * m / gcd(spanLoops, m); };
   const cellsOf = (key: string, k: number) => {
     const ks = k === 0 ? steps : stepsOf(evs, start + k * period, period);
     return ks.map((s) => (s.event ? rows[index.get(s.event) as number].get(key) ?? GAP : GAP));
@@ -997,6 +1077,7 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
           for (let k = 0; k + m <= byLoop.length; k += m) groups.push(byLoop.slice(k, k + m).flat());
           if (isShuffle(groups)) {
             shuffledOver = m;
+            spans(m);
             const list = groups[0];
             lines.push("." + key + "(fastcat(" + str(list.map((c) => miniValue(c, key === "note")).join(" ")) + ").shuffle(" + list.length + ")" + (m > 1 ? ".slow(" + m + ")" : "") + ")");
           }
@@ -1006,6 +1087,7 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
       note("The " + key + " of line " + part.line + " never repeats: its first " + fmt(FALLBACK) + " beats loop.");
     }
     const mult = m ?? Math.max(1, Math.floor(FALLBACK / period));
+    spans(mult);
     const cells: Cell[] = [];
     const cellWeights: number[] = [];
     for (let k = 0; k < mult; k++) {
@@ -1090,9 +1172,9 @@ function writePart(part: Part, ctx: Context, forced?: { period: number; start: n
   if (cur) body.push(cur);
   if (channelFns) {
     // layer applies each function to the pattern: the left channel and the right one.
-    return { label, comment, body: "layer([\n  " + channelFns.join(",\n  ") + "\n], " + body.join("\n  ") + ")", period, start };
+    return { label, comment, body: "layer([\n  " + channelFns.join(",\n  ") + "\n], " + body.join("\n  ") + ")", period, start, span: period * spanLoops };
   }
-  return { label, comment, body: body.join("\n  "), period, start };
+  return { label, comment, body: body.join("\n  "), period, start, span: period * spanLoops };
 }
 
 /**
@@ -1118,7 +1200,7 @@ function writeVoices(part: Part, evs: SimEvent[], ctx: Context, period: number, 
   if (written.length === 0) return null;
   if (written.length === 1) return written[0];
   const comment = [...written[0].comment, written.length + " synths start at the same time: each is a voice of its own, with its own values and length."];
-  return { label: written[0].label, comment, body: "stack([\n  " + written.map((w) => w.body.split("\n").join("\n  ")).join(",\n  ") + "\n])", period, start };
+  return { label: written[0].label, comment, body: "stack([\n  " + written.map((w) => w.body.split("\n").join("\n  ")).join(",\n  ") + "\n])", period, start, span: period * written.reduce((n, w) => { const m = Math.round((w.span ?? period) / period); return n * m / gcd(n, m); }, 1) };
 }
 
 /** A drone's loop, in beats: 4 or more, so that its LFOs (vib) complete whole cycles. */
