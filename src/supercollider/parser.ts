@@ -3,7 +3,11 @@
  * no precedence (they run left to right), method calls bind tighter than
  * them, and `Class(args)` is `Class.new(args)`.
  */
+import { ConversionLimit, tick } from "./budget.ts";
 import { SCSyntaxError, tokenize, type Token } from "./lexer.ts";
+
+/** How deeply expressions may nest (brackets, blocks, functions): far more than code needs, far less than the stack holds. */
+const MAX_DEPTH = 500;
 
 export type Node =
   | { t: "num"; v: number; line: number; float?: boolean }
@@ -43,6 +47,7 @@ export function parse(src: string): Node[] {
 class Parser {
   private toks: Token[];
   private i = 0;
+  private depth = 0;
   constructor(toks: Token[]) {
     this.toks = toks;
   }
@@ -108,6 +113,16 @@ class Parser {
   }
 
   expr(): Node {
+    tick();
+    if (++this.depth > MAX_DEPTH) throw new SCSyntaxError("The code is nested more than " + MAX_DEPTH + " levels deep", this.tok.line);
+    try {
+      return this.expr1();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private expr1(): Node {
     const line = this.tok.line;
     // # a, b = array (multiple assignment)
     if (this.is("punc", "#") && (this.peek().type === "id" || this.peek().type === "env")) {
@@ -121,7 +136,10 @@ class Parser {
           targets.push(this.primary());
         } while (this.accept("punc", ","));
         if (this.accept("op", "=")) return { t: "multi", targets, rest, value: this.expr(), line };
-      } catch { /* not a multiple assignment */ }
+      } catch (err) {
+        // Not a multiple assignment (but a stopped conversion stops).
+        if (err instanceof ConversionLimit) throw err;
+      }
       this.i = save;
     }
     const left = this.binary();
@@ -167,6 +185,15 @@ class Parser {
   }
 
   private unary(): Node {
+    if (++this.depth > MAX_DEPTH) throw new SCSyntaxError("The code is nested more than " + MAX_DEPTH + " levels deep", this.tok.line);
+    try {
+      return this.unary1();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private unary1(): Node {
     if (this.is("op", "-")) {
       const line = this.tok.line;
       this.i++;

@@ -1,4 +1,4 @@
-import { div, span, when } from "sibujs";
+import { button, div, span, when } from "sibujs";
 import type { Session } from "../session.ts";
 
 /**
@@ -26,6 +26,16 @@ export function StatusBar(session: Session) {
           () => span({ class: () => "warnings" + (status().text ? "" : " alone") }, [() => "Warning: " + status().warnings.join("; ")]),
         ),
       ]),
+      // A deliberate way out of the problem, such as Retry for samples that failed to load.
+      when(
+        () => !!status().action,
+        () => button({
+          id: "statusAction",
+          class: "link-btn",
+          type: "button",
+          on: { click: () => status().action?.run() },
+        }, [() => status().action?.label ?? ""]),
+      ),
     ],
   );
 }

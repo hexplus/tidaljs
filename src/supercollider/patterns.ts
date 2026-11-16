@@ -21,6 +21,11 @@ export interface Host {
   pdefn(name: string): Value;
   /** The current time of the simulation, in beats (for Pseg). */
   time: number;
+  /**
+   * A step of work. Patterns call it as they go, so one that never yields (an empty pattern repeated forever,
+   * which hangs SuperCollider) is stopped instead of hanging the conversion.
+   */
+  tick?(): void;
 }
 
 export interface Ctx {
@@ -35,6 +40,7 @@ export abstract class Pattern implements PatternLike {
 
 /** Embeds an item of a list pattern: a pattern plays through, a value plays once. */
 export function* embedItem(item: Value, inval: Value, ctx: Ctx): Gen {
+  ctx.host.tick?.();
   if (isPattern(item)) return yield* (item as Pattern).embed(inval, ctx);
   if (item instanceof SCFunc) return yield ctx.host.call(item, [inval]);
   return yield item;
@@ -55,6 +61,7 @@ export class Stream {
   }
   next(inval: Value): Next {
     if (this.ended) return DONE;
+    this.ctx.host.tick?.();
     const src = this.source;
     if (isPattern(src)) {
       let r: IteratorResult<Value, Value>;
@@ -888,6 +895,7 @@ export class Ppar extends Pattern {
   *embed(inval: Value, ctx: Ctx): Gen {
     const reps = repeatsOf(this.repeats, ctx, inval);
     for (let r = 0; r < reps; r++) {
+      ctx.host.tick?.();
       const base = inval instanceof SCEvent ? inval : new SCEvent();
       type Entry = { t: number; stream: Stream; ev: SCEvent | null; order: number };
       const entries: Entry[] = this.items.map((p, i) => {

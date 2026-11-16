@@ -5,6 +5,7 @@
  * as sclang does; patterns become generators (patterns.ts); a SynthDef's
  * function runs with symbolic signals (GNode) so its graph can be analysed.
  */
+import { ConversionLimit, sized, tick } from "./budget.ts";
 import type { Node } from "./parser.ts";
 import {
   DONE, Pattern, Pdraw, Pbind, Pbinop, Pbjorklund, Pbrown, Pchain, Pcollect, Pconst, PdefRef, Pdup, Pfin, Pfindur,
@@ -53,7 +54,12 @@ export interface RoutineEvent {
 }
 
 class Horizon extends Error {}
-class TooMuchWork extends Error {}
+/** A statement, routine or pattern did too much work without getting anywhere (an endless loop that never waits). */
+export class TooMuchWork extends Error {}
+/** The most work one statement, routine or pattern event may do. */
+const MAX_WORK = 2_000_000;
+/** The most events a routine may start at one instant (a loop that starts synths without waiting). */
+const MAX_SAME_TIME = 10_000;
 class StopCollect extends Error {}
 
 /** SuperCollider's built-in scales (degrees in semitones). */
@@ -232,8 +238,8 @@ export class Interpreter implements Host {
   private readonly pdefs = new Map<string, Value>();
   private readonly pdefns = new Map<string, Value>();
   private work = 0;
-  /** While a routine runs: its time in beats and the events it plays. */
-  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV } | null = null;
+  /** While a routine runs: its time in beats, the events it plays, and the work done when it last waited. */
+  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV; waited: number; sameTime: number } | null = null;
   /** While a Prout runs to collect its values. */
   private collecting: Value[] | null = null;
   /** Whether the bounds of the Pwhite being made were written as floats (1.0), as SuperCollider tells. */
@@ -289,21 +295,41 @@ export class Interpreter implements Host {
   /** Runs a program; a statement that fails is noted and skipped. */
   run(program: Node[]) {
     for (const node of program) {
+      // Each statement has its own allowance of work.
+      this.work = 0;
       try {
         this.eval(node, this.global);
       } catch (err) {
-        if (err instanceof Horizon || err instanceof TooMuchWork) continue;
+        if (err instanceof ConversionLimit) throw err;
+        if (err instanceof Horizon) continue;
+        if (err instanceof TooMuchWork) {
+          this.note("Line " + node.line + " never finishes (a loop that does not end?): SuperCollider would hang there, so it was stopped.");
+          continue;
+        }
         this.note("Line " + node.line + " could not be run: " + (err instanceof Error ? err.message : String(err)));
       }
     }
+    this.work = 0;
     this.finishInputs();
+    this.work = 0;
     this.finishProxies();
+  }
+
+  /** A fresh allowance of work (each event the conversion plays has its own). */
+  resetWork() {
+    this.work = 0;
+  }
+
+  /** A step of work (a pattern's step too): an endless loop stops here. */
+  tick() {
+    if (++this.work > MAX_WORK) throw new TooMuchWork("too much work");
+    tick();
   }
 
   // ------------------------------------------------------------ evaluation
 
   eval(node: Node, scope: Scope): Value {
-    if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+    this.tick();
     switch (node.t) {
       case "num": return node.v;
       case "str": return node.v;
@@ -393,7 +419,7 @@ export class Interpreter implements Host {
           try {
             last = this.eval(st, inner);
           } catch (err) {
-            if (err instanceof Horizon || err instanceof TooMuchWork || err instanceof StopCollect) throw err;
+            if (err instanceof Horizon || err instanceof TooMuchWork || err instanceof StopCollect || err instanceof ConversionLimit) throw err;
             this.note("Line " + st.line + " could not be run: " + (err instanceof Error ? err.message : String(err)));
           }
         }
@@ -438,7 +464,7 @@ export class Interpreter implements Host {
   }
 
   call(fn: SCFunc, args: Value[], kwargs: Record<string, Value> = {}): Value {
-    if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+    this.tick();
     const scope = new Scope(fn.scope);
     fn.params.forEach((p, i) => {
       let v: Value | undefined = i < args.length ? args[i] : kwargs[p.name];
@@ -654,7 +680,7 @@ export class Interpreter implements Host {
       case "odd": return mod(x, 2) === 1;
       case "isInteger": return Number.isInteger(x);
       case "dup": case "!": {
-        const n = num(args[0] ?? kwargs.n, 2);
+        const n = sized(num(args[0] ?? kwargs.n, 2));
         return Array.from({ length: n }, () => x);
       }
       case "do": case "reverseDo": {
@@ -666,7 +692,7 @@ export class Interpreter implements Host {
       }
       case "collect": {
         const fn = args[0];
-        return Array.from({ length: Math.floor(x) }, (_, i) => (fn instanceof SCFunc ? this.call(fn, [i, i]) : i));
+        return Array.from({ length: sized(x) }, (_, i) => (fn instanceof SCFunc ? this.call(fn, [i, i]) : i));
       }
       case "for": case "forBy": {
         const end = num(args[0], x);
@@ -734,8 +760,8 @@ export class Interpreter implements Host {
       case "mirror": return [...arr, ...arr.slice(0, -1).reverse()];
       case "mirror1": return [...arr, ...arr.slice(1, -1).reverse()];
       case "mirror2": return [...arr, ...arr.slice().reverse()];
-      case "stutter": case "dupEach": { const n = num(args[0], 2); return arr.flatMap((v) => Array.from({ length: n }, () => v)); }
-      case "dup": case "!": { const n = num(args[0], 2); return Array.from({ length: n }, () => arr.slice()); }
+      case "stutter": case "dupEach": { const n = sized(num(args[0], 2)); sized(n * arr.length); return arr.flatMap((v) => Array.from({ length: n }, () => v)); }
+      case "dup": case "!": { const n = sized(num(args[0], 2)); sized(n * arr.length); return Array.from({ length: n }, () => arr.slice()); }
       case "sum": return arr.reduce((s: Value, v) => this.binop("+", s, v), 0);
       case "mean": return num(this.arraySend(arr, "sum", [], {}, line), 0) / (arr.length || 1);
       case "maxItem": return Math.max(...arr.map((v) => num(v, -Infinity)));
@@ -786,12 +812,12 @@ export class Interpreter implements Host {
       case "drop": { const n = num(args[0], 0); return n >= 0 ? arr.slice(n) : arr.slice(0, n); }
       case "flat": case "flatten": return arr.flat(Infinity as 1) as Value[];
       case "lace": {
-        const n = num(args[0], arr.length);
+        const n = sized(num(args[0], arr.length));
         return Array.from({ length: n }, (_, i) => { const item = arr[i % arr.length]; return Array.isArray(item) ? item[Math.floor(i / arr.length) % item.length] : item; });
       }
-      case "wrapExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => arr[i % arr.length]); }
-      case "clipExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => arr[Math.min(i, arr.length - 1)]); }
-      case "foldExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => this.arraySend(arr, "foldAt", [i], {}, line)); }
+      case "wrapExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => arr[i % arr.length]); }
+      case "clipExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => arr[Math.min(i, arr.length - 1)]); }
+      case "foldExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => this.arraySend(arr, "foldAt", [i], {}, line)); }
       case "pyramid": { const out: Value[] = []; for (let i = 1; i <= arr.length; i++) out.push(...arr.slice(0, i)); return out; }
       case "asSpec": return this.spec(arr[0] ?? 0, arr[1] ?? 1, arr[2] ?? new Sym("lin"), arr[4] ?? null);
       case "join": return arr.map(describeText).join(typeof args[0] === "string" ? args[0] : "");
@@ -821,7 +847,7 @@ export class Interpreter implements Host {
       case "value": case "valueEnvir": return this.call(fn, args, kwargs);
       case "valueArray": return this.call(fn, asList(args[0] ?? []));
       case "dup": case "!": {
-        const n = num(args[0], 2);
+        const n = sized(num(args[0], 2));
         return Array.from({ length: n }, (_, i) => this.call(fn, [i]));
       }
       case "fork": case "forkIfNeeded": case "r": case "asRoutine": case "routine":
@@ -837,7 +863,7 @@ export class Interpreter implements Host {
           this.call(fn, []);
           if (this.routine && this.routine.time === before) {
             // A loop that never waits would never end in SuperCollider either.
-            if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+            this.tick();
           }
         }
       }
@@ -1076,7 +1102,7 @@ export class Interpreter implements Host {
       case "range": case "exprange": case "unipolar": case "bipolar":
         return new GNode("unop", method, { a: n, lo: args[0] ?? kwargs.lo ?? (method === "bipolar" ? -1 : 0), hi: args[1] ?? kwargs.hi ?? 1 });
       case "madd": return this.binop("+", this.binop("*", n, args[0] ?? 1), args[1] ?? 0);
-      case "dup": case "!": return Array.from({ length: num(args[0], 2) }, () => n);
+      case "dup": case "!": return Array.from({ length: sized(num(args[0], 2)) }, () => n);
       case "lag": case "lag2": case "lag3": case "varlag": case "lagud": return n;
       case "clip": case "fold": case "wrap": return new GNode("unop", method, { a: n, lo: args[0] ?? 0, hi: args[1] ?? 1 });
       case "clip2": case "fold2": case "wrap2": case "round": case "max": case "min": case "pow": case "lcm":
@@ -1176,7 +1202,7 @@ export class Interpreter implements Host {
         return 0;
       }
       case "Mix": {
-        const items = asList(method === "fill" ? Array.from({ length: num(args[0], 1) }, (_, i) => this.value(args[1] ?? null, [i])) : args[0] ?? []);
+        const items = asList(method === "fill" ? Array.from({ length: sized(num(args[0], 1)) }, (_, i) => this.value(args[1] ?? null, [i])) : args[0] ?? []);
         return items.reduce((s: Value, v) => this.binop("+", s, v), 0);
       }
       case "NamedControl": return new GNode("control", describeText(args[0] ?? null), { default: args[1] ?? 0 }, method);
@@ -1316,17 +1342,17 @@ export class Interpreter implements Host {
 
   private arrayClass(method: string, args: Value[]): Value {
     switch (method) {
-      case "series": { const n = num(args[0], 0), start = num(args[1], 0), step = num(args[2], 1); return Array.from({ length: n }, (_, i) => start + i * step); }
-      case "geom": { const n = num(args[0], 0), start = num(args[1], 1), grow = num(args[2], 2); return Array.from({ length: n }, (_, i) => start * Math.pow(grow, i)); }
-      case "fill": { const n = num(args[0], 0); return Array.from({ length: n }, (_, i) => this.value(args[1] ?? null, [i])); }
-      case "interpolation": { const n = num(args[0], 2), a = num(args[1], 0), b = num(args[2], 1); return Array.from({ length: n }, (_, i) => a + ((b - a) * i) / Math.max(1, n - 1)); }
+      case "series": { const n = sized(num(args[0], 0)), start = num(args[1], 0), step = num(args[2], 1); return Array.from({ length: n }, (_, i) => start + i * step); }
+      case "geom": { const n = sized(num(args[0], 0)), start = num(args[1], 1), grow = num(args[2], 2); return Array.from({ length: n }, (_, i) => start * Math.pow(grow, i)); }
+      case "fill": { const n = sized(num(args[0], 0)); return Array.from({ length: n }, (_, i) => this.value(args[1] ?? null, [i])); }
+      case "interpolation": { const n = sized(num(args[0], 2)), a = num(args[1], 0), b = num(args[2], 1); return Array.from({ length: n }, (_, i) => a + ((b - a) * i) / Math.max(1, n - 1)); }
       case "rand": case "exprand": case "rand2": {
         this.note("Array." + method + " is random: the TidalJS code keeps one draw.");
-        const n = num(args[0], 0), lo = num(args[1], 0), hi = num(args[2], 1);
+        const n = sized(num(args[0], 0)), lo = num(args[1], 0), hi = num(args[2], 1);
         return Array.from({ length: n }, () => (method === "exprand" ? lo * Math.pow(hi / lo, this.rng()) : lo + this.rng() * (hi - lo)));
       }
       case "with": return args.slice();
-      case "fib": { const n = num(args[0], 2); const out = [num(args[1], 0), num(args[2], 1)]; while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]); return out.slice(0, n); }
+      case "fib": { const n = sized(num(args[0], 2)); const out = [num(args[1], 0), num(args[2], 1)]; while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]); return out.slice(0, n); }
     }
     return [];
   }
@@ -1706,6 +1732,7 @@ export class Interpreter implements Host {
       try {
         this.call(fn, args);
       } catch (err) {
+        if (err instanceof ConversionLimit) throw err;
         if (!(err instanceof Horizon || err instanceof TooMuchWork)) this.note("Line " + line + ": an input function could not be run: " + (err instanceof Error ? err.message : String(err)));
       }
     };
@@ -2255,6 +2282,9 @@ export class Interpreter implements Host {
   private recordEvent(ev: SCEvent, line: number): SCEvent {
     const stored = ev.copy();
     if (this.routine) {
+      const last = this.routine.events[this.routine.events.length - 1];
+      this.routine.sameTime = last && Math.abs(last.time - this.routine.time) < 1e-9 ? this.routine.sameTime + 1 : 1;
+      if (this.routine.sameTime > MAX_SAME_TIME) throw new TooMuchWork("too many events at once");
       this.routine.events.push({ time: this.routine.time, event: stored });
       return stored;
     }
@@ -2273,12 +2303,20 @@ export class Interpreter implements Host {
       this.routine.time = saved;
       return r;
     }
-    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock };
+    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock, waited: this.work, sameTime: 0 };
     this.routine = state;
     try {
       this.call(r.fn, []);
     } catch (err) {
-      if (err instanceof Horizon || err instanceof TooMuchWork) endless = true;
+      if (err instanceof ConversionLimit) throw err;
+      if (err instanceof TooMuchWork && (this.work - state.waited > MAX_WORK / 2 || state.sameTime > MAX_SAME_TIME)) {
+        // It went round and round without waiting: SuperCollider would hang there (its clock never moves on).
+        // What it played before is kept; what it started at that instant is not.
+        this.note("Line " + r.line + ": the routine loops without waiting (no wait or yield in the loop): SuperCollider would hang there, so it stops at "
+          + (state.time === 0 ? "the start" : "beat " + +state.time.toPrecision(6)) + ".");
+        const stuck = state.time;
+        state.events = state.events.filter((e) => e.time < stuck - 1e-9);
+      } else if (err instanceof Horizon || err instanceof TooMuchWork) endless = true;
       else {
         this.note("Line " + r.line + ": a routine stopped: " + (err instanceof Error ? err.message : String(err)));
       }
@@ -2324,6 +2362,7 @@ export class Interpreter implements Host {
     }
     if (this.routine && typeof x === "number") {
       this.routine.time += x;
+      this.routine.waited = this.work;
       if (this.routine.time >= this.routine.horizon) throw new Horizon();
     }
     return x;
@@ -2369,6 +2408,7 @@ export class Interpreter implements Host {
       for (const o of outs) { collectControls(o.channels, controls); collectControls(o.bus, controls); }
       return { output, controls, outs, mainBus: main ? main.bus : 0 };
     } catch (err) {
+      if (err instanceof ConversionLimit) throw err;
       this.note("SynthDef \\" + def.name + " could not be analysed: " + (err instanceof Error ? err.message : String(err)));
       return null;
     } finally {
@@ -2394,6 +2434,13 @@ function routinePattern(events: RoutineEvent[], end: number, line: number): Valu
     const next = i + 1 < sorted.length ? sorted[i + 1].time : end > e.time + 1e-9 ? end : e.time + 1;
     const ev = e.event.copy();
     ev.set("delta", next - e.time);
+    if (next - e.time < 1e-9) {
+      // Started together with the next one (no wait between them): it lasts, as they do, until the routine moves on.
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].time - e.time < 1e-9) j++;
+      const moved = j < sorted.length ? sorted[j].time : end > e.time + 1e-9 ? end : e.time + 1;
+      ev.set("__hold", moved - e.time);
+    }
     if (!ev.has("__src")) ev.set("__src", "r" + line + ":" + describeText(ev.get("instrument") ?? null));
     if (!ev.has("__line")) ev.set("__line", line);
     items.push(ev);

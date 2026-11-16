@@ -1,9 +1,10 @@
 import { button, dialog, dispose, div, h2, input, li, p, pre, signal, span, strong, ul } from "sibujs";
 import { titleFromCode } from "../library.ts";
-import type { Session } from "../session.ts";
+import { describeOrigin } from "../provenance.ts";
+import type { ExternalReview, Session } from "../session.ts";
 import {
   LONG_LINK_LENGTH, MAX_CODE_LENGTH, ShareError, decodeShareHash, encodeShareHash, isShareHash, revealHidden, scanCode, shareUrl,
-  type CodeScan, type Finding, type SharedSong,
+  type Finding, type SharedSong,
 } from "../share.ts";
 import { confirmDialog } from "./ConfirmDialog.ts";
 import type { Library } from "./Library.ts";
@@ -11,8 +12,8 @@ import type { Library } from "./Library.ts";
 /*
  * Sharing a song as a link, and opening one. Everything that comes from a
  * link is shown as text (text nodes and input values, never HTML), the code
- * is never run here, and the first Play of shared code goes through the
- * session's check (session.ts: checkShared).
+ * is never run here, and the first Play of shared code asks to allow it
+ * (session.ts: play, and confirmExternalRun below).
  */
 
 interface ModalOptions {
@@ -100,19 +101,29 @@ function findingText(finding: Finding): string {
   return finding.title + ": " + finding.why + " (" + revealHidden(finding.words.join(", ")) + where + ")";
 }
 
-/** Asks before the first Play of shared code that the scan flags. */
-function confirmRiskyPlay(scan: CodeScan): Promise<boolean> {
+/**
+ * Asked before code someone else wrote (a link, an imported or converted
+ * file) first runs, whatever the scan finds: running it is what gives it
+ * access to this page, so that is the question. The scan's findings are
+ * advice shown with it, never the reason to skip it.
+ */
+function confirmExternalRun(review: ExternalReview): Promise<boolean> {
+  const { scan } = review;
+  const from = describeOrigin(review.provenance);
   return confirmDialog({
-    title: "Play code that does more than music?",
+    title: "Run code someone else wrote?",
     message:
-      "This code came from a link and uses things a music pattern does not need. It may be harmless, but code like this "
-      + "could read your saved sketches, send data to other sites or change the page.",
-    details: scan.risks.map(findingText),
+      "You are about to run " + from + ". It is JavaScript: once it runs, it has the same access to this page as TidalJS "
+      + "itself, so it could read your saved sketches, send data to other sites or change the page. Only the code now in "
+      + "the editor runs; if you change it, you are asked again.",
+    details: scan.risks.length
+      ? scan.risks.map(findingText)
+      : ["A quick check found nothing beyond music patterns" + (scan.sites.length ? "; it may load files from " + scan.sites.join(", ") : "") + "."],
     note:
-      "This is a quick check, not a guarantee: risky code can also go unnoticed. Play it only if you trust whoever sent "
-      + "the link and you have read the code.",
-    confirmText: "Play anyway",
-    cancelText: "Don't play",
+      "The check is advice, not a guarantee: risky code can go unnoticed. Run it only if you trust where it came from and "
+      + "you have read it.",
+    confirmText: "Allow and run",
+    cancelText: "Don't run",
     danger: true,
   });
 }
@@ -142,15 +153,15 @@ async function reviewShared(song: SharedSong, session: Session, library: Library
     body.push(
       div({ class: "share-risks", role: "note" }, [
         strong(["Check before playing"]),
-        p(["This code uses things a music pattern does not need. You will be asked again before it plays."]),
+        p(["This code uses things a music pattern does not need. You are asked again before it first runs."]),
         ul(scan.risks.map((finding) => li([findingText(finding)]))),
       ]),
     );
   }
   body.push(
     p("confirm-message share-warning", [
-      "This is JavaScript. When you press Play, it runs in your browser with the same access as TidalJS itself. "
-      + "Opening it does not play it. Only play code from people you trust.",
+      "This is JavaScript. Opening it does not run it, even while music plays. The first time you press Play you are "
+      + "asked to allow it: then it runs in your browser with the same access as TidalJS itself. Only run code from people you trust.",
     ]),
   );
 
@@ -190,7 +201,7 @@ async function openLink(hash: string, session: Session, library: Library) {
  * Returns a function that stops watching.
  */
 export function watchSharedLinks(session: Session, library: Library): () => void {
-  session.setRiskyConfirm(confirmRiskyPlay);
+  session.setExternalConfirm(confirmExternalRun);
   const check = () => {
     const hash = location.hash;
     if (!isShareHash(hash)) return;

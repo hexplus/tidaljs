@@ -1677,6 +1677,9 @@
         return { ...ev, value };
     }
 
+    // Seconds a one-shot's session lives on after its last event, for delay and reverb tails.
+    const ONE_SHOT_TAIL = 8;
+
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
     const RHYTHM_MAX_STEPS = 2000000;
     const RHYTHM_MIN_STEP = 1 / 256;
@@ -3143,21 +3146,162 @@
         return s;
     }
 
-    /** True if two patterns give the same events over two cycles from `from`. */
-    function sameEvents(a, b, from) {
-        const key = (p) => {
-            try {
-                return p.query(from, from + 2).map((ev) => {
-                    // Signals of follow() are left out of JSON: compare their values.
-                    const follow = ev.value && ev.value.follow instanceof Follows ? ev.value.follow.key(ev.begin) : '';
-                    return `${ev.begin.toFixed(6)}:${ev.end.toFixed(6)}:${JSON.stringify(ev.value)}${follow}`;
-                }).sort().join('|');
-            } catch (e) {
-                return null;
+    /**
+     * The identifiers a statement mentions, outside string literals and
+     * comments and not after a dot (property names). Template literals and
+     * regular expressions count whole: mentioning too much only makes a
+     * stream look changed, never unchanged.
+     */
+    function identifiersIn(text) {
+        const ids = [];
+        const n = text.length;
+        let i = 0;
+        let afterDot = false;
+        while (i < n) {
+            const c = text[i];
+            if (c === '/' && text[i + 1] === '/') {
+                while (i < n && text[i] !== '\n') i++;
+            } else if (c === '/' && text[i + 1] === '*') {
+                const close = text.indexOf('*/', i + 2);
+                i = close < 0 ? n : close + 2;
+            } else if (c === '"' || c === "'") {
+                i++;
+                while (i < n && text[i] !== c && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1;
+                i++;
+                afterDot = false;
+            } else if (/[A-Za-z_$À-￿]/.test(c)) {
+                let j = i + 1;
+                while (j < n && /[\w$À-￿]/.test(text[j])) j++;
+                if (!afterDot) ids.push(text.slice(i, j));
+                i = j;
+                afterDot = false;
+            } else if (/\d/.test(c)) {
+                while (i < n && /[\w.]/.test(text[i])) i++;
+                afterDot = false;
+            } else {
+                if (c === '.' && text[i + 1] !== '.') afterDot = true;
+                else if (!/\s/.test(c)) afterDot = false;
+                i++;
             }
+        }
+        return ids;
+    }
+
+    const BINDING = /^\s*(?:export\s+)?(?:const|let|var|class|function|async\s+function)\b/;
+
+    /**
+     * The names a declaration statement binds: each declarator's name, every
+     * name in a destructuring pattern, or the function's or class's name.
+     * When the statement cannot be read for certain, every identifier in it,
+     * so a dependency is never missed.
+     */
+    function declaredNames(text) {
+        const all = identifiersIn(text);
+        const fn = /^\s*(?:export\s+)?(?:async\s+)?(?:function\s*\*?|class)\s*([A-Za-z_$][\w$]*)/.exec(text);
+        if (fn) return [fn[1]];
+        const head = /^\s*(?:export\s+)?(?:const|let|var)\s+/.exec(text);
+        if (!head) return all;
+        // Walk the declarators at depth 0: a name (or a pattern) up to "=", then skip the initialiser up to ",".
+        const names = [];
+        let depth = 0;
+        let i = head[0].length;
+        let expectName = true;
+        let quote = null;
+        for (; i < text.length; i++) {
+            const c = text[i];
+            if (quote) {
+                if (c === '\\') i++;
+                else if (c === quote) quote = null;
+                continue;
+            }
+            if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+            if ('([{'.includes(c)) {
+                if (depth === 0 && expectName) {
+                    // A destructuring pattern: every name in it.
+                    const close = matchingBracket(text, i);
+                    if (close < 0) return all;
+                    names.push(...identifiersIn(text.slice(i, close + 1)));
+                    i = close;
+                    expectName = false;
+                    continue;
+                }
+                depth++;
+            } else if (')]}'.includes(c)) {
+                depth--;
+                if (depth < 0) return all;
+            } else if (depth === 0 && c === ',') {
+                expectName = true;
+            } else if (depth === 0 && expectName && /[A-Za-z_$]/.test(c)) {
+                const m = /^[A-Za-z_$][\w$]*/.exec(text.slice(i));
+                names.push(m[0]);
+                i += m[0].length - 1;
+                expectName = false;
+            }
+        }
+        return depth === 0 && quote === null ? names : all;
+    }
+
+    /** The index of the bracket closing the one at `open`, skipping strings; -1 if none. */
+    function matchingBracket(text, open) {
+        let depth = 0;
+        let quote = null;
+        for (let i = open; i < text.length; i++) {
+            const c = text[i];
+            if (quote) {
+                if (c === '\\') i++;
+                else if (c === quote) quote = null;
+            } else if (c === '"' || c === "'" || c === '`') quote = c;
+            else if ('([{'.includes(c)) depth++;
+            else if (')]}'.includes(c) && --depth === 0) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * What a stream's code depends on, for live updates: a function giving,
+     * for the statement that made a pattern, a key made of that statement,
+     * every declaration it uses (and those they use, in turn), and every
+     * statement that is neither a declaration nor makes a pattern (setCPS,
+     * an assignment, a loop: any of them may change what the stream plays).
+     * The same key means the stream is demonstrably unchanged.
+     */
+    function streamSources(statements, producing) {
+        const info = statements.map((s) => {
+            const decl = BINDING.test(s.text);
+            return { text: s.text, decl, ids: identifiersIn(s.text), names: decl ? declaredNames(s.text) : [] };
+        });
+        const declaredBy = new Map();
+        info.forEach((s, j) => {
+            for (const name of s.names) {
+                if (!declaredBy.has(name)) declaredBy.set(name, []);
+                declaredBy.get(name).push(j);
+            }
+        });
+        const others = [];
+        info.forEach((s, j) => {
+            if (!s.decl && !producing.has(j) && s.text.trim()) others.push(j);
+        });
+        const cache = new Map();
+        return (k) => {
+            if (cache.has(k)) return cache.get(k);
+            if (!info[k]) return '\u0000unknown' + Math.random(); // never the same: such a stream always counts as changed
+            const seen = new Set([k, ...others]);
+            const queue = [k];
+            while (queue.length) {
+                const j = queue.pop();
+                for (const id of info[j].ids) {
+                    for (const d of declaredBy.get(id) || []) {
+                        if (!seen.has(d)) {
+                            seen.add(d);
+                            queue.push(d);
+                        }
+                    }
+                }
+            }
+            const key = [...seen].sort((a, b) => a - b).map((j) => (j === k ? '\u0002' : '') + info[j].text.trim()).join('\u0000');
+            cache.set(k, key);
+            return key;
         };
-        const ka = key(a);
-        return ka !== null && ka === key(b);
     }
 
     /** Only the events that start before `end`; nothing is queried after it. */
@@ -4244,105 +4388,352 @@
     // Live code evaluation
     // ==================================================================
 
-    const CONTINUES_LINE = '.,([{=+-*/%&|^?:<>!';
-    const CONTINUES_NEXT = '.?:+*/%&|^=,)]}';
     const DECLARATION = /^(?:const|let|var|function|async\s+function|class|if|for|while|do|switch|try|return|throw|import|export)(?![\w$])/;
 
-    function nextSignificantChar(code, i) {
+    // A small JavaScript tokenizer, enough to find where top-level statements
+    // end: strings, template literals (with nested ${...}), regular
+    // expressions, comments, numbers, names and punctuators.
+    const LINE_BREAK = /[\n\r\u2028\u2029]/;
+    const NUMBER = /(?:0[xXoObB][\da-fA-F_]*|\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?n?/y;
+    const PUNCTUATORS = [
+        ['>>>='],
+        ['...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??='],
+        ['=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**', '<<', '>>'],
+    ];
+    const OPENERS = new Set(['(', '[', '{']);
+    const CLOSERS = new Set([')', ']', '}']);
+    // Words after which a "/" starts a regular expression, not a division.
+    const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await', 'extends']);
+    // Words that cannot end an expression: the next line continues it.
+    const OPERAND_AFTER = new Set(['new', 'typeof', 'void', 'delete', 'await', 'in', 'instanceof', 'extends', 'var', 'let', 'const', 'case']);
+    const CONDITION = new Set(['if', 'while', 'for', 'with']);
+    const BLOCK_AFTER = new Set(['else', 'do', 'try', 'finally']);
+
+    const isNameStart = (ch) => /[A-Za-z_$#\\]/.test(ch) || (ch > '\x7f' && !/\s/.test(ch));
+    const isNamePart = (ch) => /[\w$\\]/.test(ch) || (ch > '\x7f' && !/\s/.test(ch));
+    const isWord = (tok, value) => !!tok && tok.type === 'name' && !tok.prop && (value === undefined || tok.value === value);
+    const isPunct = (tok, value) => !!tok && tok.type === 'punct' && tok.value === value;
+
+    /**
+     * Tokens of code from offset `from`. Each token is { type, value, start,
+     * end, nl }: type is name, num, str, tpl, regex or punct, and nl tells
+     * that a line break (or a comment spanning lines) comes before it. A
+     * template literal is one token. With `nested`, scanning stops at the
+     * "}" that closes a template's ${...}; `end` is where scanning stopped.
+     */
+    function scanTokens(code, from, nested) {
+        const tokens = [];
+        const stack = []; // open brackets: { value, kind, ctrl }
+        let i = from;
+        let nl = false;
         while (i < code.length) {
             const ch = code[i];
+            const next = code[i + 1];
+            if (ch === '/' && next === '/') {
+                while (i < code.length && !LINE_BREAK.test(code[i])) i++;
+                continue;
+            }
+            if (ch === '/' && next === '*') {
+                const close = code.indexOf('*/', i + 2);
+                const stop = close < 0 ? code.length : close + 2;
+                if (LINE_BREAK.test(code.slice(i, stop))) nl = true;
+                i = stop;
+                continue;
+            }
+            if (LINE_BREAK.test(ch)) { nl = true; i++; continue; }
             if (/\s/.test(ch)) { i++; continue; }
-            if (ch === '/' && code[i + 1] === '/') {
-                while (i < code.length && code[i] !== '\n') i++;
-                continue;
+            if (nested && ch === '}' && stack.length === 0) return { tokens, end: i };
+
+            const prev = tokens[tokens.length - 1];
+            const before = tokens[tokens.length - 2];
+            const tok = { type: 'punct', value: '', start: i, end: i, nl };
+            nl = false;
+            if (ch === '"' || ch === "'") {
+                let j = i + 1;
+                while (j < code.length && code[j] !== ch && !LINE_BREAK.test(code[j])) {
+                    if (code[j] === '\\') j += code[j + 1] === '\r' && code[j + 2] === '\n' ? 2 : 1;
+                    j++;
+                }
+                if (code[j] === ch) j++;
+                tok.type = 'str';
+                i = j;
+            } else if (ch === '`') {
+                let j = i + 1;
+                while (j < code.length) {
+                    if (code[j] === '\\') { j += 2; continue; }
+                    if (code[j] === '`') { j++; break; }
+                    if (code[j] === '$' && code[j + 1] === '{') {
+                        j = Math.min(code.length, scanTokens(code, j + 2, true).end + 1);
+                        continue;
+                    }
+                    j++;
+                }
+                tok.type = 'tpl';
+                i = Math.min(j, code.length);
+            } else if (ch === '/' && regexAllowed(prev)) {
+                let j = i + 1;
+                let inClass = false;
+                while (j < code.length && !LINE_BREAK.test(code[j])) {
+                    const c = code[j];
+                    if (c === '\\') { j += 2; continue; }
+                    if (c === '[') inClass = true;
+                    else if (c === ']') inClass = false;
+                    else if (c === '/' && !inClass) break;
+                    j++;
+                }
+                if (code[j] === '/') {
+                    j++;
+                    while (j < code.length && /[\w$]/.test(code[j])) j++;
+                }
+                tok.type = 'regex';
+                i = Math.min(j, code.length);
+            } else if (/\d/.test(ch) || (ch === '.' && /\d/.test(next || ''))) {
+                NUMBER.lastIndex = i;
+                NUMBER.test(code);
+                tok.type = 'num';
+                i = Math.max(i + 1, NUMBER.lastIndex);
+            } else if (isNameStart(ch)) {
+                let j = i + 1;
+                while (j < code.length && isNamePart(code[j])) j++;
+                tok.type = 'name';
+                tok.value = code.slice(i, j);
+                // A property name (a.return) is never a keyword.
+                tok.prop = isPunct(prev, '.') || isPunct(prev, '?.');
+                i = j;
+            } else {
+                let value = ch;
+                for (const list of PUNCTUATORS) {
+                    const candidate = code.slice(i, i + list[0].length);
+                    if (list.includes(candidate)) { value = candidate; break; }
+                }
+                if (value === '?.' && /\d/.test(code[i + 2] || '')) value = '?'; // a ?.5 : b
+                tok.value = value;
+                i += value.length;
+                if (OPENERS.has(value)) {
+                    const open = { value, kind: 'expr', ctrl: false };
+                    if (value === '(') {
+                        open.ctrl = (isWord(prev) && CONDITION.has(prev.value)) || (isWord(prev, 'await') && isWord(before, 'for'));
+                    } else if (value === '{') {
+                        open.kind = braceKind(prev, before, tok.nl, nested, stack);
+                    }
+                    stack.push(open);
+                } else if (CLOSERS.has(value)) {
+                    const open = stack.pop();
+                    if (open) { tok.kind = open.kind; tok.ctrl = open.ctrl; }
+                } else if (value === '++' || value === '--') {
+                    // Postfix only right after an operand on the same line (a\n++b is a; ++b).
+                    tok.postfix = !tok.nl && !!prev && ((prev.type === 'name' && !(isWord(prev) && REGEX_AFTER.has(prev.value))) ||
+                        isPunct(prev, ')') || isPunct(prev, ']'));
+                } else if (value === ':') {
+                    const top = stack[stack.length - 1];
+                    const statementLevel = top ? top.value === '{' && top.kind !== 'expr' : !nested;
+                    tok.label = statementLevel && isWord(prev) && (!before || prev.nl || isPunct(before, ';') ||
+                        ((isPunct(before, '{') || isPunct(before, '}')) && before.kind !== 'expr') ||
+                        (isPunct(before, ':') && before.label) || (isPunct(before, ')') && before.ctrl));
+                }
             }
-            if (ch === '/' && code[i + 1] === '*') {
-                const j = code.indexOf('*/', i + 2);
-                i = j < 0 ? code.length : j + 2;
-                continue;
-            }
-            return ch;
+            tok.end = i;
+            if (tok.type !== 'name' && tok.type !== 'punct') tok.value = code.slice(tok.start, tok.end);
+            tokens.push(tok);
         }
-        return '';
+        return { tokens, end: i };
+    }
+
+    // Whether a "/" after the token `prev` starts a regular expression.
+    function regexAllowed(prev) {
+        if (!prev) return true;
+        if (prev.type === 'name') return isWord(prev) && REGEX_AFTER.has(prev.value);
+        if (prev.type !== 'punct') return false;
+        if (prev.value === ')') return !!prev.ctrl;          // if (x) /re/.test(s)
+        if (prev.value === '}') return prev.kind !== 'expr'; // after a block, not an object literal
+        return !(prev.value === ']' || prev.value === '++' || prev.value === '--');
+    }
+
+    // What a "{" opens: a block (or class/function body), an arrow
+    // function's body, or an expression (object literal, pattern).
+    function braceKind(prev, before, nl, nested, stack) {
+        if (!prev) return nested ? 'expr' : 'block';
+        if (prev.type === 'punct') {
+            switch (prev.value) {
+                case '=>': return 'arrow';
+                case ')': case ';': return 'block';
+                case '}': return prev.kind === 'expr' && !nl ? 'expr' : 'block';
+                case '{': return prev.kind === 'expr' ? 'expr' : 'block';
+                case ':': return prev.label ? 'block' : 'expr';
+                default: return 'expr';
+            }
+        }
+        if (isWord(prev) && BLOCK_AFTER.has(prev.value)) return 'block';
+        if (isWord(prev) && (REGEX_AFTER.has(prev.value) || OPERAND_AFTER.has(prev.value))) return 'expr';
+        // After a name or value: a class body (class A {, extends B {) or a new statement.
+        return 'block';
     }
 
     /**
-     * Splits code into top-level statements. Comments are removed, strings
-     * and brackets are respected, and a newline only ends a statement when
-     * the code around it cannot continue (so method chains on new lines
-     * starting with "." stay together).
+     * Whether an expression statement goes on across a line break between
+     * the tokens a and b, as JavaScript's automatic semicolon insertion
+     * decides: it ends only when the line before is complete and the next
+     * line cannot continue it.
+     */
+    function continues(a, b) {
+        if (a.type === 'punct') {
+            if (a.value === '++' || a.value === '--') {
+                if (!a.postfix) return true;
+            } else if (!CLOSERS.has(a.value)) {
+                return true; // an operator, a comma, => ...
+            }
+        } else if (isWord(a) && OPERAND_AFTER.has(a.value)) {
+            return true;
+        }
+        // A call, index or tagged template does not follow an arrow function's body.
+        const afterArrow = isPunct(a, '}') && a.kind === 'arrow';
+        if (b.type === 'tpl') return !afterArrow;
+        if (b.type === 'name') return isWord(b, 'in') || isWord(b, 'instanceof');
+        if (b.type !== 'punct') return false;
+        switch (b.value) {
+            case '++': case '--': // restricted: a\n++b is a; ++b
+            case '!': case '~': case '{': case '...': case '@':
+                return false;
+            case '(': case '[':
+                return !afterArrow;
+            default:
+                return true; // . ?. ? : , = and binary operators (also a stray closer)
+        }
+    }
+
+    /**
+     * Splits code into top-level statements, as JavaScript reads them:
+     * strings, template literals, regular expressions, comments and
+     * brackets are respected, control statements (if/else, loops, try,
+     * do...while, labels, switch) and function and class declarations are
+     * one statement each, and a line break ends a statement only where
+     * JavaScript would insert a semicolon (method chains on new lines
+     * starting with "." stay together). Comments between statements are
+     * left out.
      */
     function splitStatements(code) {
         return splitStatementRanges(code).map((s) => s.text);
     }
 
-    /** Like splitStatements, with each statement's [start, end) offsets in the source. */
+    /**
+     * Like splitStatements, with each statement's [start, end) offsets in
+     * the source: text is exactly code.slice(start, end), from its first
+     * token to its last, without the ";" that ends it.
+     */
     function splitStatementRanges(code) {
+        const toks = scanTokens(code, 0, false).tokens;
+        const n = toks.length;
+        const punct = (k, value) => k < n && isPunct(toks[k], value);
+        const word = (k, value) => k < n && isWord(toks[k], value);
+        // Index after the bracket group that opens at k.
+        const group = (k) => {
+            let depth = 0;
+            for (; k < n; k++) {
+                const t = toks[k];
+                if (t.type !== 'punct') continue;
+                if (OPENERS.has(t.value)) depth++;
+                else if (CLOSERS.has(t.value) && --depth <= 0) return k + 1;
+            }
+            return n;
+        };
+        const paren = (k) => (punct(k, '(') ? group(k) : k);
+        const block = (k) => (punct(k, '{') ? group(k) : k);
+        const declaration = (k) => {
+            let j = k;
+            if (punct(j, '*')) j++;
+            if (j < n && toks[j].type === 'name') j++;
+            return block(paren(j));
+        };
+        // An expression statement: up to its ";" or to where a line break ends it.
+        const expression = (k) => {
+            let depth = 0;
+            for (let j = k; j < n; j++) {
+                const t = toks[j];
+                if (depth === 0 && j > k && t.nl && !continues(toks[j - 1], t)) return j;
+                if (t.type !== 'punct') continue;
+                if (depth === 0 && t.value === ';') return j + 1;
+                if (OPENERS.has(t.value)) depth++;
+                else if (CLOSERS.has(t.value)) depth = Math.max(0, depth - 1);
+            }
+            return n;
+        };
+        // Index after the statement that starts at k (always more than k).
+        const statement = (k) => {
+            if (k >= n) return n;
+            const t = toks[k];
+            const next = k + 1;
+            if (punct(k, ';')) return next;
+            if (punct(k, '{')) return group(k);
+            if (t.type === 'name') {
+                switch (t.value) {
+                    case 'if': {
+                        let j = statement(paren(next));
+                        if (word(j, 'else')) j = statement(j + 1);
+                        return j;
+                    }
+                    case 'for':
+                        return statement(paren(word(next, 'await') ? next + 1 : next));
+                    case 'while':
+                    case 'with':
+                        return statement(paren(next));
+                    case 'do': {
+                        let j = statement(next);
+                        if (word(j, 'while')) {
+                            j = paren(j + 1);
+                            if (punct(j, ';')) j++;
+                        }
+                        return j;
+                    }
+                    case 'try': {
+                        let j = block(next);
+                        if (word(j, 'catch')) j = block(paren(j + 1));
+                        if (word(j, 'finally')) j = block(j + 1);
+                        return j;
+                    }
+                    case 'switch':
+                        return block(paren(next));
+                    case 'function':
+                        return declaration(next);
+                    case 'async':
+                        if (word(next, 'function') && !toks[next].nl) return declaration(next + 1);
+                        break;
+                    case 'class': {
+                        let j = next;
+                        while (j < n && !punct(j, '{') && !punct(j, ';')) j = OPENERS.has(toks[j].value) && toks[j].type === 'punct' ? group(j) : j + 1;
+                        return block(j);
+                    }
+                    case 'return':
+                    case 'throw':
+                        // Restricted: a line break right after them ends the statement.
+                        return next >= n || toks[next].nl ? next : expression(next);
+                    case 'break':
+                    case 'continue': {
+                        let j = next;
+                        if (j < n && toks[j].type === 'name' && !toks[j].nl) j++;
+                        return punct(j, ';') ? j + 1 : j;
+                    }
+                    case 'debugger':
+                        return punct(next, ';') ? next + 1 : next;
+                    default:
+                        if (punct(next, ':')) return statement(next + 1); // a label
+                }
+            }
+            return expression(k);
+        };
+
         const statements = [];
-        let current = '';
-        let start = -1;  // offset of the first character of the statement
-        let end = -1;    // offset just after its last character
-        let depth = 0;
-        let i = 0;
-        const flush = () => {
-            const s = current.trim();
-            if (s) statements.push({ text: s, start, end });
-            current = '';
-            start = -1;
-        };
-        const mark = (from, to) => {
-            if (start < 0) start = from;
-            end = to;
-        };
-
-        while (i < code.length) {
-            const ch = code[i];
-            const next = code[i + 1];
-
-            if (ch === '/' && next === '/') {
-                while (i < code.length && code[i] !== '\n') i++;
-                continue;
+        let k = 0;
+        while (k < n) {
+            const j = Math.max(k + 1, statement(k));
+            let last = j - 1;
+            if (punct(last, ';')) last--;
+            if (last >= k) {
+                const start = toks[k].start;
+                const end = toks[last].end;
+                statements.push({ text: code.slice(start, end), start, end });
             }
-            if (ch === '/' && next === '*') {
-                const j = code.indexOf('*/', i + 2);
-                i = j < 0 ? code.length : j + 2;
-                current += ' ';
-                continue;
-            }
-            if (ch === '"' || ch === "'" || ch === '`') {
-                let j = i + 1;
-                while (j < code.length && code[j] !== ch) {
-                    if (code[j] === '\\') j++;
-                    j++;
-                }
-                current += code.slice(i, j + 1);
-                mark(i, Math.min(code.length, j + 1));
-                i = j + 1;
-                continue;
-            }
-            if ('([{'.includes(ch)) depth++;
-            else if (')]}'.includes(ch)) depth = Math.max(0, depth - 1);
-
-            if (depth === 0 && ch === ';') {
-                flush();
-                i++;
-                continue;
-            }
-            if (depth === 0 && ch === '\n') {
-                const trimmed = current.trimEnd();
-                const last = trimmed[trimmed.length - 1];
-                const upcoming = nextSignificantChar(code, i + 1);
-                if (trimmed && !CONTINUES_LINE.includes(last) && !(upcoming && CONTINUES_NEXT.includes(upcoming))) {
-                    flush();
-                    i++;
-                    continue;
-                }
-            }
-            current += ch;
-            if (!/\s/.test(ch)) mark(i, i + 1);
-            i++;
+            k = j;
         }
-        flush();
         return statements;
     }
 
@@ -5091,6 +5482,34 @@
         return 60;
     }
 
+    /**
+     * How .midi() reads an event, shared by live output and MIDI file export:
+     * the channel (midichan, 0 by default), the messages sent at the onset
+     * (program change, control change, NRPN as CC 99/98/6/38) and the note,
+     * which is null for a control-only event (no s, note, midinote or freq).
+     * Named drums (bd, sn, hh...) play their General MIDI note. `duration` is
+     * the event's length in seconds; the note lasts `sustain` seconds, else
+     * duration * legato, and at least 10 ms.
+     */
+    function midiEventOf(v, duration) {
+        const channel = clamp(isNum(v.midichan) ? Math.floor(v.midichan) : 0, 0, 15);
+        const cc = (number, value) => [0xb0 | channel, number, value];
+        const controls = [];
+        if (isNum(v.pgm)) controls.push([0xc0 | channel, clamp(Math.floor(v.pgm), 0, 127)]);
+        if (isNum(v.ccn) && isNum(v.ccv)) controls.push(cc(clamp(Math.floor(v.ccn), 0, 127), clamp(Math.floor(v.ccv), 0, 127)));
+        const [nrpnNumber, nrpnValue] = typeof v.nrpn === 'string' ? v.nrpn.split(':').map(Number) : [v.nrpnn, v.nrpnv];
+        if (isNum(nrpnNumber) && isNum(nrpnValue)) {
+            const param = clamp(Math.floor(nrpnNumber), 0, 16383);
+            const value = clamp(Math.floor(nrpnValue), 0, 16383);
+            controls.push(cc(99, param >> 7), cc(98, param & 127), cc(6, value >> 7), cc(38, value & 127));
+        }
+        if (!v.s && !isNum(v.note) && !isNum(v.midinote) && !isNum(v.freq)) return { channel, controls, note: null };
+        const key = clamp(Math.round(midiNoteOf(v) + (isNum(v.up) ? v.up : 0)), 0, 127);
+        const velocity = clamp(Math.round(isNum(v.vel) ? (v.vel <= 1 ? v.vel * 127 : v.vel) : (isNum(v.gain) ? v.gain : 1) * 100), 1, 127);
+        const length = Math.max(0.01, isNum(v.sustain) ? v.sustain : duration * (isNum(v.legato) ? v.legato : 1));
+        return { channel, controls, note: { key, velocity, length } };
+    }
+
     /** Smootherstep, Perlin's fade curve: 6x^5 - 15x^4 + 10x^3. */
     const fade = (f) => f * f * f * (f * (f * 6 - 15) + 10);
 
@@ -5201,6 +5620,14 @@
             this._midiListening = false;
             this._oscValues = new Map();       // OSC address -> last numeric arguments
             this._oscListening = false;
+
+            // Evaluation, one-shots and the clock.
+            this._txn = null;                  // commands staged while eval() runs code (see _stage)
+            this._txnCps = undefined;          // the tempo a staged setCPS() will set
+            this._oneShots = new Set();        // { session, timer } of first(), once() and asap()
+            this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
+            this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
+            this._sampleListeners = new Set(); // called when sample loads finish or fail
         }
 
         // --- Setup -----------------------------------------------------
@@ -5366,6 +5793,7 @@
 
             // Buses: values that can be changed from outside while playing.
             g.setBus = (name, value) => {
+                if (this._stage('setBus', () => g.setBus(name, value))) return value;
                 this.buses.set(String(name), value);
                 this._liveChanged();
                 return value;
@@ -5500,8 +5928,12 @@
             // Output, recording and export
             g.setOscUrl = (url) => {
                 this.oscUrl = String(url);
-                if (this._socket) this._socket.close();
+                const old = this._socket;
                 this._socket = null;
+                this._socketQueue = []; // packets waiting for the old bridge are not sent to the new one
+                if (old) {
+                    try { old.close(); } catch (e) { /* already closed */ }
+                }
                 // oscIn() keeps listening, on the new bridge.
                 if (this._oscListening) this._oscSocket();
                 return this.oscUrl;
@@ -5512,6 +5944,20 @@
             g.exportPattern = (pattern, cycles, format) => this.exportPattern(pattern, cycles, format);
 
             this._setupTidalLibrary(g);
+
+            // Commands with effects outside the music wait for the evaluation to commit (see _stage).
+            // stopRecording's promise settles when it runs, or with null when the evaluation is dropped.
+            for (const name of ['record', 'stopRecording', 'exportPattern', 'setOscUrl']) {
+                const command = g[name];
+                if (typeof command !== 'function') continue;
+                g[name] = (...args) => {
+                    if (!this._txn) return command(...args);
+                    let settle;
+                    const result = new Promise((resolve) => { settle = resolve; });
+                    this._stage(name, () => settle(command(...args)), () => settle(null));
+                    return name === 'stopRecording' ? result : name === 'setOscUrl' ? String(args[0]) : name === 'record' ? true : undefined;
+                };
+            }
 
             // Plays a short 440 Hz beep to check that audio output works.
             g.testAudio = () => {
@@ -5532,12 +5978,64 @@
 
         // --- Clock -----------------------------------------------------
 
+        /**
+         * The cycle at an audio time. A tempo change moves the anchor to a
+         * frontier (the scheduling frontier, or the onset of an event with a
+         * cps control); times before it keep the mapping they had, so the
+         * playhead and events already scheduled do not jump.
+         */
         cycleAt(time) {
+            if (time < this._anchorTime && this._tempoHistory.length) {
+                const seg = this._tempoSegment((s) => s.time <= time);
+                return seg.cycle + (time - seg.time) * seg.cps;
+            }
             return this._anchorCycle + (time - this._anchorTime) * this.cps;
         }
 
+        /** The audio time of a cycle, with the mapping in force at that cycle (see cycleAt). */
         timeAt(cycle) {
+            if (cycle < this._anchorCycle && this._tempoHistory.length) {
+                const seg = this._tempoSegment((s) => s.cycle <= cycle);
+                return seg.time + (cycle - seg.cycle) / seg.cps;
+            }
             return this._anchorTime + (cycle - this._anchorCycle) / this.cps;
+        }
+
+        /** The latest earlier anchor that `fits`, or the earliest one kept. */
+        _tempoSegment(fits) {
+            for (let i = this._tempoHistory.length - 1; i >= 0; i--) {
+                if (fits(this._tempoHistory[i])) return this._tempoHistory[i];
+            }
+            return this._tempoHistory[0];
+        }
+
+        /**
+         * Changes the tempo from `cycle` on: the old mapping stays valid up to
+         * that frontier, the new one starts there at the same time.
+         */
+        _retempo(cycle, cps) {
+            const time = this.timeAt(cycle);
+            this._tempoHistory.push({ time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps });
+            if (this._tempoHistory.length > 32) this._tempoHistory.shift();
+            this._anchorTime = time;
+            this._anchorCycle = cycle;
+            this.cps = cps;
+        }
+
+        /**
+         * While eval() runs code, commands that change what TidalJS plays
+         * (tempo, hush, the output stage, mute and solo, one-shots, cycles,
+         * buses, recording, export and the OSC address) are staged instead of
+         * applied: they run in order when the evaluation commits, and a failed
+         * evaluation, or a live update held back by warnings, drops them.
+         * Returns true when staged. `discard` runs when they are dropped.
+         * Other side effects of the code itself (the page, the network,
+         * globals it sets) are JavaScript's and are not rolled back.
+         */
+        _stage(kind, apply, discard = null) {
+            if (!this._txn) return false;
+            this._txn.push({ kind, apply, discard });
+            return true;
         }
 
         /** Global functions from the rest of Tidal's library (see "More of Tidal's library"). */
@@ -5799,11 +6297,13 @@
                 return s;
             };
             g.panic = () => {
+                if (this._stage('panic', () => g.panic())) return;
                 this.stopAll();
                 this._allNotesOff();
             };
             g.setbpm = (bpm) => this.setTempo(bpm);
-            g.getcps = () => this.cps;
+            // While code is evaluated, a setCPS() earlier in it is already seen.
+            g.getcps = () => (this._txn && this._txnCps !== undefined ? this._txnCps : this.cps);
             g.getnow = () => this.getCyclePosition();
             g.setCycle = (cycle) => this.setCycle(cycle);
             for (let i = 1; i <= 16; i++) g['d' + i] = (pattern) => streamed(this, i, pattern);
@@ -5852,26 +6352,57 @@
             g.unmute = (id) => this.mute(id, false);
             g.solo = (id) => this.solo(id, true);
             g.unsolo = (id) => this.solo(id, false);
-            g.unmuteAll = () => this.muted.clear();
-            g.unsoloAll = () => this.soloed.clear();
+            g.unmuteAll = () => this.unmuteAll();
+            g.unsoloAll = () => this.unsoloAll();
         }
 
         /**
          * Plays the first cycle of a pattern once, starting now (Tidal's once).
-         * It plays on its own; nothing is added to what is playing.
+         * It plays on its own: in its own session (output and orbit effects),
+         * so starting or stopping the loops does not cut it, and the Stop
+         * button (stopAll) does. Its graph goes once its effect tails are over.
          */
         playOnce(pattern) {
+            if (this._stage('once', () => this.playOnce(pattern))) return;
             const ctx = this.audioContext;
             if (!ctx) return;
-            if (!this._session) this._session = this._createSession();
+            const session = this._createSession();
             const start = ctx.currentTime + 0.05;
-            for (const ev of pattern.query(0, 1)) {
-                try {
-                    this.playEvent(asObject(ev.value), start + ev.begin / this.cps, (ev.end - ev.begin) / this.cps);
-                } catch (error) {
-                    console.error('TidalJS: could not play event:', error);
+            const cps = this.cps;
+            const events = pattern.query(0, 1).slice().sort((a, b) => a.begin - b.begin);
+            const saved = this._session;
+            this._session = session;
+            let end = start;
+            try {
+                for (const ev of events) {
+                    const v = asObject(ev.value);
+                    const time = start + ev.begin / cps + (isNum(v.nudge) ? v.nudge : 0);
+                    const duration = (ev.end - ev.begin) / cps;
+                    end = Math.max(end, time + duration);
+                    try {
+                        this.playEvent(v, Math.max(time, ctx.currentTime), duration);
+                    } catch (error) {
+                        console.error('TidalJS: could not play event:', error);
+                    }
                 }
+            } finally {
+                this._session = saved;
             }
+            const shot = { session, timer: null };
+            this._oneShots.add(shot);
+            shot.timer = setTimeout(() => this._endOneShot(shot), Math.max(0, end - ctx.currentTime + ONE_SHOT_TAIL) * 1000);
+        }
+
+        /** Ends a one-shot: its session is faded out and disconnected. */
+        _endOneShot(shot) {
+            if (!this._oneShots.delete(shot)) return;
+            clearTimeout(shot.timer);
+            this._teardownSession(shot.session);
+        }
+
+        /** True while a first(), once() or asap() is still sounding. */
+        get playingOneShots() {
+            return this._oneShots.size > 0;
         }
 
         /** Current position in cycles (fractional), 0 when stopped. */
@@ -5909,15 +6440,18 @@
             const value = toNumber(cps);
             if (value === undefined || value <= 0) {
                 console.warn('TidalJS: setCPS() expects a positive number');
-                return this.cps;
+                return this._txn && this._txnCps !== undefined ? this._txnCps : this.cps;
             }
-            if (this.isPlaying) {
-                // Re-anchor at the scheduling frontier so already scheduled
-                // events keep their times and new ones follow the new tempo.
-                this._anchorTime = this.timeAt(this._nextCycle);
-                this._anchorCycle = this._nextCycle;
+            const next = clamp(value, 0.05, 10);
+            if (this._txn) {
+                this._txnCps = next;
+                this._stage('cps', () => this.setCPS(next));
+                return next;
             }
-            this.cps = clamp(value, 0.05, 10);
+            // Re-anchor at the scheduling frontier so already scheduled
+            // events keep their times and new ones follow the new tempo.
+            if (this.isPlaying) this._retempo(this._nextCycle, next);
+            else this.cps = next;
             return this.cps;
         }
 
@@ -5939,6 +6473,7 @@
         setOutput(gain = 0.8, limiter = true) {
             const value = toNumber(gain);
             if (value === undefined || value < 0) throw new TypeError('setOutput() expects a volume of 0 or more, e.g. setOutput(1, false)');
+            if (this._stage('output', () => this.setOutput(gain, limiter))) return { gain: clamp(value, 0, 4), limiter: !!limiter };
             this._outputGain = clamp(value, 0, 4);
             this._limiterOn = !!limiter;
             if (this.masterGain && this.masterGain.gain) this.masterGain.gain.value = this._outputGain;
@@ -5961,20 +6496,25 @@
         /** Sets the cycle the clock is at: the next cycle scheduled becomes `cycle` (Tidal's setCycle). */
         setCycle(cycle) {
             const c = requireNumber('setCycle', cycle);
+            if (this._stage('setCycle', () => this.setCycle(c))) return c;
             if (this.isPlaying) {
+                // The cycles are numbered afresh from here: earlier anchors no longer apply.
                 this._anchorTime = this.timeAt(this._nextCycle);
                 this._anchorCycle = c;
                 this._nextCycle = c;
+                this._tempoHistory = [];
             }
             return c;
         }
 
         /** Starts counting cycles from 0 again, from the next cycle scheduled (Tidal's resetCycles). */
         resetCycles() {
+            if (this._stage('resetCycles', () => this.resetCycles())) return 0;
             if (this.isPlaying) {
                 this._anchorTime = this.timeAt(this._nextCycle);
                 this._anchorCycle = 0;
                 this._nextCycle = 0;
+                this._tempoHistory = [];
             }
             return 0;
         }
@@ -5991,30 +6531,37 @@
             this._anchorTime = ctx.currentTime + 0.05;
             this._anchorCycle = 0;
             this._nextCycle = 0;
+            this._tempoHistory = [];
             this.isPlaying = true;
             this._startTimer();
         }
 
+        /** Stops the clock and the loops' session; one-shots play on (stopAll ends them too). */
         _halt() {
             this.isPlaying = false;
             this._stopTimer();
             const session = this._session;
             this._session = null;
-            if (session && this.audioContext) {
-                // Fade out quickly, then tear down everything of this run,
-                // including events already scheduled and effect tails.
-                const t = this.audioContext.currentTime;
-                const g = session.out.gain;
+            this._teardownSession(session);
+            this._midiHeld.clear(); // the held keys' voices went with the session
+            this._liveVoices.clear();
+            this._cancelExternalOutput();
+            this._allNotesOff();
+        }
+
+        /** Fades a session out quickly, then disconnects everything of it, events already scheduled and effect tails included. */
+        _teardownSession(session) {
+            if (!session || !this.audioContext) return;
+            const t = this.audioContext.currentTime;
+            const g = session.out.gain;
+            try {
                 g.cancelScheduledValues(t);
                 g.setValueAtTime(g.value, t);
                 g.linearRampToValueAtTime(0, t + 0.04);
-                setTimeout(() => session.nodes.forEach((node) => {
-                    try { node.disconnect(); } catch (e) { /* already disconnected */ }
-                }), 150);
-            }
-            this._midiHeld.clear(); // the held keys' voices went with the session
-            this._liveVoices.clear();
-            this._allNotesOff();
+            } catch (e) { /* a closed context */ }
+            setTimeout(() => session.nodes.forEach((node) => {
+                try { node.disconnect(); } catch (e) { /* already disconnected */ }
+            }), 150);
         }
 
         _playPattern(pattern) {
@@ -6036,12 +6583,29 @@
             if (this.channels.size === 0) this._halt();
         }
 
-        /** Stops every pattern and silences the output. */
+        /** Stops every pattern and one-shot and silences the output (hush). */
         stopAll() {
+            if (this._stage('hush', () => this.stopAll())) return;
             this.channels.clear();
             this.streams.clear();
             this.channelCounter = 0;
+            for (const shot of [...this._oneShots]) this._endOneShot(shot);
             this._halt();
+        }
+
+        /**
+         * A stream whose pattern failed while playing: it is removed (from the
+         * streams too, so no transition starts from it), the others play on,
+         * and when it was the last one the clock stops. onError(error, info)
+         * tells which stream it was and whether playback stopped.
+         */
+        _streamFailed(id, error) {
+            console.error('TidalJS: pattern error, removing pattern:', error);
+            this.channels.delete(id);
+            if (typeof id === 'string') this.streams.delete(id);
+            const stopped = this.channels.size === 0;
+            if (stopped) this._halt();
+            if (typeof this.onError === 'function') this.onError(error, { stream: typeof id === 'string' ? id : null, stopped });
         }
 
         // --- Streams: mute and solo ------------------------------------
@@ -6057,6 +6621,7 @@
         /** Mutes (or unmutes) a stream: d1 is mute(1) or mute("d1"). */
         mute(name, on = true) {
             const key = streamName(name);
+            if (this._stage('mute', () => this.mute(key, on))) return;
             if (on) this.muted.add(key);
             else this.muted.delete(key);
         }
@@ -6064,8 +6629,19 @@
         /** Solos (or unsolos) a stream: only soloed streams are heard while any is. */
         solo(name, on = true) {
             const key = streamName(name);
+            if (this._stage('solo', () => this.solo(key, on))) return;
             if (on) this.soloed.add(key);
             else this.soloed.delete(key);
+        }
+
+        unmuteAll() {
+            if (this._stage('mute', () => this.unmuteAll())) return;
+            this.muted.clear();
+        }
+
+        unsoloAll() {
+            if (this._stage('solo', () => this.unsoloAll())) return;
+            this.soloed.clear();
         }
 
         /** The playing streams in order, with their state, for the editor. */
@@ -6124,28 +6700,47 @@
             if (to <= from) return;
             this._nextCycle = to;
 
-            for (const [id, pattern] of this.channels) {
+            // Every audible stream's events in the window. Simultaneous events
+            // keep a fixed order: the streams' order, then the order each
+            // stream gives them.
+            const items = [];
+            let order = 0;
+            for (const [id, pattern] of [...this.channels]) {
+                const stream = order++;
                 if (!this.isAudible(id)) continue;
                 let events;
                 try {
                     events = pattern.query(from, to);
                 } catch (error) {
-                    console.error('TidalJS: pattern error, removing pattern:', error);
-                    this.channels.delete(id);
-                    if (typeof this.onError === 'function') this.onError(error);
+                    this._streamFailed(id, error);
                     continue;
                 }
-                for (const ev of events) {
-                    const v = asObject(ev.value);
-                    // Tidal's cps control: an event can change the tempo (setcps is once . cps).
-                    if (isNum(v.cps) && v.cps > 0 && Math.abs(v.cps - this.cps) > 1e-9) this.setCPS(v.cps);
-                    const time = this.timeAt(ev.begin) + (isNum(v.nudge) ? v.nudge : 0);
-                    if (time < now - 0.02) continue;
-                    try {
-                        this.playEvent(v, Math.max(time, now), (ev.end - ev.begin) / this.cps);
-                    } catch (error) {
-                        console.error('TidalJS: could not play event:', error);
-                    }
+                for (let i = 0; i < events.length; i++) items.push({ ev: events[i], v: asObject(events[i].value), stream, i });
+            }
+            if (!this.isPlaying) return; // the last stream failed
+            items.sort((a, b) => a.ev.begin - b.ev.begin || a.stream - b.stream || a.i - b.i);
+
+            // Tidal's cps control: an event changes the tempo from its onset
+            // on, for every event that starts there or later (setcps is once . cps).
+            for (const it of items) {
+                if (!isNum(it.v.cps) || !(it.v.cps > 0)) continue;
+                const cps = clamp(it.v.cps, 0.05, 10);
+                if (Math.abs(cps - this.cps) > 1e-9) this._retempo(it.ev.begin, cps);
+            }
+
+            // Then in the order they sound (nudge included), so the last word on
+            // an orbit's effects or a cut group is the latest event's.
+            const timed = items.map((it) => {
+                const begin = this.timeAt(it.ev.begin);
+                return { ...it, time: begin + (isNum(it.v.nudge) ? it.v.nudge : 0), duration: this.timeAt(it.ev.end) - begin };
+            });
+            timed.sort((a, b) => a.time - b.time || a.stream - b.stream || a.i - b.i);
+            for (const it of timed) {
+                if (it.time < now - 0.02) continue;
+                try {
+                    this.playEvent(it.v, Math.max(it.time, now), it.duration);
+                } catch (error) {
+                    console.error('TidalJS: could not play event:', error);
                 }
             }
         }
@@ -6225,6 +6820,11 @@
             this._collecting = { push: (pattern) => collected.push([current, pattern]) };
             // slider(), toggle(), controlLayout(), midikeys() and oscplay() of this code: they replace the old ones only if it plays.
             this._live = { controls: new Map(), layouts: [], midiKeys: [], oscPlays: [] };
+            // Commands (setCPS, hush, setOutput, once...) wait for the commit (see _stage).
+            const txn = [];
+            this._txn = txn;
+            this._txnCps = undefined;
+            let committed = false;
             try {
                 const body = statements
                     .map((s, k) => `__at(${k});\n` + (isExpression(s.text) ? `__out(${k}, (${s.text}\n));` : `${s.text}\n;`))
@@ -6273,26 +6873,49 @@
 
                 // Each pattern plays in a stream: d1 to d16 or p("name") name
                 // theirs, the others are #1, #2... in order. A transition starts
-                // from the stream's previous pattern. In live updates, a stream
-                // whose events have not changed keeps playing as it was, so a
-                // running transition is not restarted by editing another line.
-                const now = this.isPlaying ? this._nextCycle : 0;
+                // from the stream's previous pattern. A hush() in the code
+                // clears the streams first, as if it had run before them.
+                const hushed = txn.some((op) => op.kind === 'hush' || op.kind === 'panic');
+                const before = hushed ? new Map() : this.streams;
+                const wasPlaying = this.isPlaying && !hushed;
+                const now = wasPlaying ? this._nextCycle : 0;
+                // In live updates a stream whose code is the same, and whose
+                // declarations and other statements are the same, keeps playing
+                // as it was, so a running transition is not restarted by editing
+                // another line (see streamSources).
+                const sourceOf = streamSources(statements, new Set(origin.values()));
                 const streams = new Map();
+                const ordinal = new Map();
                 let unnamed = 0;
                 for (const p of patterns) {
                     const name = p._stream || '#' + (++unnamed);
                     current = origin.get(p);
+                    const nth = (ordinal.get(current) || 0) + 1;
+                    ordinal.set(current, nth);
+                    const source = sourceOf(current) + '\u0001' + nth;
                     if (streams.has(name)) warnings.add(`Stream ${name} is used twice; the last one plays`);
-                    const prev = this.streams.get(name);
+                    const prev = before.get(name);
                     const history = prev ? [prev.pattern, ...(prev.history || [])].slice(0, 16) : [];
-                    if (options.keepUnchanged && prev && sameEvents(prev.pattern, p, now)) {
+                    if (options.keepUnchanged && wasPlaying && prev && prev.source === source) {
                         streams.set(name, prev);
                     } else if (p._transition) {
                         // As in Tidal, a stream with no history (or stopped) starts from silence.
-                        const old = prev && this.isPlaying ? prev.pattern : silence(this);
-                        streams.set(name, { pattern: p, history, playing: p._transition(now, p, old, history) });
+                        const old = prev && wasPlaying ? prev.pattern : silence(this);
+                        streams.set(name, { pattern: p, history, playing: p._transition(now, p, old, history), source });
                     } else {
-                        streams.set(name, { pattern: p, history, playing: p });
+                        streams.set(name, { pattern: p, history, playing: p, source });
+                    }
+                }
+
+                // Commit: the staged commands in order, then the streams, the controls and the clock.
+                this._txn = null;
+                committed = true;
+                for (const op of txn) {
+                    try {
+                        op.apply();
+                    } catch (error) {
+                        console.error('TidalJS:', error);
+                        warnings.add(error && error.message ? error.message : String(error));
                     }
                 }
                 this.streams = streams;
@@ -6307,12 +6930,19 @@
                 this._layouts = live.layouts;
                 this._notifyControls();
                 if (patterns.length > 0) this._start();
-                else this._halt();
+                else if (this.isPlaying) this._halt();
 
                 return { success: true, activePatterns: patterns.length, warnings: [...warnings] };
             } catch (error) {
                 return fail(error, current);
             } finally {
+                if (!committed) {
+                    for (const op of txn) {
+                        try { if (op.discard) op.discard(); } catch (e) { /* nothing to undo */ }
+                    }
+                }
+                this._txn = null;
+                this._txnCps = undefined;
                 this._collecting = null;
                 this._warnings = null;
                 this._live = null;
@@ -7270,7 +7900,14 @@
          *
          * A manifest maps bank names to file lists, with an optional _base
          * URL. Returns a promise of the number of banks loaded. Loading the
-         * same source again reuses the first load.
+         * same source again reuses the first load; a load that failed is not
+         * tried again until retrySamples().
+         *
+         * Paths are URLs relative to a base: for a manifest URL, its _base
+         * (itself relative to the manifest's final URL, after redirects) or
+         * the manifest's own URL; for banks given as an object, `base` or
+         * their _base, relative to the page. Absolute and root-relative
+         * ("/samples/bd.wav") paths work as in a link.
          */
         loadSamples(source, base = '') {
             const key = typeof source === 'string' ? source + '|' + base : null;
@@ -7280,18 +7917,21 @@
                 let map = source;
                 let root = base;
                 if (typeof source === 'string') {
-                    const url = manifestUrl(source);
+                    const url = resolveUrl(manifestUrl(source), pageBase());
                     const response = await fetch(url);
                     if (!response.ok) throw new Error(`Could not load samples from ${url} (HTTP ${response.status})`);
                     map = await response.json();
-                    if (!root) root = typeof map._base === 'string' ? map._base : url.slice(0, url.lastIndexOf('/') + 1);
+                    if (!map || typeof map !== 'object' || Array.isArray(map)) throw new Error(`The sample manifest ${url} is not an object of banks`);
+                    // Relative paths follow the manifest where it really is (after any redirect).
+                    const finalUrl = typeof response.url === 'string' && response.url ? response.url : url;
+                    root = resolveUrl(root || (typeof map._base === 'string' ? map._base : ''), finalUrl);
                 } else if (!source || typeof source !== 'object') {
                     throw new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }');
-                } else if (!root && typeof source._base === 'string') {
-                    root = source._base;
+                } else {
+                    root = resolveUrl(root || (typeof source._base === 'string' ? source._base : ''), pageBase());
                 }
                 let banks = 0;
-                const full = (f) => (/^(https?:|data:|blob:)/.test(f) ? f : root + f);
+                const full = (f) => resolveUrl(f, root);
                 for (const [name, files] of Object.entries(map)) {
                     if (name.startsWith('_')) continue;
                     const list = (Array.isArray(files) ? files : typeof files === 'string' ? [files] : Object.values(files || {}))
@@ -7312,10 +7952,11 @@
                 return banks;
             })();
 
+            // A failed load stays failed (no request on every evaluation) until retrySamples().
             if (key) this._sampleManifests.set(key, job);
             this._trackLoad(job.catch((err) => {
-                if (key) this._sampleManifests.delete(key); // allow a retry
                 console.error('TidalJS:', err);
+                this._sampleFailures.set(key || 'samples()', err && err.message ? err.message : String(err));
                 this._warnOnce(err.message);
             }));
             return job;
@@ -7332,12 +7973,66 @@
         }
 
         _trackLoad(promise) {
-            const tracked = Promise.resolve(promise).finally(() => this._sampleLoads.delete(tracked));
+            const tracked = Promise.resolve(promise).finally(() => {
+                this._sampleLoads.delete(tracked);
+                if (this._sampleLoads.size === 0) this._notifySamples();
+            });
             this._sampleLoads.add(tracked);
             return tracked;
         }
 
-        /** The decoded buffer of a sample file (reversed if asked), or null while it loads. */
+        /** The sample loads that failed: { source, message } for manifests and files. */
+        sampleFailures() {
+            return [...this._sampleFailures].map(([source, message]) => ({ source, message }));
+        }
+
+        /**
+         * Forgets the failed sample loads, so the next samples() call or event
+         * that needs them asks for them again. Returns how many were forgotten.
+         */
+        retrySamples() {
+            const count = this._sampleFailures.size;
+            for (const source of this._sampleFailures.keys()) {
+                this._sampleManifests.delete(source);
+                this._sampleBuffers.delete(source);
+            }
+            this._sampleFailures.clear();
+            this._notifySamples();
+            return count;
+        }
+
+        /** Calls fn() whenever sample loads finish or fail, or failures are retried; returns a function that stops it. */
+        onSamples(fn) {
+            this._sampleListeners.add(fn);
+            return () => this._sampleListeners.delete(fn);
+        }
+
+        _notifySamples() {
+            for (const fn of [...this._sampleListeners]) {
+                try { fn(); } catch (error) { console.error('TidalJS:', error); }
+            }
+        }
+
+        /**
+         * Unknown sound names in what plays (its next four cycles), now that
+         * the sample banks loaded: what eval() would warn about.
+         */
+        soundWarnings() {
+            const from = this.isPlaying ? Math.floor(this.getCyclePosition()) : 0;
+            const out = new Set();
+            for (const pattern of this.channels.values()) {
+                let events;
+                try { events = pattern.query(from, from + 4); } catch (e) { continue; }
+                for (const ev of events) {
+                    const v = asObject(ev.value);
+                    if (v.midi !== undefined || v.osc !== undefined || !v.s) continue;
+                    if (!this.sampleBanks.has(v.s) && !this.samples.has(v.s)) out.add(`Unknown sound "${v.s}"`);
+                }
+            }
+            return [...out];
+        }
+
+        /** The decoded buffer of a sample file (reversed if asked), or null while it loads (or failed: see retrySamples). */
         _sampleBuffer(url, reversed) {
             let entry = this._sampleBuffers.get(url);
             if (!entry) {
@@ -7351,7 +8046,8 @@
                     .then((buffer) => { entry.buffer = buffer; })
                     .catch((err) => {
                         entry.failed = true;
-                        this._warnOnce(`Could not load sample ${url} (${err.message})`);
+                        this._sampleFailures.set(url, `Could not load sample ${url} (${err && err.message ? err.message : err})`);
+                        this._warnOnce(`Could not load sample ${url} (${err && err.message ? err.message : err})`);
                     }));
                 this._sampleBuffers.set(url, entry);
             }
@@ -8781,35 +9477,87 @@
             const out = this._midiOutput(v.midi);
             if (!out) return;
             const ctx = this.audioContext;
-            const toPerf = (t) => performance.now() + (t - ctx.currentTime) * 1000;
-            const channel = clamp(isNum(v.midichan) ? Math.floor(v.midichan) : 0, 0, 15);
+            const now = performance.now();
+            const toPerf = (t) => now + (t - ctx.currentTime) * 1000;
+            const { channel, controls, note } = midiEventOf(v, duration);
             const at = toPerf(time);
-            if (isNum(v.pgm)) out.send([0xc0 | channel, clamp(Math.floor(v.pgm), 0, 127)], at);
-            if (isNum(v.ccn) && isNum(v.ccv)) {
-                out.send([0xb0 | channel, clamp(Math.floor(v.ccn), 0, 127), clamp(Math.floor(v.ccv), 0, 127)], at);
+            try {
+                for (const message of controls) out.send(message, at);
+                if (!note) return;
+                const off = toPerf(time + note.length);
+                out.send([0x90 | channel, note.key, note.velocity], at);
+                this._trackMidiNote(out, channel, note.key, at, off, now);
+                out.send([0x80 | channel, note.key, 0], off);
+            } catch (err) {
+                // An unplugged output throws: skip its events instead of stopping the scheduler.
+                this._warnOnce(`MIDI output ${JSON.stringify(out.name || String(v.midi))} could not be used (${err && err.message})`);
             }
-            // NRPN: parameter number (CC 99 and 98) then value (CC 6 and 38), 14 bits each.
-            const [nrpnNumber, nrpnValue] = typeof v.nrpn === 'string' ? v.nrpn.split(':').map(Number) : [v.nrpnn, v.nrpnv];
-            if (isNum(nrpnNumber) && isNum(nrpnValue)) {
-                const param = clamp(Math.floor(nrpnNumber), 0, 16383);
-                const value = clamp(Math.floor(nrpnValue), 0, 16383);
-                out.send([0xb0 | channel, 99, param >> 7, 0xb0 | channel, 98, param & 127,
-                    0xb0 | channel, 6, value >> 7, 0xb0 | channel, 38, value & 127], at);
-            }
-            if (!v.s && !isNum(v.note) && !isNum(v.midinote) && !isNum(v.freq)) return;
-            let note = midiNoteOf(v) + (isNum(v.up) ? v.up : 0);
-            note = clamp(Math.round(note), 0, 127);
-            let velocity = isNum(v.vel) ? (v.vel <= 1 ? v.vel * 127 : v.vel) : (isNum(v.gain) ? v.gain : 1) * 100;
-            velocity = clamp(Math.round(velocity), 1, 127);
-            const length = isNum(v.sustain) ? v.sustain : duration * (isNum(v.legato) ? v.legato : 1);
-            out.send([0x90 | channel, note, velocity], at);
-            out.send([0x80 | channel, note, 0], toPerf(time + Math.max(0.01, length)));
         }
 
+        /**
+         * Keeps the notes sent ahead (with timestamps) to each output until
+         * their note-off has passed, so Stop can cancel or end them.
+         */
+        _trackMidiNote(out, channel, key, on, off, now) {
+            if (!this._midiSent) this._midiSent = new Map();
+            let notes = this._midiSent.get(out);
+            if (!notes) this._midiSent.set(out, notes = []);
+            if (notes.length >= 64) {
+                const live = notes.filter((n) => n.off > now);
+                notes.length = 0;
+                notes.push(...live);
+            }
+            notes.push({ channel, key, on, off });
+        }
+
+        /**
+         * Stop: the MIDI the performance scheduled ahead does not sound. Each
+         * output's pending messages are cleared where the browser supports
+         * clear(); notes already on get their note-off now, and notes still to
+         * come that could not be cancelled end as they start. Disconnected or
+         * failing outputs are skipped.
+         */
+        _cancelMidi() {
+            const sent = this._midiSent;
+            if (!sent || !sent.size) return;
+            this._midiSent = new Map();
+            const now = performance.now();
+            for (const [out, notes] of sent) {
+                if (out.state === 'disconnected') continue;
+                let cleared = false;
+                if (typeof out.clear === 'function') {
+                    try {
+                        out.clear();
+                        cleared = true;
+                    } catch (e) { /* not supported, or unplugged */ }
+                }
+                try {
+                    for (const n of notes) {
+                        if (n.off <= now) continue;          // already over
+                        if (n.on > now) {
+                            if (!cleared) out.send([0x80 | n.channel, n.key, 0], n.on);
+                        } else {
+                            out.send([0x80 | n.channel, n.key, 0]);
+                        }
+                    }
+                } catch (e) { /* unplugged meanwhile */ }
+            }
+        }
+
+        /** Stop: no MIDI or OSC the performance scheduled ahead goes out any more (called by _halt). */
+        _cancelExternalOutput() {
+            this._cancelMidi();
+            this._socketQueue = [];
+        }
+
+        /** All notes off (CC 123) on every channel of every output; unplugged outputs are skipped. */
         _allNotesOff() {
             if (!this.midiAccess) return;
             for (const out of this.midiAccess.outputs.values()) {
-                for (let ch = 0; ch < 16; ch++) out.send([0xb0 | ch, 123, 0]);
+                if (out.state === 'disconnected') continue;
+                try {
+                    for (let ch = 0; ch < 16; ch++) out.send([0xb0 | ch, 123, 0]);
+                } catch (e) { /* unplugged meanwhile */ }
             }
         }
 
@@ -9008,8 +9756,19 @@
             }
             socket.binaryType = 'arraybuffer';
             socket.onopen = () => {
-                for (const msg of this._socketQueue) socket.send(msg);
+                // A socket replaced meanwhile (setOscUrl, reconnect) sends nothing.
+                if (this._socket !== socket) return;
+                const queue = this._socketQueue;
                 this._socketQueue = [];
+                const now = Date.now() / 1000;
+                for (const { packet, at } of queue) {
+                    if (at < now) continue; // its time has passed: it would play late
+                    try {
+                        socket.send(packet);
+                    } catch (e) {
+                        break;
+                    }
+                }
             };
             socket.onerror = () => this._warnOnce(`Could not connect to the OSC bridge at ${this.oscUrl}`);
             socket.onclose = () => { if (this._socket === socket) this._socket = null; };
@@ -9086,47 +9845,115 @@
             }
             const wall = Date.now() / 1000 + (time - this.audioContext.currentTime);
             const packet = oscBundle(wall, oscMessage(String(v.osc), args));
+            // Until the socket opens, packets wait (dropped by Stop and setOscUrl).
             if (this._socket.readyState === 1) this._socket.send(packet);
-            else if (this._socketQueue.length < 256) this._socketQueue.push(packet);
+            else if (this._socketQueue.length < 256) this._socketQueue.push({ packet, at: wall });
         }
 
         // --- Recording and export --------------------------------------
 
-        /** Starts recording the audio output. */
+        /**
+         * Starts recording the audio output. Returns false if already
+         * recording; throws (leaving nothing connected) if it cannot start.
+         * A recorder error ends the recording and calls onRecordingError.
+         */
         startRecording() {
             if (!this.audioContext) throw new Error('Call tidal.init() before recording');
             if (this._recorder) return false;
             if (typeof MediaRecorder === 'undefined') throw new Error('Recording is not supported in this browser');
-            const dest = this.audioContext.createMediaStreamDestination();
-            this.output.connect(dest);
-            const chunks = [];
-            const recorder = new MediaRecorder(dest.stream);
-            recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-            this._recorder = { recorder, chunks, dest };
-            recorder.start();
+            const rec = { recorder: null, chunks: [], dest: null, done: false, settle: null, timer: null };
+            try {
+                rec.dest = this.audioContext.createMediaStreamDestination();
+                this.output.connect(rec.dest);
+                const recorder = new MediaRecorder(rec.dest.stream);
+                rec.recorder = recorder;
+                recorder.ondataavailable = (e) => { if (e.data && e.data.size) rec.chunks.push(e.data); };
+                recorder.onerror = (e) => this._recordingEnded(rec, (e && e.error) || new Error('the recorder stopped with an error'));
+                recorder.onstop = () => this._recordingEnded(rec, null);
+                recorder.start();
+            } catch (error) {
+                rec.done = true;
+                this._releaseRecording(rec);
+                throw error;
+            }
+            this._recorder = rec;
             return true;
         }
 
+        /** True only while a recording is running (not after an error, nor while it is being saved). */
         get isRecording() {
             return !!this._recorder;
         }
 
-        /** Stops recording, downloads the file and resolves with the Blob. */
+        /**
+         * Stops recording, downloads the file and resolves with the Blob.
+         * Resolves null when not recording or when nothing was recorded (no
+         * file then); rejects if the recorder fails. Never left pending.
+         */
         stopRecording(filename = 'tidaljs-recording') {
             const rec = this._recorder;
             if (!rec) return Promise.resolve(null);
             this._recorder = null;
-            return new Promise((resolve) => {
-                rec.recorder.onstop = () => {
-                    try { this.output.disconnect(rec.dest); } catch (e) { /* already disconnected */ }
-                    const type = rec.recorder.mimeType || 'audio/webm';
-                    const blob = new Blob(rec.chunks, { type });
-                    const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
-                    downloadBlob(blob, `${filename}.${ext}`);
-                    resolve(blob);
-                };
-                rec.recorder.stop();
+            return new Promise((resolve, reject) => {
+                rec.settle = { resolve, reject, filename };
+                if (rec.recorder.state === 'inactive') {
+                    this._recordingEnded(rec, null); // already stopped: its data is all there
+                    return;
+                }
+                try {
+                    rec.recorder.stop();
+                } catch (error) {
+                    this._recordingEnded(rec, error);
+                    return;
+                }
+                // A recorder that never reports back does not leave the promise pending.
+                if (!rec.done) {
+                    rec.timer = setTimeout(() => this._recordingEnded(rec, new Error('the recorder did not finish')), this.recordingTimeout || 10000);
+                }
             });
+        }
+
+        /** The end of a recording (stopped, failed or timed out), handled once: releases it, then saves or reports. */
+        _recordingEnded(rec, error) {
+            if (rec.done) return;
+            rec.done = true;
+            if (rec.timer) clearTimeout(rec.timer);
+            if (this._recorder === rec) this._recorder = null;
+            this._releaseRecording(rec);
+            const settle = rec.settle;
+            if (error) {
+                const err = error instanceof Error ? error : new Error(String(error && error.message || error));
+                if (settle) settle.reject(err);
+                else if (typeof this.onRecordingError === 'function') this.onRecordingError(err);
+                else console.error('TidalJS: recording failed:', err);
+                return;
+            }
+            if (!settle) return; // stopped by the browser without stopRecording(): nothing asked for the file
+            const type = (rec.recorder && rec.recorder.mimeType) || 'audio/webm';
+            const blob = new Blob(rec.chunks, { type });
+            if (!blob.size) {
+                settle.resolve(null); // nothing recorded: no file
+                return;
+            }
+            const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
+            try {
+                downloadBlob(blob, `${settle.filename}.${ext}`);
+            } catch (e) {
+                settle.reject(e);
+                return;
+            }
+            settle.resolve(blob);
+        }
+
+        /** Disconnects a recording's destination and stops its media tracks. */
+        _releaseRecording(rec) {
+            const dest = rec.dest;
+            if (!dest) return;
+            rec.dest = null;
+            try { this.output.disconnect(dest); } catch (e) { /* not connected */ }
+            try {
+                if (dest.stream && typeof dest.stream.getTracks === 'function') dest.stream.getTracks().forEach((track) => track.stop());
+            } catch (e) { /* already ended */ }
         }
 
         /**
@@ -9152,20 +9979,24 @@
             return data;
         }
 
+        /**
+         * A Standard MIDI File (format 0, 480 ticks a beat, 4 beats a cycle) of
+         * the events, read as .midi() reads them live (see midiEventOf).
+         */
         _midiFile(events) {
             const ppq = 480;
             const ticksPerCycle = ppq * 4;
+            const toTick = (cycle) => Math.round(cycle * ticksPerCycle);
+            // At one tick: note-offs, then program and control changes, then note-ons.
             const messages = [];
             for (const ev of events) {
-                const v = ev.value;
-                const drum = v.s && GM_DRUMS[v.s] !== undefined && !isNum(v.note) && !isNum(v.midinote) && !isNum(v.freq);
-                const channel = drum ? 9 : clamp(isNum(v.midichan) ? Math.floor(v.midichan) : 0, 0, 15);
-                const note = clamp(Math.round(midiNoteOf(v) + (isNum(v.up) ? v.up : 0)), 0, 127);
-                const velocity = clamp(Math.round(isNum(v.vel) ? (v.vel <= 1 ? v.vel * 127 : v.vel) : (isNum(v.gain) ? v.gain : 1) * 100), 1, 127);
-                const on = Math.round(ev.begin * ticksPerCycle);
-                const off = Math.max(on + 1, Math.round(ev.end * ticksPerCycle));
-                messages.push({ tick: on, order: 1, data: [0x90 | channel, note, velocity] });
-                messages.push({ tick: off, order: 0, data: [0x80 | channel, note, 0] });
+                const { channel, controls, note } = midiEventOf(ev.value, (ev.end - ev.begin) / this.cps);
+                const on = toTick(ev.begin);
+                for (const data of controls) messages.push({ tick: on, order: 1, data });
+                if (!note) continue; // control-only: no note
+                const off = Math.max(on + 1, toTick(ev.begin + note.length * this.cps));
+                messages.push({ tick: on, order: 2, data: [0x90 | channel, note.key, note.velocity] });
+                messages.push({ tick: off, order: 0, data: [0x80 | channel, note.key, 0] });
             }
             messages.sort((a, b) => a.tick - b.tick || a.order - b.order);
 
@@ -9200,6 +10031,29 @@
         }
         if (/\.json(\?.*)?$/.test(source)) return source;
         return source.replace(/\/?$/, '/') + 'strudel.json';
+    }
+
+    /** The page's address, the base of relative sample paths given in code; null outside a page. */
+    function pageBase() {
+        const doc = root.document;
+        if (doc && typeof doc.baseURI === 'string' && doc.baseURI) return doc.baseURI;
+        const loc = root.location;
+        return loc && typeof loc.href === 'string' && loc.href ? loc.href : null;
+    }
+
+    /**
+     * A URL resolved against a base, as a link would be: absolute ones stay,
+     * "/x" goes to the base's origin, "x" next to it. Without a usable base
+     * (outside a page), the path is put after the base as text.
+     */
+    function resolveUrl(path, base) {
+        if (/^[a-z][a-z\d+.-]*:/i.test(path)) return path;
+        if (base) {
+            try {
+                return new URL(path, base).href;
+            } catch (e) { /* not a URL base: below */ }
+        }
+        return (base || '') + path;
     }
 
     function downloadBlob(blob, filename) {

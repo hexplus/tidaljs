@@ -9,7 +9,9 @@ import vm from 'node:vm';
 import { convertSuperCollider, looksLikeSuperCollider } from '../src/supercollider/index.ts';
 import { parse } from '../src/supercollider/parser.ts';
 import { Interpreter } from '../src/supercollider/interpreter.ts';
-import { parseImport } from '../src/library.ts';
+import { parseImport, parseImportAsync } from '../src/library.ts';
+import { convertSuperColliderAsync } from '../src/supercollider/client.ts';
+import { isSafeBinding, TIDAL_GLOBALS } from '../src/supercollider/emit.ts';
 
 vm.runInThisContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), { filename: 'tidal.js' });
 console.warn = () => {};
@@ -783,6 +785,244 @@ Pbind(\instrument, \sq, \cutoff, ~c.asMap, \dur, 0.5).play;`, 2);
   const { js } = play(String.raw`SynthDef(\held, { |freq = 220, amp = 0.1, gate = 1| Out.ar(0, Saw.ar(freq) * EnvGen.kr(Env.asr(0.1, 1, 0.5), gate, doneAction: 2) * amp ! 2) }).add;
 Synth(\held);`, 1);
   ok(js.includes('.legato(1)'), 'it holds for the whole loop');
+}
+
+// ---------------------------------------------------------------- bounded conversions
+
+/** Converts, and returns the code with the time it took (in milliseconds). */
+function timed(code, options) {
+  const t0 = Date.now();
+  const result = convertSuperCollider(code, 'test.scd', options);
+  return { ...result, ms: Date.now() - t0 };
+}
+
+// Empty patterns repeated forever hang SuperCollider: the conversion ends with a note instead of hanging.
+for (const code of [
+  'Pn(Pseq([], inf), inf).play;',
+  'Pbind(\\degree, Pn(Pseq([], inf), inf), \\dur, 0.5).play;',
+  'Pbind(\\degree, Pseq([Pseq([], 1)], inf)).play;',
+  'Pseq([Pseq([], 1)], inf).play;',
+  'Ppar([], inf).play;',
+]) {
+  const { code: js, parts, ms } = timed(code);
+  eq(parts, 0, code);
+  ok(/would hang/.test(js), 'the note says why nothing plays: ' + code);
+  ok(ms < 5000, code + ' took ' + ms + ' ms');
+}
+// A routine whose loop never waits: noted, and the rest of the file still converts.
+{
+  const { js, events } = play('Routine({ loop { } }).play;\nPbind(\\degree, 1, \\dur, 1).play;', 3);
+  ok(/routine loops without waiting/.test(js), 'the routine that never waits is noted');
+  eq(events.map((e) => [e.time, e.note]), [[0, 62], [1, 62], [2, 62]]);
+}
+{
+  // It played a synth before it got stuck: that one is kept (and plays once: the piece then stops).
+  const { js, events } = play('Routine({ Synth(\\default, [\\freq, 300]); 1.wait; loop { Synth(\\default, [\\freq, 600]) } }).play;', 3);
+  ok(/stops at beat 1/.test(js), 'where it got stuck');
+  ok(events.length > 0 && events.every((e) => e.freq === 300), 'only the synth before the endless loop plays');
+}
+// Events that take no time, forever: SuperCollider hangs; nothing is written.
+eq(timed('Pbind(\\dur, 0).play;').parts, 0);
+// A statement that never ends at the top level is noted and skipped; the next one runs.
+{
+  const { js, events } = play('inf.do { |i| i };\nPbind(\\degree, 2, \\dur, 1).play;', 2);
+  ok(/Line 1 never finishes/.test(js), 'the endless statement is noted');
+  eq(events.map((e) => e.note), [64, 64]);
+}
+// An array too large to make: the statement is noted, the rest converts.
+{
+  const { code: js, parts } = timed('a = 0 ! 1e9;\nb = Array.fill(inf, 1);\nPbind(\\degree, 0).play;');
+  eq(parts, 1);
+  ok(/an array of 1000000000 items/.test(js) && /infinitely many/.test(js), 'the arrays that are too large are noted');
+}
+// Code nested too deeply is a syntax error, not a stack overflow.
+assert.throws(() => convertSuperCollider('x = ' + '['.repeat(3000) + '1' + ']'.repeat(3000) + ';'), /syntax error.*nested more than/i);
+passed++;
+// The whole conversion has a budget: past it (or past its time limit) it stops with a clear error.
+assert.throws(() => convertSuperCollider('Pbind(\\degree, Pseq((0..100), inf)).play;', 'x.scd', { maxSteps: 2000 }), /import was stopped.*more work/);
+passed++;
+assert.throws(() => convertSuperCollider('Pbind(\\degree, Pseq((0..100), inf)).play;', 'x.scd', { timeLimitMs: -1 }), /import was stopped.*took longer/);
+passed++;
+// Dense regular material (an event every 0.05 beats: 6000 events reach only 300 beats) still finds its loop, quickly.
+{
+  const t0 = Date.now();
+  const { js, events } = play('Pbind(\\dur, 0.05, \\degree, Pseq([0, 1, 2, 3], inf)).play;', 2);
+  ok(Date.now() - t0 < 5000, 'dense material converts in ' + (Date.now() - t0) + ' ms');
+  ok(!/never repeats/.test(js) && js.includes('"c4 d4 e4 f4"'), 'its loop of four notes is found');
+  eq(events.length, 40);
+  events.forEach((e, i) => { near(e.time, i * 0.05, 'time'); eq(e.note, [60, 62, 64, 65][i % 4]); });
+}
+// Aperiodic material (each duration 0.001 beats longer than the last) ends with its first 16 beats looping.
+{
+  const t0 = Date.now();
+  const { js, events } = play('Pbind(\\dur, Pseries(0.05, 0.001, inf)).play;', 16);
+  ok(Date.now() - t0 < 5000, 'aperiodic material converts in ' + (Date.now() - t0) + ' ms');
+  ok(/rhythm of line 1 never repeats: its first 16 beats loop/.test(js), 'the note says the rhythm never repeats');
+  // SuperCollider: event k at the sum of the durations before it (written to the nearest 1/96 beat).
+  const ref = [];
+  for (let k = 0, time = 0; time < 16 - 1e-9; time += 0.05 + 0.001 * k, k++) ref.push(time);
+  eq(events.length, ref.length);
+  events.forEach((e, i) => near(e.time, ref[i], 'time', 1 / 96));
+}
+// Dense aperiodic material: the period search stops at the 6000 events played (449.95 beats here), and says so.
+{
+  const { code: js, ms } = timed('Pbind(\\dur, (Pseries(0, 1, inf).sqrt.floor % 2 + 1) * 0.05).play;');
+  ok(ms < 8000, 'dense aperiodic rhythm converts in ' + ms + ' ms');
+  ok(/does not repeat within its first 6000 events \(449\.95 beats\): its first 16 beats loop/.test(js), 'the note gives how far it was played');
+  ok(!/legato of line 1 never repeats/.test(js), 'a value that never changes is not reported as never repeating');
+  const notes = timed('Pbind(\\dur, 0.05, \\degree, Pseries(0, 1, inf).sqrt.floor).play;');
+  ok(notes.ms < 8000 && /note of line 1 never repeats/.test(notes.code), 'a dense value that never repeats');
+}
+// The editor's converter: in a worker in the browser; here (no Worker) the same conversion, with the same API.
+{
+  const code = 'Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5).play;';
+  const r = await convertSuperColliderAsync(code, 'tune.scd', { timeoutMs: 10000 });
+  eq(r, convertSuperCollider(code, 'tune.scd'));
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(convertSuperColliderAsync(code, 'tune.scd', { signal: aborted.signal }), (err) => err.name === 'AbortError' && /cancelled/.test(err.message));
+  passed++;
+  await assert.rejects(convertSuperColliderAsync('Pbind(\\dur, 1', 'x.scd'), /syntax error/i);
+  passed++;
+  const imported = await parseImportAsync(code, 'my-tune.scd');
+  eq([imported.kind, imported.from, imported.title, imported.parts], ['code', 'supercollider', 'my tune', 1]);
+  eq((await parseImportAsync('sound("bd")', 'beat.js')).kind, 'code');
+}
+
+// ---------------------------------------------------------------- when parts start and stop
+
+// An intro that plays once beside a part that plays on: the intro is not repeated.
+{
+  const { js, events } = play('Ppar([Pbind(\\degree, Pseq([0, 1, 2, 3], 1), \\dur, 1), Pbind(\\degree, 7, \\dur, 0.5)]).play;', 12);
+  ok(js.includes('It plays once, from beat 0 to beat 4') && js.includes('.playFor(0, 1)'), 'the intro plays once');
+  eq(events.filter((e) => e.note !== 72).map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65]]);
+  eq(events.filter((e) => e.note === 72).map((e) => e.time), Array.from({ length: 24 }, (_, i) => i * 0.5));
+}
+// A part that starts four beats later starts there, not at the beginning.
+{
+  const { js, events } = play('Ptpar([0, Pbind(\\degree, 0, \\dur, 1), 4, Pbind(\\degree, Pseq([4, 5], inf), \\dur, 0.5)]).play;', 8);
+  ok(js.includes('It starts at beat 4') && !/plays from the start/.test(js), 'the late start is kept');
+  eq(events.filter((e) => e.note !== 60).map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, i) => [4 + i * 0.5, i % 2 ? 69 : 67]));
+  eq(events.filter((e) => e.note === 60).length, 8);
+}
+// A start off the loop's grid keeps every event of the loop (here the second note of each 2-beat loop).
+{
+  const { events } = play('Ptpar([1.5, Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1)]).play;', 5);
+  eq(events.map((e) => [e.time, e.note]), [[1.5, 60], [2.5, 67], [3.5, 60], [4.5, 67]]);
+}
+// A section that plays once, then one that plays on.
+{
+  const { events } = play('Pseq([Pbind(\\degree, Pseq([0, 1], 1), \\dur, 1), Pbind(\\degree, 4, \\dur, 0.5)]).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 67], [2.5, 67], [3, 67], [3.5, 67]]);
+}
+// A routine that waits two beats first.
+{
+  const { events } = play('Routine({ 2.wait; loop { Synth(\\default, [\\freq, 300]); 1.wait } }).play;', 5);
+  eq(events.map((e) => e.time), [2, 3, 4]);
+}
+// Everything stops: the whole piece loops as a preview, said in the code, each part within its own beats.
+{
+  const { js, events } = play('Ptpar([0, Pbind(\\degree, Pseq([0, 1, 2, 3], 1), \\dur, 1), 2, Pbind(\\degree, Pseq([7, 7], 1), \\dur, 0.5)]).play;', 8);
+  ok(js.includes('.timeLoop(1) // a preview: SuperCollider plays this once (4 beats); here it loops'), 'the loop is a preview, and says so');
+  const once = [[0, 60], [1, 62], [2, 64], [2, 72], [2.5, 72], [3, 65]];
+  eq(events.map((e) => [e.time, e.note]), [...once, ...once.map(([time, n]) => [time + 4, n])]);
+}
+// A negative timingOffset: every event plays that much earlier; the one before the start is left out, with a note.
+{
+  const { js, events } = play('Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1, \\timingOffset, -0.25).play;', 4);
+  ok(/timingOffset moves events of line 1 before the start/.test(js), 'the events before the start are noted');
+  eq(events.map((e) => [e.time, e.note]), [[0.75, 62], [1.75, 60], [2.75, 62], [3.75, 60]]);
+}
+
+// ---------------------------------------------------------------- simultaneous voices, alternating SynthDefs
+
+// Two synths a routine starts at the same instant: both play, each with its own frequency and length.
+{
+  const { js, events } = play('Routine({ loop { Synth(\\default, [\\freq, 200]); Synth(\\default, [\\freq, 500]); 0.5.wait } }).play;', 2);
+  ok(js.includes('stack([') && js.includes('.freq(200)') && js.includes('.freq(500)'), 'one voice each');
+  eq(events.map((e) => [e.time, e.freq]), [0, 0.5, 1, 1.5].flatMap((time) => [[time, 200], [time, 500]]));
+  ok(events.every((e) => e.legato === undefined || e.legato > 0), 'no voice has a legato of 0');
+}
+
+/** The golden fixtures: a SuperCollider file and the events it plays, compared one by one. */
+for (const name of ['voices', 'alternating']) {
+  const dir = new URL('./fixtures/supercollider/', import.meta.url);
+  const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
+  const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
+  const { events } = play(source, golden.seconds);
+  const pitch = (e) => e.note ?? e.freq ?? 0;
+  const want = golden.events.slice().sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
+  const got = events.slice().sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
+  eq(got.length, want.length, name + ': the number of events (voices included)');
+  want.forEach((w, i) => {
+    const g = got[i];
+    for (const [key, value] of Object.entries(w)) {
+      if (key === 'absent') { for (const k of value) eq(g[k], undefined, name + ' event ' + i + ' has no ' + k); continue; }
+      if (key === 'duration') { near((g.legato ?? NaN) * g.length, value, name + ' event ' + i + ' duration'); continue; }
+      near(g[key], value, name + ' event ' + i + ' ' + key);
+    }
+  });
+  if (name === 'voices') near(got[1].amp / got[0].amp, 0.5, 'the second voice keeps its own level');
+}
+
+// ---------------------------------------------------------------- safe code, tempo
+
+// Instruments named like reserved words, the evaluator's names and TidalJS's globals: the code still runs.
+{
+  const names = ['yield', 'let', 'static', 'implements', 'await', 'arguments', 'eval', '__out', 'sound', 'stack', 'sine', 'note', 'Math'];
+  const code = names.map((n, i) => `SynthDef('${n}', { |out, freq = 440, amp = 0.1| Out.ar(out, SinOsc.ar(freq) * Env.perc(0.01, 0.1).ar(2) * amp ! 2) }).add;\nPbind(\\instrument, '${n}', \\dur, 1, \\degree, ${i}).play;`).join('\n');
+  const { js, parts, events } = play(code, 1);
+  eq(parts, names.length);
+  ok(js.includes('const yieldPart = ') && js.includes('const soundPart = ') && !/const (yield|let|static|await|sound|stack|note) =/.test(js), 'safe bindings');
+  eq(events.length, names.length);
+}
+{
+  const { js, events } = play(String.raw`SynthDef(\yield, { |out, freq = 440, amp = 0.1| Out.ar(out, SinOsc.ar(freq) * Env.perc(0.01, 0.2).ar(2) * amp ! 2) }).add;
+Pbind(\instrument, \yield, \degree, Pseq([0, 2], inf), \dur, 0.5).play;`, 1);
+  ok(js.includes('sound("sine")'), 'a SynthDef named yield converts');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64]]);
+}
+// Every global TidalJS defines is a name a binding avoids (and the importer's list has them all).
+{
+  const context = vm.createContext({ console: { warn() {}, error() {}, log() {} } });
+  const before = new Set(vm.runInContext('Object.getOwnPropertyNames(globalThis)', context));
+  vm.runInContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), context);
+  vm.runInContext(`const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1, setValueAtTime() {}, linearRampToValueAtTime() {}, cancelScheduledValues() {} } });
+    const engine = new TidalJS(); engine.audioContext = { currentTime: 0, state: 'running', createGain: node, resume() {} };
+    engine.masterGain = node(); engine.setupGlobalFunctions();`, context);
+  const globals = [...vm.runInContext('Object.getOwnPropertyNames(globalThis)', context)].filter((n) => !before.has(n));
+  ok(globals.length > 200, 'the engine defines its globals');
+  const missing = globals.filter((n) => !TIDAL_GLOBALS.has(n));
+  eq(missing, [], 'TIDAL_GLOBALS in emit.ts lists every global of tidal.js');
+  ok(globals.every((n) => !isSafeBinding(n)), 'no binding hides a global');
+  ok(['yield', 'let', 'static', 'implements', 'await', 'package', '__out', '__at', 'eval', 'arguments'].every((n) => !isSafeBinding(n)), 'nor a reserved word or an evaluator name');
+}
+// Line breaks and other control characters in names cannot end a comment and become code.
+{
+  const evil = 'x\u2028sound("bd*16")\u2029//\ny';
+  const { js, events } = play(`Pbind(\\instrument, '${evil}', \\dur, 1).play;`, 2, /Unknown sound/);
+  ok(!/[\u2028\u2029]/.test(js), 'no line or paragraph separator in the code');
+  ok(js.split('\n').every((line) => !/^sound\("bd\*16"\)/.test(line.trim())), 'the name stays inside its comment');
+  eq(events.length, 2);
+  const named = convertSuperCollider('Pbind(\\dur, 1).play;', 'a\nsound("bd")\u2028.scd');
+  ok(named.code.split(/\r\n|[\n\r\u2028\u2029]/).every((line) => line.startsWith('//') || !line.includes('sound("bd")')), 'nor can the file name');
+  ok(t.eval(named.code).success, 'the code runs');
+  t.stopAll();
+}
+// 360 beats per minute (TempoClock.default.tempo = 6): setTempo stops at 300 BPM, so setCPS keeps the tempo.
+{
+  const { js, events } = play('TempoClock.default.tempo = 6;\nPbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1).play;', 1);
+  ok(js.includes('setCPS(1.5)') && !js.includes('setTempo('), 'the tempo is set exactly');
+  events.forEach((e, i) => { near(e.time, i / 6, 'a beat is 1/6 s'); eq(e.note, [60, 62, 64, 65][i % 4]); });
+  eq(events.length, 6);
+}
+// Faster than TidalJS's 10 cycles per second at 4 beats a cycle: a cycle of more beats keeps it exact.
+{
+  const { js, events } = play('TempoClock.default.tempo = 100;\nPbind(\\dur, 0.25).play;', 0.1);
+  ok(js.includes('setCPS(6.25)') && /one cycle is 16 beats/.test(js), 'the tempo stays exact');
+  eq(t.cps, 6.25);
+  events.forEach((e, i) => near(e.time, i * 0.0025, 'a quarter beat is 2.5 ms'));
+  eq(events.length, 40);
 }
 
 // The README's example converts to the code the README shows.

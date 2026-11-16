@@ -62,7 +62,10 @@ export interface Tidal {
   readonly isPlaying: boolean;
   readonly isRecording: boolean;
   lastError?: string;
-  onError: ((error: Error) => void) | null;
+  /** Called when a playing pattern fails: it was removed; stopped tells whether playback stopped (it was the last one). */
+  onError: ((error: Error, info?: { stream: string | null; stopped: boolean }) => void) | null;
+  /** True while a first(), once() or asap() still sounds. */
+  readonly playingOneShots: boolean;
   init(): Promise<boolean>;
   eval(code: string, options?: { keepOnWarnings?: boolean; keepUnchanged?: boolean }): EvalResult;
   streamInfo(): StreamInfo[];
@@ -77,14 +80,26 @@ export interface Tidal {
   getAudibleCyclePosition(): number;
   /** Events of the playing patterns in [begin, end); muted streams too (marked silent) when includeSilent. */
   queryActive(begin: number, end: number, includeSilent?: boolean): PatternEvent[];
+  /** Starts recording the audio output; false if already recording; throws if it cannot start. */
   startRecording(): boolean;
+  /** Stops recording and downloads the file: the Blob, or null when nothing was recorded; rejects if the recorder fails. */
   stopRecording(filename?: string): Promise<Blob | null>;
+  /** Called when the recorder fails while recording (the recording has ended). */
+  onRecordingError?: ((error: Error) => void) | null;
   /** Loaded sample banks: name -> file URLs. */
   readonly sampleBanks: Map<string, string[]>;
   /** Loads sample banks from "github:user/repo", a manifest URL or { name: [files] }. */
   loadSamples(source: string | Record<string, unknown>, base?: string): Promise<number>;
   isLoadingSamples(): boolean;
   whenSamplesLoaded(): Promise<void>;
+  /** Sample manifests and files that failed to load; they are not asked for again until retrySamples(). */
+  sampleFailures(): { source: string; message: string }[];
+  /** Forgets the failed loads so they are asked for again; returns how many. */
+  retrySamples(): number;
+  /** Calls fn when sample loads finish, fail or are retried; returns a function that stops it. */
+  onSamples(fn: () => void): () => void;
+  /** Unknown sound names in what plays, now that the banks loaded. */
+  soundWarnings(): string[];
   /** The sliders and toggles of the code that plays. */
   controls(): LiveControl[];
   /** Sets a control's value (kept within its range and step). */

@@ -3,6 +3,8 @@
  * import. Sketches are kept in IndexedDB; where it is not available (some
  * private modes), in localStorage. No DOM here except for downloads.
  */
+import { type Provenance, isExternal, readProvenance } from "./provenance.ts";
+import { convertSuperColliderAsync, type ConvertAsyncOptions } from "./supercollider/client.ts";
 import { convertSuperCollider, looksLikeSuperCollider } from "./supercollider/index.ts";
 
 export interface Sketch {
@@ -13,6 +15,12 @@ export interface Sketch {
   cps: number;
   created: number;
   updated: number;
+  /**
+   * Where code someone else wrote came from, while it has not run yet (see
+   * provenance.ts). Absent for the person's own code (and in sketches saved
+   * before it existed).
+   */
+  provenance?: Provenance;
 }
 
 /** The JSON file of an exported library. */
@@ -67,7 +75,7 @@ export function normaliseSketch(value: unknown, now = Date.now()): Sketch | null
   const v = value as Partial<Sketch>;
   if (typeof v.code !== "string") return null;
   const cps = typeof v.cps === "number" && Number.isFinite(v.cps) && v.cps > 0 ? v.cps : 0.8;
-  return {
+  const sketch: Sketch = {
     id: typeof v.id === "string" && v.id ? v.id : newId(),
     title: typeof v.title === "string" && v.title.trim() ? v.title.trim().slice(0, 120) : titleFromCode(v.code),
     code: v.code,
@@ -75,6 +83,19 @@ export function normaliseSketch(value: unknown, now = Date.now()): Sketch | null
     created: typeof v.created === "number" ? v.created : now,
     updated: typeof v.updated === "number" ? v.updated : now,
   };
+  if (v.provenance !== undefined) {
+    const p = readProvenance(v.provenance);
+    if (isExternal(p)) sketch.provenance = p;
+  }
+  return sketch;
+}
+
+/**
+ * Sketches from an imported library file are someone else's code until they
+ * run, whatever the file says about them: each opens for review.
+ */
+export function markImported(sketches: Sketch[], fileName: string): Sketch[] {
+  return sketches.map((s) => ({ ...s, provenance: s.provenance ?? { origin: "library", label: fileName } }));
 }
 
 /** The JSON text of an exported library. */
@@ -128,6 +149,19 @@ export function parseImport(text: string, fileName = ""): ImportResult {
   if (!trimmed) throw new Error("This file is empty.");
   const base = fileName.replace(/\.[^.]*$/, "").replace(/\.tidal$/, "").replace(/[-_]+/g, " ").trim();
   return { kind: "code", title: base || titleFromCode(text), code: text.replace(/\r\n/g, "\n") };
+}
+
+/**
+ * Reads an imported file as parseImport does, except that SuperCollider code is converted in a worker
+ * (cancelled with `options.signal`, stopped after `options.timeoutMs`), so a slow conversion never freezes the page.
+ */
+export async function parseImportAsync(text: string, fileName = "", options: ConvertAsyncOptions = {}): Promise<ImportResult> {
+  const trimmed = text.trim();
+  if (trimmed && looksLikeSuperCollider(trimmed, fileName)) {
+    const converted = await convertSuperColliderAsync(text, fileName, options);
+    return { kind: "code", title: converted.title, code: converted.code, from: "supercollider", parts: converted.parts };
+  }
+  return parseImport(text, fileName);
 }
 
 /**
