@@ -2,7 +2,7 @@
  * App state and audio control: what plays, the status line, tempo, live
  * update and recording. Components read the signals and call the actions.
  */
-import { effect, signal } from "sibujs";
+import { effect, signal, untracked } from "sibujs";
 import { EXAMPLES, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
@@ -265,6 +265,8 @@ export function createSession() {
    * (Play, Stop or another update), live update still on, and music still playing. Anything else drops it.
    */
   let pendingRecheck: { text: string; revision: number } | null = null;
+  /** An edit whose check was dropped when live update went off: it runs again when live update is back on, if still current. */
+  let canceledDraft: { text: string; revision: number } | null = null;
 
   /**
    * Sample loads finished (or failed, or were retried). Nothing runs again:
@@ -313,11 +315,15 @@ export function createSession() {
     }
   }
 
-  /** Runs `text` (the editor code) and remembers the message it leaves (see samplesSettled). */
-  function runCode(engine: Tidal, live: boolean, text = editor.getValue()) {
+  /**
+   * Runs `text` (the editor code) and remembers the message it leaves (see samplesSettled).
+   * recheck: the one automatic check of an edit after the samples it waited for settled (see evaluate).
+   */
+  function runCode(engine: Tidal, live: boolean, text = editor.getValue(), recheck = false) {
     waitingForSamples = false;
     pendingRecheck = null; // a newer run: a recheck waiting for samples is not current any more
-    evaluate(engine, live, text);
+    canceledDraft = null;
+    evaluate(engine, live, text, recheck);
     // While loads stay failed (they are not asked for again by themselves), every run says so and offers Retry.
     const failed = engine.sampleFailures();
     if (failed.length && !status().action) {
@@ -335,7 +341,7 @@ export function createSession() {
   }
 
   /** Evaluates the code and reports the result. Live updates keep the old music on warnings. */
-  function evaluate(engine: Tidal, live: boolean, text: string) {
+  function evaluate(engine: Tidal, live: boolean, text: string, recheck = false) {
     // Live updates keep streams whose code has not changed (and their transitions) as they are.
     // The document's tempo goes in with the code only when the document starts (nothing plays, or it was
     // just opened) or its tempo was set on purpose: then it applies only if the evaluation commits. Other
@@ -354,18 +360,27 @@ export function createSession() {
     const where = result.location ? " (line " + result.location.line + ")" : "";
 
     if (result.pending && result.waitingForSamples) {
+      const names = result.waitingForSamples.join(", ");
+      if (recheck) {
+        // Its one automatic check, and it asks for samples again (code whose samples() source changes on
+        // every run): it is not checked again by itself, so nothing runs or loads in a loop.
+        report("playing warn", "Still waiting for samples (" + names + "): when checked again after its samples loaded, "
+          + "the code asked for new ones, so it is not checked again by itself. The previous patterns keep playing; "
+          + "edit the code or press Play to run it.");
+        return;
+      }
       // Checked again once, when the manifests it waits for arrive or fail: it commits if the sounds came,
       // and stays held back with the warning if they did not. The playing streams stay meanwhile.
-      const recheck = { text, revision: documentRevision };
-      pendingRecheck = recheck;
+      const waiting = { text, revision: documentRevision };
+      pendingRecheck = waiting;
       void result.samplesSettled?.then(() => {
-        if (pendingRecheck !== recheck) return; // dropped: a newer run, Stop, Play, another document, live off
+        if (pendingRecheck !== waiting) return; // dropped: a newer run, Stop, Play, another document, live off
         pendingRecheck = null;
-        const current = editor.getValue() === text && documentRevision === recheck.revision;
-        if (current && liveEnabled() && engine.isPlaying && !isExternal(provenance())) runCode(engine, true, text);
+        const current = editor.getValue() === text && documentRevision === waiting.revision;
+        if (current && liveEnabled() && engine.isPlaying && !isExternal(provenance())) runCode(engine, true, text, true);
         else samplesSettled(engine);
       });
-      report("playing warn", "Waiting for samples (" + result.waitingForSamples.join(", ") + "); the previous patterns keep playing.");
+      report("playing warn", "Waiting for samples (" + names + "); the previous patterns keep playing.");
       return;
     }
     if (result.pending) {
@@ -438,6 +453,7 @@ export function createSession() {
   async function play() {
     clearTimeout(liveTimer);
     pendingRecheck = null; // an explicit Play runs the code itself
+    canceledDraft = null;
     const ticket = plays.take();
     const revision = documentRevision;
     let text = editor.getValue();
@@ -481,6 +497,7 @@ export function createSession() {
   function stop() {
     clearTimeout(liveTimer);
     pendingRecheck = null;
+    canceledDraft = null;
     plays.cancel();
     tidal?.stopAll();
     syncPlaying();
@@ -500,16 +517,32 @@ export function createSession() {
   }
 
   effect(() => {
-    if (liveEnabled()) {
-      scheduleLiveUpdate();
-    } else {
-      clearTimeout(liveTimer);
-      // Nothing runs by itself with live update off, not even an edit waiting for its samples.
-      if (pendingRecheck) {
-        pendingRecheck = null;
-        report("playing warn", "Live update is off, so the edit waiting for samples will not run by itself. Press Play to run it.");
+    const on = liveEnabled();
+    untracked(() => {
+      if (on) {
+        // An edit dropped while live update was off, still the one in the editor: it is checked again now
+        // (its run reports, replacing the "live update is off" message). Other edits run as usual.
+        const draft = canceledDraft;
+        canceledDraft = null;
+        const engine = tidal;
+        if (draft && engine && engine.isPlaying && draft.revision === documentRevision && editor.getValue() === draft.text
+          && !isExternal(provenance())) {
+          clearTimeout(liveTimer);
+          runCode(engine, true, draft.text);
+          return;
+        }
+        scheduleLiveUpdate();
+      } else {
+        clearTimeout(liveTimer);
+        // Nothing runs by itself with live update off, not even an edit waiting for its samples.
+        if (pendingRecheck) {
+          canceledDraft = pendingRecheck;
+          pendingRecheck = null;
+          report("playing warn", "Live update is off, so the edit waiting for samples will not run by itself. "
+            + "Press Play to run it, or turn live update back on.");
+        }
       }
-    }
+    });
   });
 
   async function toggleRecording() {
@@ -563,6 +596,7 @@ export function createSession() {
   function replaceDocument(code: string, from: Provenance, cps?: number) {
     clearTimeout(liveTimer);
     pendingRecheck = null;
+    canceledDraft = null;
     documentRevision++;
     approval = null;
     plays.cancel();

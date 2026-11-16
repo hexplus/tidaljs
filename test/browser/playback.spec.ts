@@ -231,6 +231,66 @@ for (const action of ["Play", "Stop", "Live update off", "another document"] as 
   });
 }
 
+test("code whose manifest changes on every run is checked again once: evaluating and fetching stop, the music stays", async ({ page }) => {
+  const urls: string[] = [];
+  await page.route("https://r7.test/**", (route) => {
+    if (!route.request().url().endsWith(".json")) return route.fulfill({ status: 404, body: "" });
+    urls.push(route.request().url());
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ other: ["o.wav"] }) });
+  });
+  await page.goto("/");
+  await setCode(page, 'd1(sound("bd*2"))');
+  await playAndWait(page);
+  const evaluations = await countEvaluations(page);
+  await setCode(page, 'samples("https://r7.test/" + Math.random() + "/strudel.json")\nd1(sound("zonk*2"))');
+  await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("not checked again by itself");
+  await page.waitForTimeout(2500);
+  expect(await evaluations()).toBe(2); // the edit, and its one check after its manifest arrived
+  expect(urls.length).toBe(2);
+  expect(new Set(urls).size).toBe(2); // each run asked for another manifest
+  expect(await statusText(page)).toContain("Still waiting for samples (zonk)");
+  expect(await statusText(page)).toContain("previous patterns keep playing");
+  expect(await d1Sound(page)).toBe("bd");
+  expect((await engine(page))?.playing).toBe(true);
+});
+
+for (const arrives of ["before", "after"] as const) {
+  test(`an edit dropped by turning live update off runs again when it is back on (manifest arriving ${arrives})`, async ({ page }) => {
+    const manifest = await holdManifest(page);
+    await page.goto("/");
+    await setCode(page, 'd1(sound("bd*2"))');
+    await playAndWait(page);
+    await setCode(page, WAITING);
+    await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Waiting for samples (zonk)");
+    const evaluations = await countEvaluations(page);
+    await page.locator("#liveToggle").uncheck();
+    await expect.poll(() => statusText(page)).toContain("Live update is off");
+    const loaded = () => page.evaluate(() => !(window as unknown as { tidal: { isLoadingSamples(): boolean } }).tidal.isLoadingSamples());
+    if (arrives === "before") {
+      manifest.release({ zonk: ["z.wav"] });
+      await expect.poll(loaded).toBe(true);
+      await page.waitForTimeout(500);
+      expect(await evaluations()).toBe(0); // nothing runs with live update off
+      await page.locator("#liveToggle").check();
+      // Checked again at once: the sound is there, so it commits.
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Updated");
+      expect(await evaluations()).toBe(1);
+    } else {
+      await page.locator("#liveToggle").check();
+      // Checked again at once: still waiting for the same manifest (not asked for again), and the status says so.
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Waiting for samples (zonk)");
+      expect(await evaluations()).toBe(1);
+      manifest.release({ zonk: ["z.wav"] });
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Updated");
+      expect(await evaluations()).toBe(2);
+    }
+    expect(await d1Sound(page)).toBe("zonk");
+    expect(manifest.counts.manifests).toBe(1);
+    await page.waitForTimeout(1000);
+    expect(await evaluations()).toBe(arrives === "before" ? 1 : 2); // and nothing more
+  });
+}
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');

@@ -849,5 +849,99 @@ const gridOf = (changes, step, until) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 7
+const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).map((e) => e.s + '@' + e.time);
+{
+    // 1. The positive-nudge look back stays within this run of the transport: no onset before cycle 0 just after
+    // Play, none before the reset point after resetCycles(); onsets really held back are still handed over.
+    const live = { keepUnchanged: true }; // (a, b are unknown sounds)
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a"))');
+    let played = run(0, 100);
+    t.eval('d1(sound("a"))\nd2(sound("b*4").nudge(0.5))', live); // inserted just after startup
+    played = played.concat(run(125, 1600));
+    eq(shown(played, 1.55), ['a@0.05', 'b@0.55', 'b@0.8', 'b@1.05', 'a@1.05', 'b@1.3', 'b@1.55'], 'nothing from cycle -0.25 (0.3 s)');
+
+    reset();
+    t.eval('d1(sound("a*4").nudge(0.5))');
+    played = run(0, 100);
+    eq(t._nudged.map((it) => it.ev.begin), [0, 0.25], 'cycles 0 and 0.25 held back at the edit');
+    t.eval('d1(sound("b*4").nudge(0.5))', live); // replaced just after startup
+    played = played.concat(run(125, 1600));
+    eq(shown(played, 1.55), ['b@0.55', 'b@0.8', 'b@1.05', 'b@1.3', 'b@1.55'], 'the held onsets handed over, nothing before them');
+
+    reset();
+    t.eval('d1(sound("b*4").nudge(0.3))');
+    played = run(0, 600);
+    t.resetCycles(); // the new cycle 0 starts at what was sent: 0.7 s
+    eq(t._anchorTime, 0.7);
+    played = played.concat(run(625, 2000));
+    eq(shown(played, 2), ['b@0.35', 'b@0.6', 'b@1', 'b@1.25', 'b@1.5', 'b@1.75', 'b@2'], 'nothing from before the reset point');
+    t.stopAll();
+}
+{
+    // 2. A cps control is committed when the event carrying it is sent, whatever its nudge.
+    const live = { keepUnchanged: true };
+    // A positive nudge holds the control past its onset (0.2): still undone by a mute, from what was sent on
+    // (the notes already sent keep their times), and the control never plays.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).nudge(0.3).playFor(0, 1))');
+    let played = run(0, 300);
+    eq([t._dispatchCycle, t.cps, t._tempoRequests.map((r) => [r.cycle, r.committed])], [0.5, 2, [[0.2, false]]], 'onset passed, control not sent');
+    t.mute('d2');
+    eq(t.cps, 1, 'undone at once');
+    played = played.concat(run(325, 1500));
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0.2, 2], [0.5, 1]], 0.125, 1.45), '2 cps from 0.2 up to what was sent, then 1 cps');
+    eq(hitsOf(played, 'x', 2), []);
+    // Once that control is sent (0.55 s), it stays: mute, replacement, Stop.
+    for (const after of ['mute', 'replace', 'stop']) {
+        reset();
+        t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).nudge(0.3).playFor(0, 1))');
+        played = run(0, 500);
+        eq(hitsOf(played, 'x', 1), [0.55]);
+        if (after === 'mute') t.mute('d2');
+        else if (after === 'replace') t.eval('d1(sound("a*8"))\nd2(sound("~ y"))', live);
+        else t.stopAll();
+        eq(t.cps, 2, after + ' after it was sent');
+        if (after === 'stop') continue;
+        played = played.concat(run(525, 1500));
+        eq(hitsOf(played, 'a', 1.45), gridOf([[0.2, 2]], 0.125, 1.45), after);
+    }
+    // A negative nudge sends the control before its onset (0.4, sent at 0.3 s): from then on it stays.
+    for (const after of ['mute', 'replace', 'stop']) {
+        reset();
+        t.eval('d1(sound("a*8"))\nd2(sound("~ ~ x ~ ~").cps(2).nudge(-0.15).playFor(0, 1))');
+        played = run(0, 250);
+        eq([+t._dispatchCycle.toFixed(6), hitsOf(played, 'x', 1)], [0.3, [0.3]], 'sent, onset still ahead');
+        if (after === 'mute') t.mute('d2');
+        else if (after === 'replace') t.eval('d1(sound("a*8"))\nd2(sound("~ y"))', live);
+        else t.stopAll();
+        eq(t.cps, 2, after + ' after it was sent');
+        if (after === 'stop') continue;
+        played = played.concat(run(275, 1500));
+        eq(hitsOf(played, 'a', 1.45), gridOf([[0.4, 2]], 0.125, 1.45), after);
+    }
+    // An equal control that was sent counts after an earlier one held back is undone: 2 cps from 0.2 (held), undone
+    // at what was sent (0.3), then d3's 2 cps at 0.4 (sent early).
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ x ~ ~ ~").cps(2).nudge(0.6).playFor(0, 1))\nd3(sound("~ ~ y ~ ~").cps(2).nudge(-0.15).playFor(0, 1))');
+    played = run(0, 200);
+    eq(t._tempoRequests.map((r) => [r.cycle, r.committed]), [[0.2, false], [0.4, true]]);
+    t.mute('d2');
+    played = played.concat(run(225, 1500));
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0.2, 2], [0.3, 1], [0.4, 2]], 0.125, 1.45));
+    // Cycle order: one sent early at 0.5 (3 cps) waits behind one still held at 0.4 (2 cps), and both apply in order.
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ ~ x ~ ~").cps(2).nudge(0.4).playFor(0, 1))\nd3(sound("~ ~ ~ ~ ~ y ~ ~ ~ ~").cps(3).nudge(-0.15).playFor(0, 1))');
+    played = run(0, 400);
+    eq(t._tempoRequests.map((r) => [r.cycle, r.committed]), [[0.4, false], [0.5, true]]);
+    played = played.concat(run(425, 1500));
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0.4, 2], [0.5, 3]], 0.125, 1.45));
+    eq([hitsOf(played, 'x', 2), hitsOf(played, 'y', 2), t.cps], [[0.85], [0.35], 3]);
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

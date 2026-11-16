@@ -1684,6 +1684,8 @@
     // How far back (seconds) a replaced stream's new pattern is asked for, for onsets that a positive nudge
     // moves past what was already sent (see _tick).
     const NUDGE_LATE = 1;
+    // Tempo requests in the order they apply: by cycle, then in the order they were asked for.
+    const byTempoOrder = (a, b) => a.cycle - b.cycle || a.seq - b.seq;
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -5976,7 +5978,10 @@
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
             this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
-            this._tempoBase = null;            // the committed tempo while there are requests
+            this._tempoPast = null;            // while there are requests: the clock as sent (see _reconcileTempo)
+            this._tempoPastCycle = 0;          // the cycle up to which it was sent
+            this._tempoOrigin = 1;             // and the tempo there before the requests
+            this._timelineStart = 0;           // the first cycle of this run of the transport (Play, resetCycles)
             this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
@@ -6362,60 +6367,95 @@
 
         /**
          * Tempo changes from events (a cps control) are asked for ahead of
-         * time, when their events are, and stay requests until their onset
-         * has been sent. The clock is the committed tempo plus the requests
-         * still ahead whose stream still plays the pattern that asked (and is
-         * audible), made in cycle order (then in the order they were asked
-         * for): so one asked for in a later tick at an earlier cycle (a
-         * stream added meanwhile) goes before those after it, and one equal to
-         * the tempo before it still counts (it matters again if an earlier one
-         * goes). Recomputed whenever streams change (removed, replaced, muted,
+         * time, when their events are, and stay requests until the event
+         * carrying the control is sent (a nudge moves that earlier or later
+         * than its onset); a request whose stream was not heard when it was
+         * asked (no event to send) is settled when its onset is sent. Until
+         * then it counts only while its stream still plays the pattern that
+         * asked and is heard; once sent, it stays (mute, replacement, Stop).
+         *
+         * The clock is what was sent, which never changes (the mapping up to
+         * _tempoPastCycle, the dispatch frontier of the last tick), then the
+         * tempo in force there and the changes after it, from the requests
+         * that count in cycle order (then in the order they were asked for):
+         * so one asked for in a later tick at an earlier cycle (a stream
+         * added meanwhile) goes before those after it, and one equal to the
+         * tempo before it still counts (it matters again if an earlier one
+         * goes). A request undone after its onset was passed (its control was
+         * held by a positive nudge) ends at the frontier, not retroactively.
+         * Recomputed whenever streams change (removed, replaced, muted,
          * soloed); events not yet sent get their times from the clock as it
          * is then.
          */
         _reconcileTempo() {
-            if (!this._tempoBase) return;
-            this._restoreTempo(this._tempoBase);
-            const requests = this._tempoRequests.filter((r) => this._tempoOwned(r)).sort((a, b) => a.cycle - b.cycle || a.seq - b.seq);
-            for (const r of requests) this._retempo(r.cycle, r.cps);
+            if (!this._tempoPast) return;
+            const at = this._tempoPastCycle;
+            const counted = this._tempoRequests.filter((r) => this._tempoOwned(r)).sort(byTempoOrder);
+            let cps = this._tempoOrigin;
+            for (const r of counted) if (r.cycle <= at) cps = r.cps;
+            this._restoreTempo(this._tempoPast);
+            this._retempo(at, cps);
+            for (const r of counted) if (r.cycle > at) this._retempo(r.cycle, r.cps);
         }
 
-        /** True while the stream that asked for a tempo change still plays that pattern and is heard. */
+        /** True while a tempo request counts: sent, or its stream still plays that pattern, is heard, and its event was not dropped. */
         _tempoOwned(r) {
+            if (r.committed) return true;
+            if (r.item && r.item.dropped) return false;
             return this.channels.get(r.owner.id) === r.owner.pattern && this.isAudible(r.owner.id);
         }
 
-        /** Records a tempo change asked for by a stream's event (see _reconcileTempo). */
-        _requestTempo(cycle, cps, owner, seq) {
-            if (!this._tempoBase) this._tempoBase = this._snapshotTempo();
-            this._tempoRequests.push({ cycle, cps, owner, seq });
+        /** Records a tempo change asked for by a stream's event (`item`: that event, when it is to be sent; see _reconcileTempo). */
+        _requestTempo(cycle, cps, owner, seq, item) {
+            if (!this._tempoPast) this._markTempoPast(this._cpsAt(this._dispatchCycle));
+            this._tempoRequests.push({ cycle, cps, owner, seq, item, committed: false });
+        }
+
+        /** What was sent so far is fixed: the clock up to the dispatch frontier, with `origin` the tempo before the requests. */
+        _markTempoPast(origin) {
+            const at = this._dispatchCycle;
+            const segments = [...this._tempoHistory, { time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps }];
+            let kept = segments.filter((s) => s.cycle < at);
+            if (!kept.length) kept = [segments[0]];
+            const last = kept[kept.length - 1];
+            this._tempoPast = { time: last.time, cycle: last.cycle, cps: last.cps, history: kept.slice(0, -1) };
+            this._tempoPastCycle = at;
+            this._tempoOrigin = origin;
         }
 
         /**
-         * Requests whose onset has been sent took effect: those still owned
-         * join the committed tempo, the others are gone.
+         * After a tick's dispatch: requests whose control was sent are
+         * committed, those whose event was dropped go, and those with no event
+         * are settled at their onset. Committed ones before the frontier (and
+         * before any still open) join the tempo before the requests.
          */
         _commitTempo() {
-            if (!this._tempoBase) return;
-            const due = this._tempoRequests.filter((r) => r.cycle < this._dispatchCycle);
-            if (!due.length) return;
-            this._tempoRequests = this._tempoRequests.filter((r) => r.cycle >= this._dispatchCycle);
-            this._restoreTempo(this._tempoBase);
-            for (const r of due.filter((x) => this._tempoOwned(x)).sort((a, b) => a.cycle - b.cycle || a.seq - b.seq)) this._retempo(r.cycle, r.cps);
-            this._tempoBase = this._tempoRequests.length ? this._snapshotTempo() : null;
+            if (!this._tempoPast) return;
+            const at = this._dispatchCycle;
+            const open = [];
+            for (const r of this._tempoRequests) {
+                if (!r.committed) {
+                    if (r.item ? r.item.dropped : r.cycle < at && !this._tempoOwned(r)) continue;
+                    if (r.item ? r.item.sent : r.cycle < at) r.committed = true;
+                }
+                open.push(r);
+            }
+            open.sort(byTempoOrder);
+            let origin = this._tempoOrigin;
+            while (open.length && open[0].committed && open[0].cycle < at) origin = open.shift().cps;
+            this._tempoRequests = open;
+            this._markTempoPast(origin); // the clock this tick sent with
             this._reconcileTempo();
+            if (!open.length) this._tempoPast = null;
         }
 
-        /** Drops the requests not yet taken effect: the clock goes back to the committed tempo. */
+        /** Drops the requests whose control was not sent: the clock keeps what was sent and the committed tempo. */
         _dropTempoRequests() {
-            const base = this._tempoBase;
-            this._tempoBase = null;
+            if (!this._tempoPast) return;
+            this._tempoRequests = this._tempoRequests.filter((r) => r.committed);
+            this._reconcileTempo();
             this._tempoRequests = [];
-            if (base) this._restoreTempo(base);
-        }
-
-        _snapshotTempo() {
-            return { time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps, history: this._tempoHistory.slice() };
+            this._tempoPast = null;
         }
 
         _restoreTempo(s) {
@@ -6961,6 +7001,7 @@
             this._anchorCycle = cycle;
             this._nextCycle = cycle;
             this._dispatchCycle = cycle;
+            this._timelineStart = cycle; // nothing before it is played in this numbering (see _tick)
             this._tempoHistory = [];
             this._queried.clear();
             // (what was already sent, _sentHorizon, is a time: it stays)
@@ -6983,7 +7024,8 @@
             this._queried.clear();
             this._sentHorizon = -Infinity;
             this._tempoRequests = [];
-            this._tempoBase = null;
+            this._tempoPast = null;
+            this._timelineStart = 0;
             this._tempoHistory = [];
             this._nudged = [];
             this.isPlaying = true;
@@ -6997,7 +7039,7 @@
             this._nudged = []; // events held back for a later tick never play
             this._queried.clear();
             this._sentHorizon = -Infinity;
-            this._dropTempoRequests(); // tempo changes whose onset was not sent never happened: the committed tempo stays
+            this._dropTempoRequests(); // tempo changes whose control was not sent never happened: the committed tempo stays
             const session = this._session;
             this._session = null;
             this._teardownSession(session);
@@ -7184,7 +7226,8 @@
                 if (fresh && Number.isFinite(this._sentHorizon)) {
                     // The look back starts from the boundary and is not subject to the stall rule: an onset whose
                     // nominal time is long past may still sound later (its nudge); late ones are skipped when sent.
-                    let back = this.cycleAt(Math.max(this._sentHorizon, now) - NUDGE_LATE);
+                    // It never reaches before this run of the transport (Play, resetCycles): no onset was there.
+                    let back = Math.max(this._timelineStart, this.cycleAt(Math.max(this._sentHorizon, now) - NUDGE_LATE));
                     for (const it of this._nudged) if (it.id === id && it.ev.begin < back) back = it.ev.begin;
                     if (back < from) from = back;
                 }
@@ -7202,13 +7245,15 @@
                 }
                 for (let i = 0; i < events.length; i++) {
                     const v = asObject(events[i].value);
-                    // Tidal's cps control (onsets before what was sent were the old pattern's to make).
-                    if (isNum(v.cps) && v.cps > 0 && events[i].begin >= this._dispatchCycle) {
-                        requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i });
-                    }
                     // Each event keeps its stream and the pattern it came from, so one held back can be dropped
                     // when that stream is muted, replaced or removed before it goes out.
-                    if (audible) items.push({ ev: events[i], v, stream, i, id, pattern, after: fresh ? this._sentHorizon : -Infinity });
+                    const item = audible ? { ev: events[i], v, stream, i, id, pattern, after: fresh ? this._sentHorizon : -Infinity } : null;
+                    if (item) items.push(item);
+                    // Tidal's cps control (onsets before what was sent were the old pattern's to make), settled
+                    // when its event is sent or dropped (see _commitTempo).
+                    if (isNum(v.cps) && v.cps > 0 && events[i].begin >= this._dispatchCycle) {
+                        requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i, item });
+                    }
                 }
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
@@ -7219,9 +7264,9 @@
 
             // Tidal's cps control: an event changes the tempo from its onset
             // on, for every event that starts there or later (setcps is once . cps).
-            // Owned by the stream (and its pattern) that asked for it, until it has taken effect.
+            // Owned by the stream (and its pattern) that asked for it, until the event carrying it is sent.
             requests.sort((a, b) => a.cycle - b.cycle || a.stream - b.stream || a.i - b.i);
-            for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++);
+            for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++, r.item);
             if (requests.length) this._reconcileTempo();
 
             // Then in the order they sound (nudge included), so the last word on
@@ -7254,7 +7299,12 @@
         _dispatch(fresh, now) {
             const horizon = now + this.lookahead;
             const current = (it) => this.channels.get(it.id) === it.pattern && this.isAudible(it.id);
-            const all = this._nudged.filter(current).concat(fresh);
+            const all = [];
+            for (const it of this._nudged) {
+                if (current(it)) all.push(it);
+                else it.dropped = true; // (a tempo request it carries goes with it: see _commitTempo)
+            }
+            for (const it of fresh) all.push(it);
             // Times from the clock as it is now (a tempo change since an event was asked for applies).
             for (const it of all) {
                 it.base = this.timeAt(it.ev.begin);
@@ -7263,13 +7313,18 @@
             }
             all.sort((a, b) => a.time - b.time || a.seq - b.seq);
             // A replacement's events before the boundary it took over at were the old pattern's to play.
-            const live = all.filter((it) => !(it.time < it.after));
+            const live = [];
+            for (const it of all) {
+                if (it.time < it.after) it.dropped = true;
+                else live.push(it);
+            }
             this._nudged = live.filter((it) => it.time >= horizon);
             const sent = this.cycleAt(horizon);
             if (sent > this._dispatchCycle) this._dispatchCycle = sent;
             if (horizon > this._sentHorizon) this._sentHorizon = horizon;
             for (const it of live) {
                 if (it.time >= horizon) break;
+                it.sent = true;
                 if (it.time < now - 0.02) continue;
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
