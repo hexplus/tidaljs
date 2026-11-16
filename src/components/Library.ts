@@ -33,7 +33,11 @@ export function createLibrary(session: Session) {
   const { editor } = session;
   const [sketches, setSketches] = signal<Sketch[]>([]);
   const [current, setCurrent] = signal<Sketch | null>(null);
-  const stored = readStoredDraft();
+  // The stored title, baseline and open sketch, only if they belong to the restored document: state
+  // written for another document (or by an older version, without an identity) is not trusted, so the
+  // draft then counts as unsaved.
+  const storedState = readStoredDraft();
+  const stored = storedState && storedState.documentId === session.documentId() ? storedState : null;
   const [title, setTitle] = signal(stored?.title ?? "");
   const [kind, setKind] = signal<StorageKind | null>(null);
   const storePromise: Promise<Store> = openStore();
@@ -57,7 +61,9 @@ export function createLibrary(session: Session) {
 
   // The baseline, title, tempo and open sketch outlive a reload, with the code (kept by the session).
   effect(() => {
-    const state: DraftState = { baseline: baseline(), title: title(), cps: session.tempo(), sketchId: current()?.id ?? null };
+    const state: DraftState = {
+      baseline: baseline(), title: title(), cps: session.tempo(), sketchId: current()?.id ?? null, documentId: session.documentId(),
+    };
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(state));
     } catch {

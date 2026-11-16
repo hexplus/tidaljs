@@ -48,7 +48,7 @@ eq(differs({ ...timed, cps: 0.6 }, timed), false);
 // Stored state: read back, and nothing for unreadable text.
 eq(readDraftState(null), null);
 eq(readDraftState('{oops'), null);
-eq(readDraftState(JSON.stringify({ baseline: base, title: 'T', cps: 0.7, sketchId: 'abc' })), { baseline: base, title: 'T', cps: 0.7, sketchId: 'abc' });
+eq(readDraftState(JSON.stringify({ baseline: base, title: 'T', cps: 0.7, sketchId: 'abc', documentId: 'd1' })), { baseline: base, title: 'T', cps: 0.7, sketchId: 'abc', documentId: 'd1' });
 
 // ---------------- 3. One engine start for many clicks; stale tickets
 {
@@ -90,6 +90,28 @@ eq(readDraftState(JSON.stringify({ baseline: base, title: 'T', cps: 0.7, sketchI
     const marked = markImported(claimed.sketches, 'evil.json');
     eq(marked[0].provenance, { origin: 'library', label: 'evil.json' });
     eq(mergeImport([], marked)[0].provenance.origin, 'library');
+}
+
+// ---------------- 1. The document kept between visits: one record, read conservatively
+{
+    const { DOCUMENT_KEY, LEGACY_KEYS, readDocument, serializeDocument } = await import('../src/document.ts');
+    const { DEFAULT_CODE } = await import('../src/data/examples.ts');
+    const store = (entries) => (key) => (key in entries ? entries[key] : null);
+    // A snapshot comes back as written: code, provenance, identity and the tempo waiting for the first run.
+    const doc = { code: 'd1(sound("x"))', provenance: { origin: 'shared', label: 'Song' }, id: 'doc-1', pendingCps: 1.75 };
+    eq(readDocument(store({ [DOCUMENT_KEY]: serializeDocument(doc) })), doc);
+    // An intentionally empty draft stays empty; nothing stored gives the starting code.
+    eq(readDocument(store({ [DOCUMENT_KEY]: serializeDocument({ ...doc, code: '', provenance: LOCAL, pendingCps: null }) })).code, '');
+    eq(readDocument(store({})).code, DEFAULT_CODE);
+    eq(readDocument(store({ [LEGACY_KEYS.code]: '' })).code, '', 'an empty legacy draft is kept too');
+    // A snapshot without a provenance is not trusted as local.
+    eq(readDocument(store({ [DOCUMENT_KEY]: JSON.stringify({ code: 'x' }) })).provenance.origin, 'import');
+    // Legacy records: separate code and provenance cannot be known to match, so local becomes external.
+    eq(readDocument(store({ [LEGACY_KEYS.code]: 'window.x = 1', [LEGACY_KEYS.provenance]: JSON.stringify(LOCAL) })).provenance.origin, 'import');
+    eq(readDocument(store({ [LEGACY_KEYS.code]: 'x', [LEGACY_KEYS.provenance]: JSON.stringify({ origin: 'shared', label: 'S' }) })).provenance, { origin: 'shared', label: 'S' });
+    eq(readDocument(store({ [LEGACY_KEYS.code]: 'x', [LEGACY_KEYS.shared]: '1' })).provenance.origin, 'shared');
+    // Code from before provenance existed (no record at all) is the person's own.
+    eq(readDocument(store({ [LEGACY_KEYS.code]: 'd1(sound("bd"))' })).provenance, LOCAL);
 }
 
 console.log(`editor: all ${passed} checks passed`);

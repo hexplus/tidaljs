@@ -3,22 +3,19 @@
  * update and recording. Components read the signals and call the actions.
  */
 import { effect, signal } from "sibujs";
-import { DEFAULT_CODE, EXAMPLES, type Example } from "./data/examples.ts";
+import { EXAMPLES, type Example } from "./data/examples.ts";
 import { SNIPPETS } from "./data/snippets.ts";
 import { createEditor, type Editor } from "./editor/Editor.ts";
 import { setSampleBanks } from "./editor/language.ts";
 import { TidalJS, type ControlLayout, type LiveControl, type StreamInfo, type Tidal } from "./engine.ts";
-import { LOCAL, approve, describeOrigin, holds, isExternal, readProvenance, type Approval, type Provenance } from "./provenance.ts";
+import { DOCUMENT_KEY, LEGACY_KEYS, newDocumentId, readDocument, serializeDocument } from "./document.ts";
+import { LOCAL, approve, describeOrigin, holds, isExternal, type Approval, type Provenance } from "./provenance.ts";
 import { Tickets, singleFlight } from "./runs.ts";
 import { scanCode, type CodeScan } from "./share.ts";
 
 const KEYS = {
-  code: "tidaljs:code",
   live: "tidaljs:live",
   category: "tidaljs:snippetCategory",
-  /** Before provenance: "1" while code from a link waited for its first Play. */
-  shared: "tidaljs:sharedUnplayed",
-  provenance: "tidaljs:provenance",
   controls: "tidaljs:controls",
 };
 const LIVE_DELAY = 700; // ms of quiet before a live update
@@ -96,19 +93,6 @@ function exampleFor(text: string, current: Example | null): Example | null {
   return current && firstLine && firstLine.startsWith("//") && text.includes(firstLine) ? current : null;
 }
 
-/** The provenance kept with the draft; code from a link saved before provenance existed is still external. */
-function savedProvenance(): Provenance {
-  const text = storage.get(KEYS.provenance);
-  if (text) {
-    try {
-      return readProvenance(JSON.parse(text));
-    } catch {
-      return readProvenance(null);
-    }
-  }
-  return storage.get(KEYS.shared) === "1" ? { origin: "shared", label: "" } : LOCAL;
-}
-
 export function createSession() {
   const [status, setStatus] = signal<Status>({ kind: "", text: "Ready. Press Play or Ctrl+Enter to start.", warnings: [] });
   const [tempo, setTempo] = signal(0.8); // cycles per second
@@ -125,11 +109,21 @@ export function createSession() {
    * opens for review and runs only after an explicit Play that the person
    * confirms for that exact text. Kept with the draft across reloads.
    */
-  const [provenance, setProvenanceSignal] = signal<Provenance>(savedProvenance());
+  const restored = readDocument(storage.get);
+  const [provenance, setProvenanceSignal] = signal<Provenance>(restored.provenance);
+  /** Identifies the document in the editor (a new one for each sketch, example, import or link; typing keeps it). */
+  const [documentId, setDocumentId] = signal(restored.id);
+  /** The tempo an external song brought: applied when it first runs, never before (see play). */
+  let pendingCps: number | null = restored.pendingCps;
+  /** Writes the code, provenance, identity and pending tempo together (see document.ts). */
+  const persistDocument = () => {
+    clearTimeout(saveTimer);
+    storage.set(DOCUMENT_KEY, serializeDocument({ code: editor.getValue(), provenance: provenance(), id: documentId(), pendingCps }));
+    for (const key of Object.values(LEGACY_KEYS)) storage.remove(key);
+  };
   const setProvenance = (p: Provenance) => {
     setProvenanceSignal(p);
-    storage.set(KEYS.provenance, JSON.stringify(p));
-    storage.remove(KEYS.shared);
+    persistDocument();
   };
   /** Asks before external code first runs. Set by the sharing UI; until then external code does not run. */
   let confirmExternal: (review: ExternalReview) => Promise<boolean> = async () => false;
@@ -184,8 +178,7 @@ export function createSession() {
     setStatus({ kind, text, warnings, action });
   };
 
-  const savedCode = storage.get(KEYS.code);
-  const initialCode = savedCode && savedCode.trim() ? savedCode : DEFAULT_CODE;
+  const initialCode = restored.code; // an empty draft stays empty
 
   /** True while the engine plays (kept in sync after every action and by syncPlaying()). */
   const [playing, setPlaying] = signal(false);
@@ -202,11 +195,11 @@ export function createSession() {
 
   const editor: Editor = createEditor({
     initialCode,
-    onChange(text) {
+    onChange() {
       setEdits((n) => n + 1);
       scheduleLiveUpdate();
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => storage.set(KEYS.code, text), SAVE_DELAY);
+      saveTimer = setTimeout(persistDocument, SAVE_DELAY);
     },
   });
 
@@ -429,8 +422,10 @@ export function createSession() {
     } else {
       text = editor.getValue(); // local code: what is in the editor now
     }
-    // The approved text runs: from now on it is the person's own code.
+    // The approved text runs: from now on it is the person's own code, and the tempo it came with applies.
     if (isExternal(provenance())) {
+      if (pendingCps !== null) changeTempo(pendingCps);
+      pendingCps = null;
       setProvenance(LOCAL);
       approval = null;
     }
@@ -512,11 +507,16 @@ export function createSession() {
     documentRevision++;
     approval = null;
     plays.cancel();
-    setProvenance(from);
     editor.setValue(code);
+    // The tempo it came with: at once for local code; for external code only when it first runs, so
+    // opening it never changes the music that plays.
+    const tempoGiven = cps !== undefined && !/setCPS|setcps|setTempo|setbpm/.test(code) ? cps : null;
+    pendingCps = isExternal(from) ? tempoGiven : null;
+    if (!isExternal(from) && tempoGiven !== null) changeTempo(tempoGiven);
+    setDocumentId(newDocumentId());
+    setProvenance(from); // writes the new document's snapshot at once (code, provenance, identity, tempo)
     setCurrentExample(isExternal(from) ? null : exampleFor(code, null));
     setEdits((n) => n + 1);
-    if (cps !== undefined && !/setCPS|setcps|setTempo|setbpm/.test(code)) changeTempo(cps);
   }
 
   function loadExample(example: Example) {
@@ -580,6 +580,8 @@ export function createSession() {
     retrySamples,
     /** Where the editor's code came from; external code waits for a reviewed Play. */
     provenance,
+    /** Identifies the document in the editor; another sketch, example, import or link gets a new one. */
+    documentId,
     /** True while the editor holds external code that has not run (shared, imported or converted). */
     reviewPending: () => isExternal(provenance()),
     /** Sets the question asked before external code first runs. */

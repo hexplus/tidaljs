@@ -921,7 +921,8 @@ export class Ppar extends Pattern {
         e.t += advanceOf(e.ev as SCEvent);
         const next = e.stream.next(base.copy());
         e.ev = next === DONE || !(next instanceof SCEvent) ? null : next;
-        if (!e.ev) end = Math.max(end, e.t);
+        // The last event of a pattern that ran out: its source ends there, whatever the others do.
+        if (!e.ev) { end = Math.max(end, e.t); out.set("__srcEnd", true); }
         live = live.filter((x) => x.ev);
         const nextT = live.length ? Math.min(...live.map((x) => x.t)) : Math.max(end, tOut);
         out.set("__gap", nextT - tOut);

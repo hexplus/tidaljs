@@ -3169,9 +3169,10 @@
                 while (i < n && text[i] !== c && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1;
                 i++;
                 afterDot = false;
-            } else if (/[A-Za-z_$À-￿]/.test(c)) {
-                let j = i + 1;
-                while (j < n && /[\w$À-￿]/.test(text[j])) j++;
+            } else if (NAME_START.test(c) || /[\ud800-\udbff]/.test(c)) {
+                NAME_AT.lastIndex = i;
+                const m = NAME_AT.exec(text);
+                const j = m && m[0].length ? i + m[0].length : i + 1;
                 if (!afterDot) ids.push(text.slice(i, j));
                 i = j;
                 afterDot = false;
@@ -3188,6 +3189,12 @@
     }
 
     const BINDING = /^\s*(?:export\s+)?(?:const|let|var|class|function|async\s+function)\b/;
+    // A JavaScript name, Unicode included (café, ñandú, 𝑥).
+    const NAME_START = /[\p{ID_Start}$_]/u;
+    const NAME_AT = /[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*/uy;
+    const NAME_HEAD = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*/u;
+    // Names that reach variables or code in ways no reading of the text can follow.
+    const DYNAMIC_SCOPE = new Set(['eval', 'with', 'globalThis', 'window', 'self', 'Function', 'Reflect']);
 
     /**
      * The names a declaration statement binds: each declarator's name, every
@@ -3197,7 +3204,7 @@
      */
     function declaredNames(text) {
         const all = identifiersIn(text);
-        const fn = /^\s*(?:export\s+)?(?:async\s+)?(?:function\s*\*?|class)\s*([A-Za-z_$][\w$]*)/.exec(text);
+        const fn = /^\s*(?:export\s+)?(?:async\s+)?(?:function\s*\*?|class)\s*([\p{ID_Start}$_][\p{ID_Continue}$‌‍]*)/u.exec(text);
         if (fn) return [fn[1]];
         const head = /^\s*(?:export\s+)?(?:const|let|var)\s+/.exec(text);
         if (!head) return all;
@@ -3231,8 +3238,9 @@
                 if (depth < 0) return all;
             } else if (depth === 0 && c === ',') {
                 expectName = true;
-            } else if (depth === 0 && expectName && /[A-Za-z_$]/.test(c)) {
-                const m = /^[A-Za-z_$][\w$]*/.exec(text.slice(i));
+            } else if (depth === 0 && expectName && (NAME_START.test(c) || /[\ud800-\udbff]/.test(c))) {
+                const m = NAME_HEAD.exec(text.slice(i));
+                if (!m) return all;
                 names.push(m[0]);
                 i += m[0].length - 1;
                 expectName = false;
@@ -3270,6 +3278,11 @@
             const decl = BINDING.test(s.text);
             return { text: s.text, decl, ids: identifiersIn(s.text), names: decl ? declaredNames(s.text) : [] };
         });
+        // When the reading is not certain, no stream is kept: a declaration whose names were not
+        // all found in it, escaped names (a), or names that reach variables dynamically.
+        const uncertain = info.some((s) => (s.decl && (!s.names.length || s.names.some((name) => !s.ids.includes(name))))
+            || /\\u/.test(s.text) || s.ids.some((id) => DYNAMIC_SCOPE.has(id)));
+        if (uncertain) return () => '\u0000uncertain' + Math.random();
         const declaredBy = new Map();
         info.forEach((s, j) => {
             for (const name of s.names) {
@@ -4423,9 +4436,12 @@
      */
     function scanTokens(code, from, nested) {
         const tokens = [];
-        const stack = []; // open brackets: { value, kind, ctrl }
+        const stack = []; // open brackets: { value, kind, ctrl, fn }
         let i = from;
         let nl = false;
+        // A function or class expression whose parameters or body come next: its body is a value, not a block.
+        let pendingFunction = null; // { expr, depth } from "function" up to its "("
+        let pendingClass = null;    // { expr, depth } from "class" up to its "{"
         while (i < code.length) {
             const ch = code[i];
             const next = code[i + 1];
@@ -4500,6 +4516,13 @@
                 // A property name (a.return) is never a keyword.
                 tok.prop = isPunct(prev, '.') || isPunct(prev, '?.');
                 i = j;
+                if (!tok.prop && (tok.value === 'function' || tok.value === 'class')) {
+                    // async function: what decides is the token before "async".
+                    const lead = isWord(prev, 'async') && !tok.nl ? before : prev;
+                    const pending = { expr: expressionPosition(lead), depth: stack.length };
+                    if (tok.value === 'function') pendingFunction = pending;
+                    else pendingClass = pending;
+                }
             } else {
                 let value = ch;
                 for (const list of PUNCTUATORS) {
@@ -4510,16 +4533,26 @@
                 tok.value = value;
                 i += value.length;
                 if (OPENERS.has(value)) {
-                    const open = { value, kind: 'expr', ctrl: false };
+                    const open = { value, kind: 'expr', ctrl: false, fn: false };
                     if (value === '(') {
                         open.ctrl = (isWord(prev) && CONDITION.has(prev.value)) || (isWord(prev, 'await') && isWord(before, 'for'));
+                        // The parameters of a function expression: the body after them is a value.
+                        if (pendingFunction && pendingFunction.depth === stack.length) {
+                            open.fn = pendingFunction.expr;
+                            pendingFunction = null;
+                        }
                     } else if (value === '{') {
-                        open.kind = braceKind(prev, before, tok.nl, nested, stack);
+                        if (pendingClass && pendingClass.depth === stack.length) {
+                            open.kind = pendingClass.expr ? 'fexpr' : 'block';
+                            pendingClass = null;
+                        } else {
+                            open.kind = braceKind(prev, before, tok.nl, nested, stack);
+                        }
                     }
                     stack.push(open);
                 } else if (CLOSERS.has(value)) {
                     const open = stack.pop();
-                    if (open) { tok.kind = open.kind; tok.ctrl = open.ctrl; }
+                    if (open) { tok.kind = open.kind; tok.ctrl = open.ctrl; tok.fn = open.fn; }
                 } else if (value === '++' || value === '--') {
                     // Postfix only right after an operand on the same line (a\n++b is a; ++b).
                     tok.postfix = !tok.nl && !!prev && ((prev.type === 'name' && !(isWord(prev) && REGEX_AFTER.has(prev.value))) ||
@@ -4545,8 +4578,23 @@
         if (prev.type === 'name') return isWord(prev) && REGEX_AFTER.has(prev.value);
         if (prev.type !== 'punct') return false;
         if (prev.value === ')') return !!prev.ctrl;          // if (x) /re/.test(s)
-        if (prev.value === '}') return prev.kind !== 'expr'; // after a block, not an object literal
+        // After a block, not an object literal or a function or class expression's body.
+        if (prev.value === '}') return prev.kind !== 'expr' && prev.kind !== 'fexpr';
         return !(prev.value === ']' || prev.value === '++' || prev.value === '--');
+    }
+
+    // Whether a "function" or "class" after the token `prev` is an expression (a value), not a declaration.
+    function expressionPosition(prev) {
+        if (!prev) return false;
+        if (prev.type === 'punct') {
+            if (prev.value === ';') return false;
+            if (prev.value === '}') return prev.kind === 'expr' || prev.kind === 'fexpr';
+            if (prev.value === '{') return prev.kind === 'expr';
+            if (prev.value === ')') return !prev.ctrl;
+            if (prev.value === ':') return !prev.label;
+            return true; // = ( , [ ? => and operators
+        }
+        return isWord(prev) && prev.value !== 'else' && prev.value !== 'do' && (REGEX_AFTER.has(prev.value) || OPERAND_AFTER.has(prev.value));
     }
 
     // What a "{" opens: a block (or class/function body), an arrow
@@ -4556,7 +4604,8 @@
         if (prev.type === 'punct') {
             switch (prev.value) {
                 case '=>': return 'arrow';
-                case ')': case ';': return 'block';
+                case ')': return prev.fn ? 'fexpr' : 'block'; // a function expression's body is a value
+                case ';': return 'block';
                 case '}': return prev.kind === 'expr' && !nl ? 'expr' : 'block';
                 case '{': return prev.kind === 'expr' ? 'expr' : 'block';
                 case ':': return prev.label ? 'block' : 'expr';
@@ -4734,7 +4783,26 @@
             }
             k = j;
         }
-        return statements;
+        return mergeWhereNeeded(code, statements);
+    }
+
+    /**
+     * A safety net for the split: when the whole code is valid JavaScript
+     * but a statement on its own is not, the split misread it (a "/" taken
+     * for a regular expression, a line break taken for the end), so it is
+     * joined with the statements after it until the piece compiles. Valid
+     * code is never cut where JavaScript would not cut it; invalid code is
+     * left as split, for the error to point at the right statement.
+     */
+    function mergeWhereNeeded(code, statements) {
+        if (statements.every((s) => compiles(s.text)) || !compiles(code)) return statements;
+        const out = [];
+        for (let i = 0; i < statements.length; i++) {
+            let { start, end } = statements[i];
+            while (!compiles(code.slice(start, end)) && i + 1 < statements.length) end = statements[++i].end;
+            out.push({ text: code.slice(start, end), start, end });
+        }
+        return out;
     }
 
     function compiles(statement) {
@@ -5491,8 +5559,11 @@
      * the event's length in seconds; the note lasts `sustain` seconds, else
      * duration * legato, and at least 10 ms.
      */
-    function midiEventOf(v, duration) {
-        const channel = clamp(isNum(v.midichan) ? Math.floor(v.midichan) : 0, 0, 15);
+    function midiEventOf(v, duration, options = {}) {
+        // MIDI files keep General MIDI's percussion channel (9) for a named drum with no channel or note given, as they always did.
+        const drum = options.drumChannel && !isNum(v.midichan) && !isNum(v.midinote) && !isNum(v.note) && !isNum(v.freq)
+            && !!v.s && GM_DRUMS[v.s] !== undefined;
+        const channel = drum ? 9 : clamp(isNum(v.midichan) ? Math.floor(v.midichan) : 0, 0, 15);
         const cc = (number, value) => [0xb0 | channel, number, value];
         const controls = [];
         if (isNum(v.pgm)) controls.push([0xc0 | channel, clamp(Math.floor(v.pgm), 0, 127)]);
@@ -5624,8 +5695,11 @@
             // Evaluation, one-shots and the clock.
             this._txn = null;                  // commands staged while eval() runs code (see _stage)
             this._txnCps = undefined;          // the tempo a staged setCPS() will set
+            this._txnBanks = null;             // names of the banks samples() staged in that code
             this._oneShots = new Set();        // { session, timer } of first(), once() and asap()
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
+            this._nudged = [];                 // events nudged past the last tick's horizon, waiting for their tick
+            this._eventSeq = 0;                // order of the events the scheduler has seen
             this._sampleFailures = new Map();  // manifest source or file URL -> why it failed (see retrySamples)
             this._sampleListeners = new Set(); // called when sample loads finish or fail
         }
@@ -6001,6 +6075,12 @@
             return this._anchorTime + (cycle - this._anchorCycle) / this.cps;
         }
 
+        /** The tempo in force at a cycle (see cycleAt). */
+        _cpsAt(cycle) {
+            if (cycle < this._anchorCycle && this._tempoHistory.length) return this._tempoSegment((s) => s.cycle <= cycle).cps;
+            return this.cps;
+        }
+
         /** The latest earlier anchor that `fits`, or the earliest one kept. */
         _tempoSegment(fits) {
             for (let i = this._tempoHistory.length - 1; i >= 0; i--) {
@@ -6370,8 +6450,11 @@
             const start = ctx.currentTime + 0.05;
             const cps = this.cps;
             const events = pattern.query(0, 1).slice().sort((a, b) => a.begin - b.begin);
+            const shot = { session, timer: null };
             const saved = this._session;
+            const savedOwner = this._midiOwner;
             this._session = session;
+            this._midiOwner = shot; // its MIDI is its own: stopping the loops does not cancel it
             let end = start;
             try {
                 for (const ev of events) {
@@ -6387,8 +6470,8 @@
                 }
             } finally {
                 this._session = saved;
+                this._midiOwner = savedOwner;
             }
-            const shot = { session, timer: null };
             this._oneShots.add(shot);
             shot.timer = setTimeout(() => this._endOneShot(shot), Math.max(0, end - ctx.currentTime + ONE_SHOT_TAIL) * 1000);
         }
@@ -6398,6 +6481,7 @@
             if (!this._oneShots.delete(shot)) return;
             clearTimeout(shot.timer);
             this._teardownSession(shot.session);
+            this._cancelMidi(shot);
         }
 
         /** True while a first(), once() or asap() is still sounding. */
@@ -6532,6 +6616,7 @@
             this._anchorCycle = 0;
             this._nextCycle = 0;
             this._tempoHistory = [];
+            this._nudged = [];
             this.isPlaying = true;
             this._startTimer();
         }
@@ -6540,13 +6625,15 @@
         _halt() {
             this.isPlaying = false;
             this._stopTimer();
+            this._nudged = []; // events held back for a later tick never play
             const session = this._session;
             this._session = null;
             this._teardownSession(session);
             this._midiHeld.clear(); // the held keys' voices went with the session
             this._liveVoices.clear();
             this._cancelExternalOutput();
-            this._allNotesOff();
+            // All notes off would cut a one-shot's MIDI too: then only the loops' notes are ended (above).
+            if (this._oneShots.size === 0) this._allNotesOff();
         }
 
         /** Fades a session out quickly, then disconnects everything of it, events already scheduled and effect tails included. */
@@ -6719,6 +6806,7 @@
             }
             if (!this.isPlaying) return; // the last stream failed
             items.sort((a, b) => a.ev.begin - b.ev.begin || a.stream - b.stream || a.i - b.i);
+            for (const it of items) it.seq = this._eventSeq++; // the tie-break, also against events held back
 
             // Tidal's cps control: an event changes the tempo from its onset
             // on, for every event that starts there or later (setcps is once . cps).
@@ -6729,13 +6817,25 @@
             }
 
             // Then in the order they sound (nudge included), so the last word on
-            // an orbit's effects or a cut group is the latest event's.
-            const timed = items.map((it) => {
-                const begin = this.timeAt(it.ev.begin);
-                return { ...it, time: begin + (isNum(it.v.nudge) ? it.v.nudge : 0), duration: this.timeAt(it.ev.end) - begin };
-            });
-            timed.sort((a, b) => a.time - b.time || a.stream - b.stream || a.i - b.i);
-            for (const it of timed) {
+            // an orbit's effects or a cut group is the latest event's. A note's
+            // length is its length in cycles at the tempo in force at its onset,
+            // fixed when it starts (as SuperDirt's sustain): a tempo change met
+            // later does not stretch or shorten notes already sounding.
+            const timed = items.map((it) => ({
+                ...it,
+                time: this.timeAt(it.ev.begin) + (isNum(it.v.nudge) ? it.v.nudge : 0),
+                duration: (it.ev.end - it.ev.begin) / this._cpsAt(it.ev.begin),
+            }));
+            // An event nudged past this tick's horizon waits for the tick that
+            // reaches its time, so events from later ticks that sound before it
+            // go first. (A negative nudge cannot move an event before what was
+            // already sent: it is sent at once, at its time.)
+            const horizon = now + this.lookahead;
+            const all = this._nudged.concat(timed);
+            all.sort((a, b) => a.time - b.time || a.seq - b.seq);
+            this._nudged = all.filter((it) => it.time >= horizon);
+            for (const it of all) {
+                if (it.time >= horizon) break;
                 if (it.time < now - 0.02) continue;
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
@@ -6824,6 +6924,7 @@
             const txn = [];
             this._txn = txn;
             this._txnCps = undefined;
+            this._txnBanks = new Set(); // banks samples() stages in this code
             let committed = false;
             try {
                 const body = statements
@@ -6861,10 +6962,19 @@
                         if (bank) {
                             const pitched = this._pitchedFile(v.s, isNum(v.note) ? v.note : isNum(v.midinote) ? v.midinote : 60);
                             if (this.audioContext) this._sampleBuffer(pitched ? pitched.url : this._sampleUrl(bank, v), false);
-                        } else if (!this.samples.has(v.s) && !this.isLoadingSamples()) {
+                        } else if (!this.samples.has(v.s) && !this.isLoadingSamples() && !this._txnBanks.has(v.s)) {
                             warnings.add(`Unknown sound "${v.s}"`);
                         }
                     }
+                }
+                // A stream used twice is a warning too, so a live update holds back on it.
+                const named = new Set();
+                let unnamedSeen = 0;
+                for (const p of patterns) {
+                    const name = p._stream || '#' + (++unnamedSeen);
+                    current = origin.get(p);
+                    if (named.has(name)) warnings.add(`Stream ${name} is used twice; the last one plays`);
+                    named.add(name);
                 }
 
                 if (options.keepOnWarnings && warnings.size > 0) {
@@ -6893,7 +7003,6 @@
                     const nth = (ordinal.get(current) || 0) + 1;
                     ordinal.set(current, nth);
                     const source = sourceOf(current) + '\u0001' + nth;
-                    if (streams.has(name)) warnings.add(`Stream ${name} is used twice; the last one plays`);
                     const prev = before.get(name);
                     const history = prev ? [prev.pattern, ...(prev.history || [])].slice(0, 16) : [];
                     if (options.keepUnchanged && wasPlaying && prev && prev.source === source) {
@@ -6943,6 +7052,7 @@
                 }
                 this._txn = null;
                 this._txnCps = undefined;
+                this._txnBanks = null;
                 this._collecting = null;
                 this._warnings = null;
                 this._live = null;
@@ -7910,56 +8020,70 @@
          * ("/samples/bd.wav") paths work as in a link.
          */
         loadSamples(source, base = '') {
+            const entry = this._samplePlan(source, base);
+            // The banks replace those of the same name only now: in code being evaluated, when it commits.
+            const register = () => {
+                const job = entry.promise.then((plan) => this._registerBanks(plan));
+                job.catch(() => { /* reported where the manifest failed */ });
+                return job;
+            };
+            if (this._txn) {
+                // Known names count as loading for the warnings of this evaluation.
+                if (entry.plan) for (const bank of entry.plan) this._txnBanks.add(bank.name);
+                let settle;
+                const result = new Promise((resolve) => { settle = resolve; });
+                this._stage('samples', () => settle(register()), () => settle(0));
+                return result;
+            }
+            return register();
+        }
+
+        /**
+         * The banks a source holds, read but not yet in use: { promise, plan }
+         * with plan [{ name, urls, pitched }] once known (at once for banks
+         * given in code). Manifests are fetched once; a failed one is kept as
+         * failed until retrySamples().
+         */
+        _samplePlan(source, base) {
             const key = typeof source === 'string' ? source + '|' + base : null;
             if (key && this._sampleManifests.has(key)) return this._sampleManifests.get(key);
-
-            const job = (async () => {
-                let map = source;
-                let root = base;
-                if (typeof source === 'string') {
+            const entry = { promise: null, plan: null };
+            if (typeof source === 'string') {
+                entry.promise = (async () => {
                     const url = resolveUrl(manifestUrl(source), pageBase());
                     const response = await fetch(url);
                     if (!response.ok) throw new Error(`Could not load samples from ${url} (HTTP ${response.status})`);
-                    map = await response.json();
+                    const map = await response.json();
                     if (!map || typeof map !== 'object' || Array.isArray(map)) throw new Error(`The sample manifest ${url} is not an object of banks`);
                     // Relative paths follow the manifest where it really is (after any redirect).
                     const finalUrl = typeof response.url === 'string' && response.url ? response.url : url;
-                    root = resolveUrl(root || (typeof map._base === 'string' ? map._base : ''), finalUrl);
-                } else if (!source || typeof source !== 'object') {
-                    throw new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }');
-                } else {
-                    root = resolveUrl(root || (typeof source._base === 'string' ? source._base : ''), pageBase());
-                }
-                let banks = 0;
-                const full = (f) => resolveUrl(f, root);
-                for (const [name, files] of Object.entries(map)) {
-                    if (name.startsWith('_')) continue;
-                    const list = (Array.isArray(files) ? files : typeof files === 'string' ? [files] : Object.values(files || {}))
-                        .filter((f) => typeof f === 'string');
-                    if (list.length === 0) continue;
-                    this.sampleBanks.set(name, list.map(full));
-                    // A bank given as { note: file } (e.g. { C4: "c4.wav", Ds4: ... }) is pitched:
-                    // note() picks the nearest recording and plays it at the right pitch.
-                    this.pitchedBanks.delete(name);
-                    if (files && typeof files === 'object' && !Array.isArray(files)) {
-                        const notes = Object.entries(files)
-                            .map(([key, f]) => ({ midi: noteNameToMidi(key), url: typeof f === 'string' ? full(f) : null }))
-                            .filter((x) => x.midi !== undefined && x.url);
-                        if (notes.length) this.pitchedBanks.set(name, notes.sort((a, b) => a.midi - b.midi));
-                    }
-                    banks++;
-                }
-                return banks;
-            })();
-
-            // A failed load stays failed (no request on every evaluation) until retrySamples().
-            if (key) this._sampleManifests.set(key, job);
-            this._trackLoad(job.catch((err) => {
+                    return planBanks(map, resolveUrl(base || (typeof map._base === 'string' ? map._base : ''), finalUrl));
+                })();
+                entry.promise.then((plan) => { entry.plan = plan; }, () => {});
+            } else if (!source || typeof source !== 'object') {
+                entry.promise = Promise.reject(new TypeError('samples() expects "github:user/repo", a manifest URL or { name: [files] }'));
+            } else {
+                entry.plan = planBanks(source, resolveUrl(base || (typeof source._base === 'string' ? source._base : ''), pageBase()));
+                entry.promise = Promise.resolve(entry.plan);
+            }
+            if (key) this._sampleManifests.set(key, entry);
+            this._trackLoad(entry.promise.catch((err) => {
                 console.error('TidalJS:', err);
                 this._sampleFailures.set(key || 'samples()', err && err.message ? err.message : String(err));
                 this._warnOnce(err.message);
             }));
-            return job;
+            return entry;
+        }
+
+        /** Puts planned banks in use (see planBanks); returns how many. */
+        _registerBanks(plan) {
+            for (const bank of plan) {
+                this.sampleBanks.set(bank.name, bank.urls);
+                if (bank.pitched) this.pitchedBanks.set(bank.name, bank.pitched);
+                else this.pitchedBanks.delete(bank.name);
+            }
+            this._notifySamples();
+            return plan.length;
         }
 
         /** True while sample banks or files are still loading. */
@@ -9481,13 +9605,17 @@
             const toPerf = (t) => now + (t - ctx.currentTime) * 1000;
             const { channel, controls, note } = midiEventOf(v, duration);
             const at = toPerf(time);
+            const owner = this._midiOwner || 'loop';
             try {
-                for (const message of controls) out.send(message, at);
+                for (const message of controls) {
+                    out.send(message, at);
+                    this._trackMidi(out, { owner, data: message, at }, now);
+                }
                 if (!note) return;
                 const off = toPerf(time + note.length);
                 out.send([0x90 | channel, note.key, note.velocity], at);
-                this._trackMidiNote(out, channel, note.key, at, off, now);
                 out.send([0x80 | channel, note.key, 0], off);
+                this._trackMidi(out, { owner, note: { channel, key: note.key, velocity: note.velocity }, at, off }, now);
             } catch (err) {
                 // An unplugged output throws: skip its events instead of stopping the scheduler.
                 this._warnOnce(`MIDI output ${JSON.stringify(out.name || String(v.midi))} could not be used (${err && err.message})`);
@@ -9495,58 +9623,78 @@
         }
 
         /**
-         * Keeps the notes sent ahead (with timestamps) to each output until
-         * their note-off has passed, so Stop can cancel or end them.
+         * Keeps what was sent ahead (with timestamps) to each output until it
+         * has passed: notes (until their note-off) and control, program and
+         * NRPN messages, each with its owner (the loops, or a one-shot), so
+         * Stop can cancel exactly what it stops.
          */
-        _trackMidiNote(out, channel, key, on, off, now) {
+        _trackMidi(out, record, now) {
             if (!this._midiSent) this._midiSent = new Map();
-            let notes = this._midiSent.get(out);
-            if (!notes) this._midiSent.set(out, notes = []);
-            if (notes.length >= 64) {
-                const live = notes.filter((n) => n.off > now);
-                notes.length = 0;
-                notes.push(...live);
+            let list = this._midiSent.get(out);
+            if (!list) this._midiSent.set(out, list = []);
+            if (list.length >= 256) {
+                const live = list.filter((r) => (r.off ?? r.at) > now);
+                list.length = 0;
+                list.push(...live);
             }
-            notes.push({ channel, key, on, off });
+            list.push(record);
         }
 
         /**
-         * Stop: the MIDI the performance scheduled ahead does not sound. Each
-         * output's pending messages are cleared where the browser supports
-         * clear(); notes already on get their note-off now, and notes still to
-         * come that could not be cancelled end as they start. Disconnected or
-         * failing outputs are skipped.
+         * Stop for one owner (the loops, a one-shot) or every owner: what it
+         * scheduled ahead does not sound. An output with any of its messages
+         * pending is cleared where the browser supports clear(), then the
+         * pending messages of the other owners are sent again with their
+         * times, so a one-shot is not cut by the loops stopping. Its notes
+         * already on get their note-off now; without clear(), notes still to
+         * come end as they start, and controls already sent cannot be
+         * recalled. Disconnected or failing outputs are skipped.
          */
-        _cancelMidi() {
+        _cancelMidi(owner = null) {
             const sent = this._midiSent;
             if (!sent || !sent.size) return;
-            this._midiSent = new Map();
             const now = performance.now();
-            for (const [out, notes] of sent) {
-                if (out.state === 'disconnected') continue;
+            const mine = (r) => owner === null || r.owner === owner;
+            for (const [out, list] of [...sent]) {
+                const live = list.filter((r) => (r.off ?? r.at) > now);
+                const cancel = live.filter(mine);
+                const keep = live.filter((r) => !mine(r));
+                if (keep.length) sent.set(out, keep);
+                else sent.delete(out);
+                if (!cancel.length || out.state === 'disconnected') continue;
+                const pending = cancel.some((r) => r.at > now);
                 let cleared = false;
-                if (typeof out.clear === 'function') {
+                if (pending && typeof out.clear === 'function') {
                     try {
                         out.clear();
                         cleared = true;
                     } catch (e) { /* not supported, or unplugged */ }
                 }
                 try {
-                    for (const n of notes) {
-                        if (n.off <= now) continue;          // already over
-                        if (n.on > now) {
-                            if (!cleared) out.send([0x80 | n.channel, n.key, 0], n.on);
-                        } else {
-                            out.send([0x80 | n.channel, n.key, 0]);
+                    for (const r of cancel) {
+                        if (!r.note) continue;
+                        const off = [0x80 | r.note.channel, r.note.key, 0];
+                        if (r.at <= now) out.send(off);              // sounding: ends now
+                        else if (!cleared) out.send(off, r.at);      // could not be cancelled: ends as it starts
+                    }
+                    // clear() took the others' pending messages too: send them again.
+                    if (cleared) {
+                        for (const r of keep) {
+                            if (r.note) {
+                                if (r.at > now) out.send([0x90 | r.note.channel, r.note.key, r.note.velocity], r.at);
+                                out.send([0x80 | r.note.channel, r.note.key, 0], r.off);
+                            } else if (r.at > now) {
+                                out.send(r.data, r.at);
+                            }
                         }
                     }
                 } catch (e) { /* unplugged meanwhile */ }
             }
         }
 
-        /** Stop: no MIDI or OSC the performance scheduled ahead goes out any more (called by _halt). */
+        /** The loops stopped: none of their MIDI or OSC scheduled ahead goes out any more (called by _halt). */
         _cancelExternalOutput() {
-            this._cancelMidi();
+            this._cancelMidi('loop');
             this._socketQueue = [];
         }
 
@@ -9981,7 +10129,9 @@
 
         /**
          * A Standard MIDI File (format 0, 480 ticks a beat, 4 beats a cycle) of
-         * the events, read as .midi() reads them live (see midiEventOf).
+         * the events, read as .midi() reads them live (see midiEventOf), except
+         * that named drums with no channel go on General MIDI's percussion
+         * channel (9), as exported files always had them.
          */
         _midiFile(events) {
             const ppq = 480;
@@ -9990,7 +10140,7 @@
             // At one tick: note-offs, then program and control changes, then note-ons.
             const messages = [];
             for (const ev of events) {
-                const { channel, controls, note } = midiEventOf(ev.value, (ev.end - ev.begin) / this.cps);
+                const { channel, controls, note } = midiEventOf(ev.value, (ev.end - ev.begin) / this.cps, { drumChannel: true });
                 const on = toTick(ev.begin);
                 for (const data of controls) messages.push({ tick: on, order: 1, data });
                 if (!note) continue; // control-only: no note
@@ -10031,6 +10181,32 @@
         }
         if (/\.json(\?.*)?$/.test(source)) return source;
         return source.replace(/\/?$/, '/') + 'strudel.json';
+    }
+
+    /**
+     * The banks of a manifest or of banks given in code, with their files
+     * resolved against `root`: [{ name, urls, pitched }]. A bank given as
+     * { note: file } (e.g. { C4: "c4.wav", Ds4: ... }) is pitched: note()
+     * picks the nearest recording and plays it at the right pitch.
+     */
+    function planBanks(map, root) {
+        const full = (f) => resolveUrl(f, root);
+        const plan = [];
+        for (const [name, files] of Object.entries(map)) {
+            if (name.startsWith('_')) continue;
+            const list = (Array.isArray(files) ? files : typeof files === 'string' ? [files] : Object.values(files || {}))
+                .filter((f) => typeof f === 'string');
+            if (list.length === 0) continue;
+            let pitched = null;
+            if (files && typeof files === 'object' && !Array.isArray(files)) {
+                const notes = Object.entries(files)
+                    .map(([key, f]) => ({ midi: noteNameToMidi(key), url: typeof f === 'string' ? full(f) : null }))
+                    .filter((x) => x.midi !== undefined && x.url);
+                if (notes.length) pitched = notes.sort((a, b) => a.midi - b.midi);
+            }
+            plan.push({ name, urls: list.map(full), pitched });
+        }
+        return plan;
     }
 
     /** The page's address, the base of relative sample paths given in code; null outside a page. */

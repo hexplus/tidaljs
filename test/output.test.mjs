@@ -377,9 +377,15 @@ const decode = (bytes) => {
     // Program change and CC come before the note they go with.
     f = decode(t.exportPattern(globalThis.note('c').s('superpiano').pgm(3).ccn(1).ccv(20).midichan(4), 1, 'midi'));
     eq(f.events, [[0, 'pgm', 4, 3], [0, 'cc', 4, 1, 20], [0, 'on', 4, 60, 100], [1920, 'off', 4, 60, 0]]);
-    // Drums by name play their General MIDI note, on midichan (as live).
-    f = decode(t.exportPattern(globalThis.sound('bd sn hh').midichan(9), 1, 'midi'));
+    // Drums by name play their General MIDI note, on midichan when given...
+    f = decode(t.exportPattern(globalThis.sound('bd sn hh').midichan(3), 1, 'midi'));
+    eq(f.events.filter((e) => e[1] === 'on').map((e) => [e[2], e[3]]), [[3, 36], [3, 38], [3, 42]]);
+    // ...and, with no channel, on General MIDI's percussion channel (9), as exports always had them.
+    f = decode(t.exportPattern(globalThis.sound('bd sn hh'), 1, 'midi'));
     eq(f.events.filter((e) => e[1] === 'on').map((e) => [e[2], e[3]]), [[9, 36], [9, 38], [9, 42]]);
+    // A drum name with a note given is a note like any other (channel 0).
+    f = decode(t.exportPattern(globalThis.sound('bd').note(-20), 1, 'midi'));
+    eq(f.events.filter((e) => e[1] === 'on').map((e) => [e[2], e[3]]), [[0, 40]]);
     // A repeated key: the note-off of the first comes before the next note-on at the same tick.
     f = decode(t.exportPattern(globalThis.note('c c').s('superpiano'), 1, 'midi'));
     eq(f.events.map((e) => e[1]), ['on', 'off', 'on', 'off']);
@@ -412,7 +418,10 @@ const once = (t, value) => new TidalJS.PatternBuilder(t, (b, e) => {
         const live = out.heard().map((m) => [Math.round((m.at - 70000) / 1000 * 0.5 * 1920), ...m.data]);
         const file = decode(t.exportPattern(once(t, value), 1, 'midi')).events
             .map(([tick, kind, ch, ...data]) => [tick, ({ on: 0x90, off: 0x80, cc: 0xb0, pgm: 0xc0 })[kind] | ch, ...data]);
-        eq(file, live, `export matches live for ${JSON.stringify(value)}`);
+        // The one difference: a named drum with no channel goes on channel 9 in a file (General MIDI percussion).
+        const expected = value.s === 'sn' && value.midichan === undefined
+            ? live.map(([tick, status, ...data]) => [tick, (status & 0xf0) | 9, ...data]) : live;
+        eq(file, expected, `export matches live for ${JSON.stringify(value)}`);
     }
 }
 
@@ -535,6 +544,62 @@ const released = (dest, output) => !output.connections.has(dest) && dest.stream.
     globalThis.MediaRecorder = recorderClass();
     t.startRecording();
     ok((await t.stopRecording()).size > 0);
+}
+
+// =====================================================================
+// Review follow-up: Stop clears ports that only got controls; one-shots own their MIDI.
+// =====================================================================
+{
+    // A CC scheduled ahead on a port that played no notes is cleared by Stop.
+    setTime(200);
+    const t = makeEngine();
+    const port = new FakeOutput('Controls');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Controls', ccn: 74, ccv: 100 }, 200.05, 0.25);
+    t._sendMidi({ midi: 'Controls', pgm: 3 }, 200.08, 0.25);
+    t._sendMidi({ midi: 'Controls', nrpn: '10:20' }, 200.09, 0.25);
+    t.stopAll();
+    eq(port.heard().filter((m) => (m.data[0] & 0xf0) === 0xb0 && m.data[1] !== 123).length, 0, 'no pending CC or NRPN reaches the device');
+    eq(port.heard().filter((m) => (m.data[0] & 0xf0) === 0xc0).length, 0, 'no pending program change either');
+}
+{
+    // A one-shot's MIDI, evaluated while a loop plays and the loop then stops in the same code, still sounds; Stop cancels it.
+    setTime(300);
+    const t = makeEngine();
+    const port = new FakeOutput('Synth');
+    await withMidi(t, [port]);
+    t.eval('d1(note("c e").midi("Synth"))');
+    t._anchorTime = 300.05;
+    for (let ms = 0; ms <= 100; ms += 25) { setTime(300 + ms / 1000); t._tick(); }
+    t.eval('first(note("g").midi("Synth"))'); // no loop left: the clock stops, the one-shot plays on
+    eq(t.isPlaying, false);
+    ok(port.noteOns().some((n) => n.startsWith('67@')), 'the one-shot note was scheduled');
+    setTime(300.2);
+    ok(port.heard().some((m) => (m.data[0] & 0xf0) === 0x90 && m.data[1] === 67), 'and it was not cleared when the loop stopped');
+    ok(!port.heard().some((m) => m.data[0] === 0xb0 && m.data[1] === 123), 'no all-notes-off while the one-shot sounds');
+    // Stop does end it.
+    t.stopAll();
+    setTime(310);
+    eq(port.hanging(), [], 'nothing left hanging after Stop');
+}
+{
+    // Cancelling the loops on a port shared with a one-shot: clear() takes both, the one-shot's go out again.
+    setTime(400);
+    const t = makeEngine();
+    const port = new FakeOutput('Both');
+    await withMidi(t, [port]);
+    t._session = t._createSession();
+    t._sendMidi({ midi: 'Both', note: 0 }, 400.5, 0.5); // the loops' note, to come
+    const shot = { session: t._createSession(), timer: null };
+    t._midiOwner = shot;
+    t._sendMidi({ midi: 'Both', note: 7, ccn: 1, ccv: 9 }, 400.6, 0.5); // the one-shot's, to come
+    t._midiOwner = null;
+    t._cancelMidi('loop');
+    const heard = port.heard().map((m) => [m.data[0] & 0xf0, m.data[1], +(m.at / 1000).toFixed(3)]);
+    ok(heard.some(([type, key, at]) => type === 0x90 && key === 7 && at === 400.6), 'the one-shot note is sent again after clear()');
+    ok(heard.some(([type, cc, at]) => type === 0xb0 && cc === 1 && at === 400.6), 'and its control too');
+    ok(!heard.some(([type, key]) => type === 0x90 && key === 0), 'the loop note is cancelled');
 }
 
 Date.now = realDateNow;

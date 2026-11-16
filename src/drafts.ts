@@ -31,6 +31,8 @@ export interface DraftState {
   title: string;
   cps: number;
   sketchId: string | null;
+  /** The document it belongs to (see document.ts); state for another document is not used. */
+  documentId: string | null;
 }
 
 /** A draft state read back from storage; null when there is none or it is unreadable. */
@@ -45,6 +47,7 @@ export function readDraftState(text: string | null): DraftState | null {
       title: typeof v.title === "string" ? v.title : b.title,
       cps: typeof v.cps === "number" && Number.isFinite(v.cps) && v.cps > 0 ? v.cps : b.cps,
       sketchId: typeof v.sketchId === "string" ? v.sketchId : null,
+      documentId: typeof v.documentId === "string" ? v.documentId : null,
     };
   } catch {
     return null;

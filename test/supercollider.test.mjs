@@ -944,15 +944,19 @@ passed++;
   ok(events.every((e) => e.legato === undefined || e.legato > 0), 'no voice has a legato of 0');
 }
 
-/** The golden fixtures: a SuperCollider file and the events it plays, compared one by one. */
-for (const name of ['voices', 'alternating']) {
+/**
+ * The golden fixtures: a SuperCollider file and the events it plays, compared one by one (within `windows`, in
+ * seconds, when given: else from 0 to `seconds`).
+ */
+for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset']) {
   const dir = new URL('./fixtures/supercollider/', import.meta.url);
   const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
   const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
   const { events } = play(source, golden.seconds);
+  const windows = golden.windows ?? [[0, golden.seconds]];
   const pitch = (e) => e.note ?? e.freq ?? 0;
   const want = golden.events.slice().sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
-  const got = events.slice().sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
+  const got = events.filter((e) => windows.some(([from, to]) => e.time >= from - 1e-9 && e.time < to - 1e-9)).sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
   eq(got.length, want.length, name + ': the number of events (voices included)');
   want.forEach((w, i) => {
     const g = got[i];
@@ -963,6 +967,71 @@ for (const name of ['voices', 'alternating']) {
     }
   });
   if (name === 'voices') near(got[1].amp / got[0].amp, 0.5, 'the second voice keeps its own level');
+}
+
+// ---------------------------------------------------------------- lifetimes and lengths
+
+// A routine that ends starts an endless Pbind: the Pbind plays on (the routine's end, or the 512 beats the
+// importer follows, is not where it ends). Event k plays degree [0, 2, 4][k % 3] at beat k / 4.
+{
+  const { js, events } = play('Routine({ Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 0.25).play; 2.wait; }).play;', 514);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'the Pbind a finished routine started is not written as ending:\n' + js);
+  const late = events.filter((e) => e.time >= 510);
+  eq(late.map((e) => [e.time, e.note]), Array.from({ length: 16 }, (_, i) => [510 + i / 4, [60, 64, 67][(2040 + i) % 3]]));
+  late.forEach((e) => near(e.legato * e.length, 0.2, 'each note lasts dur * legato'));
+}
+// A pattern a finished routine started, cut by the most events the importer follows (6000, 300 beats here): it
+// plays on too.
+{
+  const { js, events } = play('Routine({ Pbind(\\degree, Pseq([0, 1, 2], inf), \\dur, 0.05).play; 1.wait; }).play;', 401);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'an event cap is not an end');
+  // Event k at beat k / 20: the 8000th at beat 400.
+  eq(events.filter((e) => e.time >= 400 - 1e-9).map((e) => e.note), Array.from({ length: 20 }, (_, i) => [60, 62, 64][(8000 + i) % 3]));
+}
+// A routine stops the pattern it started: it ends there (events at beats 0 to 1.75 only), and so does the piece.
+{
+  const { js, events } = play('Routine({ var p = Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 0.25).play; 2.wait; p.stop; }).play;', 2);
+  ok(/plays once \(2 beats\)/.test(js), 'the piece ends where the pattern is stopped');
+  eq(events.map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, k) => [k / 4, [60, 64, 67][k % 3]]));
+}
+// A routine stops a pattern the file started, at beat 3: it plays until then (not at all, before).
+{
+  const { js, events } = play('x = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5).play;\nRoutine({ 3.wait; x.stop; }).play;', 3);
+  ok(/plays once \(3 beats\)/.test(js), 'it ends at beat 3');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64], [1, 60], [1.5, 64], [2, 60], [2.5, 64]]);
+}
+// A Ppar whose finite pattern ends while the other plays on: it ends after its own four events.
+{
+  const { events } = play('Ppar([Pbind(\\degree, Pseq([0, 1, 2, 3]), \\dur, 1), Pbind(\\degree, 7, \\dur, 0.5)]).play;', 8);
+  eq(events.filter((e) => e.note !== 72).map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65]]);
+  eq(events.filter((e) => e.note === 72).length, 16);
+}
+// A routine that loops forever, starting the same pattern every 4 beats: each playback ends, the piece does not.
+{
+  const { js, events } = play('p = Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5);\nRoutine({ loop { p.play; 4.wait } }).play;', 520);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'it plays on');
+  eq(events.filter((e) => e.time >= 512).map((e) => [e.time, e.note]), [[512, 60], [512.5, 62], [516, 60], [516.5, 62]]);
+}
+// ... and starting a new pattern every 4 beats: those after the 512 beats followed are not written, and it says so.
+{
+  const { code: js } = convertSuperCollider('Routine({ loop { Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5).play; 4.wait } }).play;', 'test.scd');
+  ok(!/this plays once|timeLoop/.test(js), 'the piece is not written as ending at the horizon');
+  ok(/the routine loops forever; the patterns it starts are followed for its first 512 beats/.test(js), 'the note says how far it was followed');
+}
+// A timingOffset keeps each note's own length (dur * legato), whatever the width of its step.
+{
+  const { events } = play('Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1, \\timingOffset, Pseq([0.5, 0], inf)).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0.5, 60], [1, 67], [2.5, 60], [3, 67]]);
+  events.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+}
+// So does a step that the next onset (moved early) cuts short, and one that the end of the loop cuts short (Ptpar).
+{
+  const { events } = play('Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1, \\timingOffset, Pseq([0, -0.5], inf)).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 67], [2, 60], [2.5, 67]]);
+  events.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+  const ptpar = play('Ptpar([0, Pbind(\\note, 0, \\dur, 1), 0.5, Pbind(\\note, 7, \\dur, 1)]).play;', 2).events;
+  eq(ptpar.map((e) => [e.time, e.note]), [[0, 60], [0.5, 67], [1, 60], [1.5, 67]]);
+  ptpar.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
 }
 
 // ---------------------------------------------------------------- safe code, tempo

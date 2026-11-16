@@ -44,6 +44,52 @@ test("a shared song opens for review during a performance and runs only after an
   await expect.poll(() => ranShared(page)).toBe(2);
 });
 
+test("a reload right after switching away from unreviewed external code never restores it as local", async ({ page }) => {
+  await page.goto("/");
+  const hash = await encodeShareHash({ title: "Shared song", code: SHARED, cps: 0.5 });
+  // Reloaded at once after opening it: still external.
+  await page.evaluate((h) => { location.hash = h; }, hash);
+  await page.getByRole("button", { name: "Open in editor" }).click();
+  await expect(page.locator("#codeEditor")).toHaveValue(SHARED);
+  await page.reload();
+  await expect(page.locator("#codeEditor")).toHaveValue(SHARED);
+  await page.click("#playBtn");
+  await expect(page.getByRole("dialog")).toContainText("Run code someone else wrote?");
+  await page.getByRole("button", { name: "Don't run" }).click();
+  // Switched to a built-in example and reloaded at once: the example comes back, local, and the shared code never ran.
+  await page.locator("#exampleList .example").first().click();
+  const example = await page.locator("#codeEditor").inputValue();
+  expect(example).not.toBe(SHARED);
+  await page.reload();
+  await expect(page.locator("#codeEditor")).toHaveValue(example);
+  await page.click("#playBtn");
+  await expect.poll(async () => (await engine(page))?.playing).toBe(true);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await ranShared(page)).toBeUndefined();
+});
+
+test("a shared song's tempo applies only when it runs, and an empty draft survives a reload", async ({ page }) => {
+  await page.goto("/");
+  await setCode(page, 'd1(sound("bd*2"))');
+  await playAndWait(page);
+  const cps = () => page.evaluate(() => (window as unknown as { tidal: { cps: number } }).tidal.cps);
+  const before = await cps();
+  const hash = await encodeShareHash({ title: "Fast song", code: SHARED, cps: 1.75 });
+  await page.evaluate((h) => { location.hash = h; }, hash);
+  await page.getByRole("button", { name: "Open in editor" }).click();
+  await page.getByRole("button", { name: "Replace it" }).click();
+  await page.waitForTimeout(300);
+  expect(await cps()).toBe(before); // the music playing keeps its tempo
+  await page.click("#playBtn");
+  await page.getByRole("button", { name: "Allow and run" }).click();
+  await expect.poll(cps).toBe(1.75);
+
+  await setCode(page, "");
+  await page.waitForTimeout(400);
+  await page.reload();
+  await expect(page.locator("#codeEditor")).toHaveValue("");
+});
+
 test("an approval goes stale when the code changes while the audio starts", async ({ page }) => {
   await holdAudioStart(page);
   await page.goto("/");
@@ -68,9 +114,9 @@ test("a SuperCollider file is converted in a worker and opens for review", async
   await page.getByRole("button", { name: "Import .scd (alpha)" }).click();
   const scd = 'Pbind(\\instrument, \\default, \\degree, Pseq([0, 2, 4], inf), \\dur, 0.25).play;';
   await (await chooser).setFiles({ name: "melody.scd", mimeType: "text/plain", buffer: Buffer.from(scd) });
-  const discard = page.getByRole("button", { name: "Discard and open" });
-  if (await discard.isVisible().catch(() => false)) await discard.click();
+  // The editor holds the untouched starting code: it is replaced without a question.
   await expect(page.locator("#codeEditor")).toHaveValue(/Converted from SuperCollider/i);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(await statusText(page)).toContain("has not run");
   expect(await engine(page)).toBeNull(); // nothing started the audio, let alone ran the code
   // Played only after the review question.
@@ -87,9 +133,8 @@ test("an imported file opens for review and does not run during a performance", 
   const chooser = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "Import", exact: true }).click();
   await (await chooser).setFiles({ name: "groove.js", mimeType: "text/javascript", buffer: Buffer.from(SHARED) });
-  // The editor held changes since it was opened: replacing them asks first.
-  const discard = page.getByRole("button", { name: "Discard and open" });
-  if (await discard.isVisible().catch(() => false)) await discard.click();
+  // The typed code is unsaved: replacing it always asks first (after the file is read, so wait for the question).
+  await page.getByRole("button", { name: "Discard and open" }).click();
   await expect(page.locator("#codeEditor")).toHaveValue(SHARED);
   await page.waitForTimeout(1500);
   expect(await ranShared(page)).toBeUndefined();

@@ -293,5 +293,79 @@ const reset = () => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review follow-up
+{
+    // 2. A rejected edit cannot replace a bank the performance uses, nor its streams or tempo.
+    reset();
+    await samples({ bd: ['https://cdn.test/old.wav'] });
+    t.eval('setCPS(0.5)\nd1(sound("bd*2"))');
+    const playing = t.channels.get('d1');
+    let r = t.eval('samples({ bd: ["https://cdn.test/new.wav"] })\nsetCPS(2)\nd1(sound("bd*4"))\nthrow new Error("no")');
+    await Promise.resolve(); await Promise.resolve();
+    eq(r.success, false);
+    eq([t.sampleBanks.get('bd'), t.cps, t.channels.get('d1') === playing], [['https://cdn.test/old.wav'], 0.5, true]);
+    // Held back by a warning (in a live update), the same: and a stream used twice is a warning.
+    r = t.eval('samples({ bd: ["https://cdn.test/new.wav"] })\nsetCPS(2)\nd1(sound("bd*4"))\nd1(sound("bd*8"))', { keepOnWarnings: true, keepUnchanged: true });
+    await Promise.resolve(); await Promise.resolve();
+    eq(r.pending, true);
+    ok(r.warnings.some((w) => /used twice/.test(w)));
+    eq([t.sampleBanks.get('bd'), t.cps, t.channels.get('d1') === playing], [['https://cdn.test/old.wav'], 0.5, true]);
+    // Committed: the new bank is used (without an "unknown sound" warning for a bank the same code adds).
+    r = t.eval('samples({ kit: ["https://cdn.test/k.wav"] })\nd1(sound("kit"))', { keepOnWarnings: true });
+    eq([r.success, r.warnings], [true, []]);
+    await t.whenSamplesLoaded();
+    eq(t.sampleBanks.get('kit'), ['https://cdn.test/k.wav']);
+}
+{
+    // 3. Across ticks: a hit nudged to 0.550 s waits for its tick, so a hit at 0.175 s from a later tick goes first.
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a").nudge(0.5))\nd2(sound("b").late(0.125))');
+    const played = run(0, 600);
+    eq(played.map((e) => e.s + '@' + e.time).slice(0, 2), ['b@0.175', 'a@0.55']);
+    for (let i = 1; i < played.length; i++) ok(played[i].time >= played[i - 1].time, 'sent in the order they sound');
+    // Stop drops what was held back.
+    t.eval('d1(sound("a").nudge(0.9))');
+    run(625, 1000); // cycle 1 enters the window; its hit (at 1.95 s) waits
+    eq(t._nudged.length > 0, true);
+    t.stopAll();
+    eq(t._nudged.length, 0);
+
+    // A note's length is fixed at its onset, at the tempo then: a tempo change met in a later tick
+    // (or in the same one) does not change it.
+    for (const lookahead of [0.1, 1.5]) {
+        reset();
+        t.lookahead = lookahead;
+        t.eval('d1(sound("long"))\nd2(sound("~ x").cps(2))');
+        const notes = run(0, 1200).filter((e) => e.s === 'long');
+        eq(notes[0].duration, 1, 'one cycle at 1 cps, whatever the lookahead');
+    }
+    t.lookahead = 0.1;
+}
+{
+    // 4. Unicode names: a changed declaration changes the stream that uses it.
+    reset();
+    const live = { keepOnWarnings: true, keepUnchanged: true };
+    t.eval('const café = 0.2\nd1(sound("bd").gain(café))');
+    t.eval('const café = 0.7\nd1(sound("bd").gain(café))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.7);
+    t.eval('const ñandú = 1, 𝑥 = 0.3\nd1(sound("bd").gain(𝑥))');
+    t.eval('const ñandú = 1, 𝑥 = 0.4\nd1(sound("bd").gain(𝑥))', live);
+    eq(t.channels.get('d1').query(0, 1)[0].value.gain, 0.4);
+    // When the reading cannot be certain (eval, globalThis...), streams are rebuilt, never kept.
+    t.eval('globalThis.level = 0.5\nd1(sound("bd"))');
+    const before = t.channels.get('d1');
+    t.eval('globalThis.level = 0.5\nd1(sound("bd"))', live);
+    ok(t.channels.get('d1') !== before, 'rebuilt when unsure');
+
+    // Division after a multiline function expression stays one statement (as Node reads it).
+    eq(TidalJS.splitStatements('const x = function() {}\n/2/1;'), ['const x = function() {}\n/2/1']);
+    eq(TidalJS.splitStatements('const C = class {}\n/2/1\nd1(sound("bd"))'), ['const C = class {}\n/2/1', 'd1(sound("bd"))']);
+    eq(t.eval('const x = function() {}\n/2/1;\nd1(sound("bd"))').success, true);
+    // And a function declaration is still followed by a regular expression.
+    eq(TidalJS.splitStatements('function f() {}\n/re/.test("x")'), ['function f() {}', '/re/.test("x")']);
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

@@ -36,6 +36,8 @@ export interface PlayRecord {
   start: number;
   /** A routine that loops forever (it ran until the horizon). */
   endless?: boolean;
+  /** Where a routine stops it (.stop), in beats of its clock. */
+  until?: number;
   /** midikeys: the MIDI channel its notes come from (null: any). */
   channel?: number | null;
   /** midikeys: how far the pitch-bend wheel bends the held notes, in semitones (0: not at all). */
@@ -979,7 +981,18 @@ export class Interpreter implements Host {
         return p;
       }
       case "stop": {
-        const i = this.played.findIndex((r) => r.pattern === p || (r.pattern instanceof PdefRef && p instanceof PdefRef && r.pattern.key === p.key));
+        const same = (q: Value | undefined) => q === p || (q instanceof PdefRef && p instanceof PdefRef && q.key === p.key);
+        if (this.routine) {
+          // Stopped by a routine, at its time: the last playback of it that the routine started, else the one the
+          // file started. It ends there (a pattern a routine starts plays on when the routine ends, until stopped).
+          const now = this.routine.time;
+          const started = [...this.routine.events].reverse().find((e) => same(e.event.get("__pattern")) && !e.event.has("__stopAfter"));
+          if (started) { started.event.set("__stopAfter", Math.max(0, now - started.time)); return p; }
+          const rec = [...this.played].reverse().find((r) => r.kind === "pattern" && same(r.pattern));
+          if (rec) rec.until = Math.min(rec.until ?? Infinity, Math.max(rec.start, now));
+          return p;
+        }
+        const i = this.played.findIndex((r) => same(r.pattern));
         if (i >= 0) this.played.splice(i, 1);
         return p;
       }
