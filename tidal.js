@@ -1644,6 +1644,23 @@
                 return `${name}${this.entries[name].note ? '~' : ''}=${values.map((x) => (x === undefined ? '' : +x.toFixed(6))).join(',')}`;
             }).join(';');
         }
+        /**
+         * The curves over a note's nominal span (cycles `begin` to `end`, at
+         * `cps`), sampled as densely as a voice lays them out (see
+         * samplePoints): two curves that agree here sound the same.
+         */
+        trace(begin, end, cps) {
+            const span = Math.max(0, end - begin);
+            const count = clamp(Math.ceil(span / Math.max(cps, 1e-6) / 0.015), 1, 400);
+            return this.names().sort().map((name) => {
+                const values = [];
+                for (let i = 0; i <= count; i++) {
+                    const x = this.valueAt(name, begin + (span * i) / count, begin);
+                    values.push(x === undefined ? '' : +x.toFixed(6));
+                }
+                return `${name}${this.entries[name].note ? '~' : ''}=${values.join(',')}`;
+            }).join(';');
+        }
         toJSON() { return undefined; }
     }
 
@@ -1693,14 +1710,17 @@
         if (n) history.splice(0, n);
     };
     /**
-     * What a hit plays, to tell whether a replacement's onset was already sent: its controls but its nudge
-     * (where it sounds) and its tempo change (which goes with the hit), in a fixed order, with the curves of
-     * .follow()/.followNote() sampled (two notes that start alike but move differently are different hits).
-     * Any value withValue() gives is read safely (BigInt, symbols, functions, shared or circular objects,
-     * throwing getters): it never throws.
+     * What a hit plays, to tell whether a replacement's onset was already sent: its nominal span (cycles)
+     * and its controls but its nudge (where it sounds) and its tempo change (which goes with the hit), in a
+     * fixed order, with the curves of .follow()/.followNote() as the voice would render them over that span
+     * (see Follows.trace: curves that agree on a coarser grid but sound different are different hits). Read
+     * when the hit is sent, so an object changed in place later does not change what was sent. Any value
+     * withValue() gives is read safely (BigInt, symbols, functions, shared or circular objects, throwing
+     * getters, very large objects): it never throws.
      */
-    function hitFingerprint(v, onset) {
+    function hitFingerprint(v, ev, cps) {
         const seen = new Set();
+        let budget = 4000; // values read at most: past that, a large object is told apart only so far
         const field = (x, k, depth) => {
             try { return walk(x[k], depth); } catch (e) { return '?'; }
         };
@@ -1715,8 +1735,9 @@
                 case 'function': return 'function ' + (x.name || '');
                 default: break;
             }
-            if (x instanceof Follows) return 'follow(' + x.key(onset) + ')';
+            if (x instanceof Follows) return 'follow(' + x.trace(ev.begin, ev.end, cps) + ')';
             if (seen.has(x)) return '[circular]';
+            if (--budget < 0) return '[large]';
             if (depth > 8) return '[deep]';
             seen.add(x);
             const list = Array.isArray(x);
@@ -1725,10 +1746,11 @@
             seen.delete(x);
             return (list ? '[' : '{') + out + (list ? ']' : '}');
         };
+        const span = 'span:' + +(ev.end - ev.begin).toFixed(9);
         try {
-            return Object.keys(v).filter((k) => k !== 'nudge' && k !== 'cps').sort().map((k) => k + ':' + field(v, k, 1)).join(',');
+            return span + ',' + Object.keys(v).filter((k) => k !== 'nudge' && k !== 'cps').sort().map((k) => k + ':' + field(v, k, 1)).join(',');
         } catch (e) {
-            return '?';
+            return span + ',?';
         }
     }
     const nudgeOf = (v) => (isNum(v.nudge) ? v.nudge : 0);
@@ -6021,7 +6043,7 @@
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
             this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
-            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: [{ v, nudge }] }): sent lately (see _handoff)
+            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: [{ fp, nudge }] }): sent lately (see _handoff)
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
             this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
@@ -7394,19 +7416,16 @@
                 if (!sent.has(at)) continue;
                 ats.add(at);
                 const v = asObject(events[i].value);
-                group(at, hitFingerprint(v, events[i].begin)).fresh.push({ i, nudge: nudgeOf(v) });
+                group(at, hitFingerprint(v, events[i], this._cpsAt(events[i].begin))).fresh.push({ i, nudge: nudgeOf(v) });
             }
             if (!ats.size) return null;
             for (const at of ats) {
                 const record = sent.get(at);
-                for (const h of record.hits) {
-                    if (h.fp === undefined) h.fp = hitFingerprint(h.v, record.cycle);
-                    group(at, h.fp).old.push({ nudge: h.nudge, sent: true });
-                }
+                for (const h of record.hits) group(at, h.fp).old.push({ nudge: h.nudge, sent: true });
             }
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
-                group(it.at, hitFingerprint(it.v, it.ev.begin)).old.push({ nudge: nudgeOf(it.v), sent: false });
+                group(it.at, hitFingerprint(it.v, it.ev, this._cpsAt(it.ev.begin))).old.push({ nudge: nudgeOf(it.v), sent: false });
             }
             const already = new Set();
             for (const g of groups.values()) {
@@ -7490,7 +7509,8 @@
                 if (!onsets) this._sentOnsets.set(it.id, (onsets = new Map()));
                 let sentAt = onsets.get(it.at);
                 if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, hits: [] }));
-                sentAt.hits.push({ v: it.v, nudge: nudgeOf(it.v) });
+                // What it plays as it goes out (a value object changed in place later does not change it).
+                sentAt.hits.push({ fp: hitFingerprint(it.v, it.ev, this._cpsAt(it.ev.begin)), nudge: nudgeOf(it.v) });
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
                 } catch (error) {

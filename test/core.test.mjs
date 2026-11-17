@@ -1140,5 +1140,74 @@ const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).ma
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 12
+/** Plays the scheduler from `fromMs` to `toMs`, recording `label(v, time, duration)` for each event. */
+const runWith = (fromMs, toMs, label) => {
+    const out = [];
+    const saved = t.playEvent;
+    t.playEvent = (v, time, duration) => { out.push(label(v, +time.toFixed(6), +duration.toFixed(6))); };
+    for (let ms = fromMs; ms <= toMs; ms += 25) {
+        t.audioContext.currentTime = ms / 1000;
+        t._tick();
+    }
+    t.playEvent = saved;
+    return out;
+};
+{
+    // 1. What a hit played is read when it is sent: a value object shared by every event (withValue) whose gain
+    // (the very object each event plays) goes from 0.2 to 0.8 in place before a live nudge edit behaves as one
+    // replaced by a new object with 0.8.
+    // Either way the hits at 0.8 are new ones: cycle 0.5 (sent at 0.65 s with 0.2) plays again at 0.85 s.
+    const live = { keepUnchanged: true };
+    const outcomes = {};
+    for (const how of ['mutated', 'replaced']) {
+        reset();
+        t.lookahead = 0.1;
+        t.eval('const m = (globalThis.round12 = { gain: 0.2, meta: { big: 1n } })\nm.meta.self = m\nd1(sound("a*4").nudge(0.1).withValue((v) => Object.assign(m, v)))');
+        let played = runWith(0, 600, (v, time) => v.gain + '@' + time);
+        const edit = how === 'mutated' ? 'const m = globalThis.round12\nm.gain = 0.8' : 'const m = { gain: 0.8, meta: { big: 1n } }\nm.meta.self = m';
+        eq(t.eval(edit + '\nd1(sound("a*4").nudge(0.3).withValue((v) => Object.assign(m, v)))', live).success, true);
+        played = played.concat(runWith(625, 1600, (v, time) => v.gain + '@' + time));
+        outcomes[how] = played;
+    }
+    eq(outcomes.mutated, ['0.2@0.15', '0.2@0.4', '0.2@0.65', '0.8@0.85', '0.8@1.1', '0.8@1.35', '0.8@1.6']);
+    eq(outcomes.replaced, outcomes.mutated, 'mutated in place or replaced: the same');
+    delete globalThis.round12;
+    t.stopAll();
+}
+{
+    // 2. Simultaneous notes with the same controls but different lengths are different hits: a one-cycle note was
+    // sent, a half-cycle one held back (nudge 0.5). After an edit whose nudges cross (0.8 and 0.6), the half note
+    // plays at 0.65 s for 0.5 s and the whole note is not sent again.
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(stack(sound("a ~").nudge(0.5), sound("a")).playFor(0, 1))');
+    let played = runWith(0, 300, (v, time, duration) => time + ':' + duration);
+    eq(played, ['0.05:1'], 'the whole note sent, the half note held');
+    t.eval('d1(stack(sound("a ~").nudge(0.6), sound("a").nudge(0.8)).playFor(0, 1))', live);
+    played = played.concat(runWith(325, 1500, (v, time, duration) => time + ':' + duration));
+    eq(played, ['0.05:1', '0.65:0.5']);
+    t.stopAll();
+}
+{
+    // 3. followNote() curves are compared as the voice renders them: sine and sine.fast(9) agree every 1/8 cycle,
+    // but not on the voice's grid. The sine note was sent, the sine.fast(9) one held back (nudge 0.5); after an
+    // edit whose nudges cross (0.8 and 0.6), only sine.fast(9) plays, at 0.65 s (lpf 2000 a 36th of a cycle in,
+    // where the sine is at 1256.3).
+    const live = { keepUnchanged: true };
+    const curves = (slow, fast) => `d1(stack(sound("a").followNote("lpf", sine.fast(9).range(200, 2000)).nudge(${fast}), sound("a").followNote("lpf", sine.range(200, 2000)).nudge(${slow})).playFor(0, 1))`;
+    const label = (v, time) => +v.follow.valueAt('lpf', 1 / 36, 0).toFixed(1) + '@' + time;
+    reset();
+    t.lookahead = 0.1;
+    t.eval(curves(0, 0.5));
+    let played = runWith(0, 300, label);
+    eq(played, ['1256.3@0.05'], 'the sine sent, sine.fast(9) held');
+    t.eval(curves(0.8, 0.6), live);
+    played = played.concat(runWith(325, 1500, label));
+    eq(played, ['1256.3@0.05', '2000@0.65'], 'sine.fast(9) at its new time; the sine not again');
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
