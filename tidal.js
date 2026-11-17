@@ -1645,14 +1645,6 @@
         }
         /** The controls followed, and whether each is relative to the note (followNote). */
         shape() { return this.names().sort().map((name) => name + (this.entries[name].note ? '~' : '')).join(','); }
-        /** Values sampled over two cycles from `from`, so live updates can tell two sets apart. */
-        key(from) {
-            return this.names().sort().map((name) => {
-                const values = [];
-                for (let i = 0; i < 16; i++) values.push(this.valueAt(name, from + i / 8, from));
-                return `${name}${this.entries[name].note ? '~' : ''}=${values.map((x) => (x === undefined ? '' : +x.toFixed(6))).join(',')}`;
-            }).join(';');
-        }
         /**
          * The curves over a note's nominal span (cycles `begin` to `end`, at
          * `cps`), sampled as densely as a voice lays them out (see
@@ -6091,7 +6083,7 @@
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
             this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
-            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: [{ fp, nudge }] }): sent lately (see _handoff)
+            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: [{ fp, nudge, follow, reads, ev }] }): sent lately (see _handoff)
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
             this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
@@ -7471,7 +7463,7 @@
             if (!ats.size) return null;
             for (const at of ats) {
                 const record = sent.get(at);
-                for (const h of record.hits) group(at, h.fp).old.push({ ...h, ev: record.ev, sent: true });
+                for (const h of record.hits) group(at, h.fp).old.push({ ...h, sent: true });
             }
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
@@ -7513,16 +7505,24 @@
         _sameCurves(old, fresh) {
             if (!old.follow && !fresh.follow) return true;
             if (!old.follow || !fresh.follow) return false;
-            if (old.reads && old.reads.length) {
-                return old.reads.every(([name, t, onset, x]) => {
-                    const y = fresh.follow.valueAt(name, t, onset);
-                    return x === y || (isNum(x) && isNum(y) && Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x)));
-                });
+            // A signal that fails where it is read proves nothing: the comparison is inconclusive (not the same),
+            // so the new event plays; the tick goes on.
+            try {
+                if (old.reads && old.reads.length) {
+                    return old.reads.every(([name, t, onset, x]) => {
+                        const y = fresh.follow.valueAt(name, t, onset);
+                        return x === y || (isNum(x) && isNum(y) && Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x)));
+                    });
+                }
+                // Each over its own nominal span (simultaneous notes may differ in length).
+                const cps = this._cpsAt(fresh.ev.begin);
+                if (old.trace === undefined) old.trace = old.follow.trace(old.ev.begin, old.ev.end, cps);
+                if (fresh.trace === undefined) fresh.trace = fresh.follow.trace(fresh.ev.begin, fresh.ev.end, cps);
+                return old.trace === fresh.trace;
+            } catch (error) {
+                console.error('TidalJS: could not compare followed curves:', error);
+                return false;
             }
-            const cps = this._cpsAt(fresh.ev.begin);
-            if (old.trace === undefined) old.trace = old.follow.trace(old.ev.begin, old.ev.end, cps);
-            if (fresh.trace === undefined) fresh.trace = fresh.follow.trace(fresh.ev.begin, fresh.ev.end, cps);
-            return old.trace === fresh.trace;
         }
 
         /**
@@ -7585,11 +7585,11 @@
                 let onsets = this._sentOnsets.get(it.id);
                 if (!onsets) this._sentOnsets.set(it.id, (onsets = new Map()));
                 let sentAt = onsets.get(it.at);
-                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, ev: it.ev, hits: [] }));
+                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, hits: [] }));
                 // What it plays as it goes out (a value object changed in place later does not change it), and
                 // of its followed curves what its voice reads from them while it is laid out (nothing more).
                 const follow = followOf(it.v);
-                const hit = { fp: hitFingerprint(it.v, it.ev), nudge: nudgeOf(it.v), follow, reads: null };
+                const hit = { fp: hitFingerprint(it.v, it.ev), nudge: nudgeOf(it.v), follow, reads: null, ev: it.ev }; // (its own span)
                 sentAt.hits.push(hit);
                 const reads = follow ? [] : null;
                 FOLLOW_READS.list = reads;

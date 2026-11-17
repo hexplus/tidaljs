@@ -1338,5 +1338,77 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 14
+{
+    // 1. Each sent hit keeps its own nominal span for the fallback curve comparison: two followed MIDI notes at the
+    // same onset, a whole cycle (c4) and half a cycle (e4), both sent at once (no voice lays out their curves).
+    // After an edit that only nudges both past what was sent (0.5), neither is sent again, in either layer order.
+    const live = { keepUnchanged: true };
+    const sent = [];
+    const savedAccess = t.midiAccess;
+    // A fresh output for each order, so note-offs still pending from the other one do not count.
+    const output = (id) => ({ outputs: new Map([[id, { id, name: 'round14', send(message) { if ((message[0] & 0xf0) === 0x90 && message[2] > 0) sent.push(message[1]); } }]]) });
+    const whole = (nudge) => `note("c4").midi("round14").followNote("lpf", saw.range(200, 2000)).nudge(${nudge})`;
+    const half = (nudge) => `note("e4 ~").midi("round14").followNote("lpf", sine.range(200, 2000)).nudge(${nudge})`;
+    for (const order of [[whole, half], [half, whole]]) {
+        const code = (nudge) => `d1(stack(${order[0](nudge)}, ${order[1](nudge)}).playFor(0, 1))`;
+        reset();
+        t.lookahead = 0.1;
+        sent.length = 0;
+        t.midiAccess = output(order[0] === whole ? 'w' : 'h');
+        const real = TidalJS.prototype.playEvent;
+        t.playEvent = real;
+        eq(t.eval(code(0)).success, true);
+        for (let ms = 0; ms <= 300; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        eq(sent.slice().sort(), [60, 64], 'both sent');
+        eq([...t._sentOnsets.get('d1').values()][0].hits.map((h) => h.ev.end - h.ev.begin).sort(), [0.5, 1], 'each with its own span');
+        eq(t.eval(code(0.5), live).success, true);
+        for (let ms = 325; ms <= 1500; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        eq(sent.slice().sort(), [60, 64], (order[0] === whole ? 'whole first' : 'half first') + ': neither sent again');
+    }
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+{
+    // 2. A followed signal that fails away from its onset (past 1/8 of the note) cannot stop a tick at a handoff,
+    // whether the sent hit's curve is compared at what its voice read or over its span: the comparison is
+    // inconclusive (the hit plays again), and the stream beside it plays every hit on time.
+    const live = { keepUnchanged: true };
+    const failing = 'sine.withValue((x) => { if (x > 0.75) throw new Error("bad curve"); return x })';
+    const errors = [];
+    const savedError = console.error;
+    console.error = (...args) => errors.push(String(args[1] && args[1].message));
+    // Over the span: hits only recorded (no voice), the curve that fails is the old and the new one's.
+    reset();
+    t.lookahead = 0.1;
+    const spanCode = (nudge) => `d1(sound("a*4").followNote("lpf", ${failing}.range(200, 2000)).nudge(${nudge}))\nd2(sound("b*4"))`;
+    eq(t.eval(spanCode(0.1)).success, true);
+    let played = run(0, 600);
+    eq(t.eval(spanCode(0.3), live).success, true);
+    played = played.concat(run(625, 1600));
+    eq(hitsOf(played, 'b', 1.6), [0.05, 0.3, 0.55, 0.8, 1.05, 1.3, 1.55], 'the other stream: every hit on time');
+    eq(hitsOf(played, 'a', 1.6), [0.15, 0.4, 0.65, 0.85, 1.1, 1.35, 1.6], 'inconclusive: cycle 0.5 plays again');
+    ok(errors.includes('bad curve'), 'reported');
+    // At what the voice read: hits laid out, a sine that was sent, replaced by the curve that fails.
+    const savedCtx = t.audioContext;
+    reset();
+    t.audioContext = layoutAudio();
+    t.lookahead = 0.1;
+    errors.length = 0;
+    const readCode = (curve, nudge) => `d1(sound("saw*4").legato(0.5).followNote("lpf", ${curve}.range(200, 2000)).nudge(${nudge}))\nd2(sound("saw*4").n(1))`;
+    const label = (v, time) => (v.n === 1 ? 'b' : 'a') + '@' + time;
+    eq(t.eval(readCode('sine', 0.1)).success, true);
+    played = runLaidOut(0, 600, label);
+    ok([...t._sentOnsets.get('d1').values()][0].hits[0].reads.length > 0, 'compared at what the voice read');
+    eq(t.eval(readCode(failing, 0.3), live).success, true);
+    played = played.concat(runLaidOut(625, 1600, label));
+    eq(played.filter((x) => x[0] === 'b'), ['b@0.05', 'b@0.3', 'b@0.55', 'b@0.8', 'b@1.05', 'b@1.3', 'b@1.55'], 'the other stream: every hit on time');
+    eq(played.filter((x) => x[0] === 'a'), ['a@0.15', 'a@0.4', 'a@0.65', 'a@0.85', 'a@1.1', 'a@1.35', 'a@1.6'], 'inconclusive: cycle 0.5 plays again');
+    ok(errors.includes('bad curve'), 'reported');
+    console.error = savedError;
+    t.stopAll();
+    t.audioContext = savedCtx;
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
