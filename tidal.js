@@ -1211,12 +1211,18 @@
             if (ctrl._signal) return this._derive(fromThis);
 
             // Decide per cycle which side is denser, so rests or busy bars
-            // later in a pattern are handled like the first one.
+            // later in a pattern are handled like the first one. One exception:
+            // a single control onset in a cycle where this pattern starts nothing
+            // does not lead, or it would strike a note held into the cycle again
+            // (as Tidal's #, the held part has no onset). Without a held note
+            // neither side has anything to play there, so nothing else changes.
             const denser = new Map();
             const controlLeads = (c) => {
                 if (!denser.has(c)) {
                     if (denser.size > 256) denser.clear();
-                    denser.set(c, onsetCount(ctrl, c) > onsetCount(this, c));
+                    const controlOnsets = onsetCount(ctrl, c);
+                    const ownOnsets = onsetCount(this, c);
+                    denser.set(c, controlOnsets > ownOnsets && !(controlOnsets === 1 && ownOnsets === 0));
                 }
                 return denser.get(c);
             };
@@ -4780,7 +4786,6 @@
     function onsetCount(pattern, c = 0) {
         return new Set(pattern.query(c, c + 1).map((ev) => Math.round(ev.begin * 1e6))).size;
     }
-
     function isTruthy(v) {
         return !(v === false || v === 0 || v === '~' || v === '0' || v === 'f' || v === 'false');
     }
