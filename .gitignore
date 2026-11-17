@@ -5,4 +5,4 @@ null/
 AGENTS.md
 test-results/
 playwright-report/
-tool/
+tool/*.mid
