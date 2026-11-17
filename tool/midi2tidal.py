@@ -412,13 +412,18 @@ def _play(song: Song, events: List[RawEvent]) -> None:
             finish(key, pitch, start, velocity, owner, program, tick)
 
     def all_notes_off(key: Key, tick: int) -> None:
-        """Lets go of every sounding note of the channel, as note-offs would (the pedal still holds them)."""
+        """
+        Lets go of every sounding note of the channel, as note-offs would (the
+        pedal still holds them), and empties its note-on queue, notes silenced
+        by All Sound Off included: every note before this point is accounted
+        for, so a later note-off can only belong to a later note.
+        """
         for (port, channel, pitch), started in list(sounding.items()):
             if (port, channel) == key:
                 for start, velocity, owner, program, silenced in started:
                     if not silenced:
                         release(key, pitch, start, velocity, owner, program, tick)
-                sounding[(port, channel, pitch)] = deque(entry for entry in started if entry[4])
+                started.clear()
 
     def all_sound_off(key: Key, tick: int) -> None:
         """
