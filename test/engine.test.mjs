@@ -102,6 +102,13 @@ eq(q(struct('1 0 1', 'hh')), 'hh@0 hh@0.6667');
 // Musical controls
 eq(q(sound('arpy').note('c e g c5')), 'arpy/60@0 arpy/64@0.25 arpy/67@0.5 arpy/72@0.75');
 eq(q(sound('arpy*4').note('c e')), 'arpy/60@0 arpy/60@0.25 arpy/64@0.5 arpy/64@0.75');
+// A note held into the next cycle is not struck again there by a control with one event a cycle
+// (as Tidal's #: the held part has no onset). Bug before: the control "led" the cycle with no onset.
+eq(q(note('c4').slow(2).sound('superpiano'), 0, 4), 'superpiano/60@0 superpiano/60@2');
+eq(q(note('a4 g5@2 b4').slow(4).sound('superpiano'), 0, 4), 'superpiano/69@0 superpiano/79@1 superpiano/71@3');
+eq(note('a4 g5@2 b4').slow(4).sound('superpiano').query(1, 2)[0].end, 3, 'the held note keeps its length');
+eq(q(note('c4').slow(2).gain('0.5 0.8'), 0, 2), '/60@0 /60@0.5 /60@1 /60@1.5', 'a denser control still sets the rhythm');
+eq(q(note('c4').slow(2).sound('bd*4'), 1, 2), 'bd/60@1 bd/60@1.25 bd/60@1.5 bd/60@1.75', 'in the held cycle too');
 eq(sound('arpy').note('eb3 f#').query(0, 1).map((e) => e.value.note).join(), '51,66');
 eq(sound('arpy').note('0 7').query(0, 1).map((e) => e.value.note).join(), '60,67');
 eq(sound('arpy').note('c e g').up('0 12 7').query(0, 1).map((e) => e.value.note).join(), '60,72,67'); // up = note replaces it, as in Tidal

@@ -1211,12 +1211,14 @@
             if (ctrl._signal) return this._derive(fromThis);
 
             // Decide per cycle which side is denser, so rests or busy bars
-            // later in a pattern are handled like the first one.
+            // later in a pattern are handled like the first one. A note held
+            // into the cycle counts as one of this pattern's events there, so
+            // a control with one event a cycle does not strike it again.
             const denser = new Map();
             const controlLeads = (c) => {
                 if (!denser.has(c)) {
                     if (denser.size > 256) denser.clear();
-                    denser.set(c, onsetCount(ctrl, c) > onsetCount(this, c));
+                    denser.set(c, onsetCount(ctrl, c) > onsetCount(this, c) + (heldInto(this, c) ? 1 : 0));
                 }
                 return denser.get(c);
             };
@@ -4779,6 +4781,11 @@
     /** Number of distinct onsets in cycle c (a chord counts once). */
     function onsetCount(pattern, c = 0) {
         return new Set(pattern.query(c, c + 1).map((ev) => Math.round(ev.begin * 1e6))).size;
+    }
+
+    /** Whether an event of `pattern` that started before cycle c is still sounding as c begins. */
+    function heldInto(pattern, c) {
+        return eventsAt(pattern, c).some((ev) => ev.begin < c - 1e-9);
     }
 
     function isTruthy(v) {
