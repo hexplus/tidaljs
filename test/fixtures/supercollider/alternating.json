@@ -1,0 +1,12 @@
+{
+  "about": "Expected events, worked out by hand from SuperCollider's semantics (sclang was not run): degrees 0, 4, 7 of the major scale are MIDI notes 60, 67, 72; \\low and \\high take turns (low, high, low); each keeps its own filter, envelope and pan, and only \\high goes through the reverb on its bus.",
+  "seconds": 3,
+  "events": [
+    { "time": 0, "note": 60, "lpf": 600, "attack": 0.005, "release": 0.3, "pan": -0.5, "absent": ["hpf", "freeverb"] },
+    { "time": 0.5, "note": 67, "hpf": 2500, "attack": 0.05, "release": 0.8, "pan": 0.5, "freeverb": 0.4, "freeroom": 0.8, "absent": ["lpf"] },
+    { "time": 1, "note": 72, "lpf": 600, "attack": 0.005, "release": 0.3, "pan": -0.5, "absent": ["hpf", "freeverb"] },
+    { "time": 1.5, "note": 60, "lpf": 600, "attack": 0.005, "release": 0.3, "pan": -0.5, "absent": ["hpf", "freeverb"] },
+    { "time": 2, "note": 67, "hpf": 2500, "attack": 0.05, "release": 0.8, "pan": 0.5, "freeverb": 0.4, "freeroom": 0.8, "absent": ["lpf"] },
+    { "time": 2.5, "note": 72, "lpf": 600, "attack": 0.005, "release": 0.3, "pan": -0.5, "absent": ["hpf", "freeverb"] }
+  ]
+}

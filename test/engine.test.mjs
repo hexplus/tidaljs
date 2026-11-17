@@ -456,10 +456,18 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     eq(voices.length === 5 && voices[4].time === 5 && voices[4].window === 1, true);
     eq(t.sampleBanks.has('kick') && !!t._sampleBuffers.get('https://cdn.test/kit/kick/b.wav').buffer, true);
 
-    // A bad source is reported and can be retried
-    globalThis.fetch = async () => ({ ok: false, status: 404 });
+    // A bad source is reported once, not asked for again on every evaluation, and retried on request
+    let asked = 0;
+    globalThis.fetch = async () => { asked++; return { ok: false, status: 404 }; };
     await assert.rejects(() => samples('github:nobody/none'), /HTTP 404/); passed++;
+    await assert.rejects(() => samples('github:nobody/none'), /HTTP 404/); passed++;
+    eq(asked, 1);
+    eq(t.sampleFailures().length, 1);
+    eq(t.retrySamples(), 1);
     eq(t._sampleManifests.has('github:nobody/none|'), false);
+    await assert.rejects(() => samples('github:nobody/none'), /HTTP 404/); passed++;
+    eq(asked, 2);
+    t.retrySamples();
     delete t._sampleVoice;
     t._session = null;
 }
@@ -752,9 +760,10 @@ assert.throws(() => sound('bd').nTake('a', []), /nTake\(\) expects/); passed++;
     }
     eq(sound('bd').vibrato(4).query(0, 1)[0].value.vib, 4);
     eq(sound('bd').glide(0.1).query(0, 1)[0].value.portamento, 0.1);
-    // resetCycles restarts the count at the scheduling frontier
+    // resetCycles restarts the count at what was already sent (events asked for ahead are asked again)
     t.isPlaying = true;
     t._nextCycle = 12.5;
+    t._dispatchCycle = 12.5;
     t._anchorTime = 0;
     t._anchorCycle = 0;
     const at = t.timeAt(12.5);

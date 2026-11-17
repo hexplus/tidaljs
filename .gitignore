@@ -3,3 +3,5 @@ dist/
 *.log
 null/
 AGENTS.md
+test-results/
+playwright-report/

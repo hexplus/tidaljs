@@ -7,7 +7,7 @@ import { Reference } from "./Reference.ts";
 export type Tab = "examples" | "library" | "reference";
 
 /** The examples, filtered, with a heading before each group. */
-function ExampleList(session: Session) {
+function ExampleList(session: Session, library: Library) {
   const [query, setQuery] = signal("");
   const cards = new Map<Example, HTMLElement>();
 
@@ -58,7 +58,7 @@ function ExampleList(session: Session) {
               class: () => "example" + (selected() ? " selected" : "") + (active() ? " playing" : ""),
               type: "button",
               "aria-current": () => (selected() ? "true" : null),
-              on: { click: () => session.loadExample(example) },
+              on: { click: () => void library.loadExample(example) },
             },
             [
               div("example-head", [
@@ -103,7 +103,7 @@ export function Sidebar(session: Session, library: Library, tab: () => Tab, setT
     ]),
     div(
       { class: "tab-panel", id: "panelExamples", role: "tabpanel", "aria-labelledby": "tabExamples", hidden: () => tab() !== "examples" },
-      ExampleList(session),
+      ExampleList(session, library),
     ),
     div(
       { class: "tab-panel", id: "panelLibrary", role: "tabpanel", "aria-labelledby": "tabLibrary", hidden: () => tab() !== "library" },

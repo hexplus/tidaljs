@@ -5,6 +5,8 @@
  * (name: in argument lists and events), operators and punctuation.
  */
 
+import { tick } from "./budget.ts";
+
 export type TokenType =
   | "num" | "str" | "sym" | "char" | "id" | "class" | "env" | "label" | "op" | "punc" | "eof";
 
@@ -37,7 +39,10 @@ export function tokenize(src: string): Token[] {
   let i = 0;
   let line = 1;
   const n = src.length;
-  const push = (type: TokenType, value: string, pos: number, num?: number) => out.push({ type, value, pos, line, num });
+  const push = (type: TokenType, value: string, pos: number, num?: number) => {
+    tick();
+    out.push({ type, value, pos, line, num });
+  };
 
   while (i < n) {
     const c = src[i];

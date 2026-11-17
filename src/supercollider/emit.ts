@@ -6,8 +6,9 @@
  * period; one cycle is the period most parts share.
  */
 import { CONTROL_NAMES } from "../data/signatures.ts";
-import { describeText, degreeToKey, gcd, SCALES, type Interpreter, type PlayRecord } from "./interpreter.ts";
-import { advanceOf, DONE, ownDelta, Stream } from "./patterns.ts";
+import { phase, tick } from "./budget.ts";
+import { describeText, degreeToKey, gcd, SCALES, TooMuchWork, type Interpreter, type Moment, type Playback, type PlayRecord } from "./interpreter.ts";
+import { advanceOf, DONE, ownDelta, PdefRef, Stream } from "./patterns.ts";
 import { analyseSynthDef, envSignalOf, FOLLOWABLE, isEffectControl, lfoSignalOf, mapSignal, soundByName, TIDAL_SOUNDS, type EnvSignal, type Fixed, type LfoSignal, type SynthInfo } from "./synthdef.ts";
 import {
   BufferV, BusV, GNode, MidiOutV, NetAddrV, ProxyV, RandToken, RestV, SCEvent, SCFunc, ScaleV, Sym, SynthDefV, SynthV, isPattern, type Value,
@@ -56,9 +57,12 @@ interface Context {
 
 /** How far the program is played to find its loops, in beats. */
 const HORIZON = 512;
+/** The most events one played pattern or routine gives (dense material stops earlier than the horizon). */
 const MAX_EVENTS = 6000;
 /** What loops when something never repeats, in beats. */
 const FALLBACK = 16;
+/** The most synths a part starts at one instant that are written (each one a voice of its own). */
+const MAX_VOICES = 16;
 
 interface SimEvent {
   t: number;
@@ -79,8 +83,14 @@ interface Part {
   events: SimEvent[];
   /** The rests between the events, for random durations (rhythm() gives each its own step). */
   rests?: SimEvent[];
-  /** The time the stream ended (finite patterns), or null. */
+  /** When it starts, in beats (its first event or rest). */
+  start: number;
+  /** When it ends (a part that stops: a finite pattern, an intro), or null when it plays on. */
   end: number | null;
+  /** How far it was played: its loops are looked for up to here (dense material stops before the horizon). */
+  horizon: number;
+  /** Why it was not played further: the horizon (512 beats), or the most events a pattern may give. */
+  cap: Cap;
   /** One synth that plays until it is stopped. */
   drone: boolean;
 }
@@ -114,31 +124,57 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
   // The tempo: the first explicit clock, or the default clock.
   const played = interp.played;
   const firstClock = played.find((r) => r.clock.explicit)?.clock ?? interp.defaultClock;
-  const tempo = firstClock.tempo;
+  let tempo = firstClock.tempo;
+  if (!(tempo > 0) || !Number.isFinite(tempo)) {
+    note("The clock's tempo (" + String(tempo) + ") is not a positive number: SuperCollider's default, 1 beat per second, is used.");
+    tempo = 1;
+  }
 
-  // Play everything.
+  // Play everything, on one timeline (beats at `tempo`). Each source is a pattern (a Pbind, a routine's instrument)
+  // in one playback (each .play, a routine's included): it keeps when it starts, how far it was played and whether
+  // the stream that played it ended there, so a pattern played, stopped and played again keeps the gap between,
+  // and a routine that ends does not end the patterns it started.
+  phase("playing the patterns");
   const events: SimEvent[] = [];
   const restsBySrc = new Map<string, SimEvent[]>();
-  let finiteEnd: number | null = null;
-  let anyInfinite = false;
-  for (const rec of played) {
-    const scale = tempo / (rec.clock.tempo || 1);
-    const sim = simulate(interp, rec, scale);
-    if (rec.endless) sim.end = null;
+  const reach = new Map<string, Reach>();
+  const simCtx: SimCtx = { interp, tempo, note, streams: new Map(), pdefs: new Map() };
+  // Each record is simulated in turn, but a Pdef's play waits (the generator yields) until every play called before
+  // it on the common timeline, from whichever routine, has been decided: whether a Pdef plays already depends on
+  // the plays and stops before it in time, not in the order of the file.
+  const sims: Sim[] = new Array(played.length);
+  const waiting: { gen: Generator<Turn, Sim, void>; index: number; turn: Turn }[] = [];
+  const step = (gen: Generator<Turn, Sim, void>, index: number) => {
+    const r = gen.next();
+    if (r.done) sims[index] = r.value;
+    else waiting.push({ gen, index, turn: r.value });
+  };
+  for (const [index, rec] of played.entries()) step(simulate(simCtx, rec, index, tempo / clockTempo(rec.clock)), index);
+  while (waiting.length) {
+    let k = 0;
+    for (let i = 1; i < waiting.length; i++) if (before(waiting[i].turn, waiting[k].turn)) k = i;
+    const [next] = waiting.splice(k, 1);
+    step(next.gen, next.index);
+  }
+  // Whether something plays on past where it was followed (a routine that loops forever, even when each pattern
+  // it starts ends): then the piece does not end.
+  let open = false;
+  for (const sim of sims) {
+    if (sim.open) open = true;
+    for (const [src, r] of sim.reach) mergeReach(reach, src, r);
     for (const e of sim.events) {
       if (!e.rest) { events.push(e); continue; }
       const list = restsBySrc.get(e.src) ?? [];
       list.push(e);
       restsBySrc.set(e.src, list);
     }
-    if (sim.end === null) anyInfinite = true;
-    else finiteEnd = Math.max(finiteEnd ?? 0, sim.end);
   }
   if (played.length === 0) {
     note("Nothing in the file plays (no .play, Pdef(...).play, Synth or routine): the patterns it defines are shown.");
   }
 
   // Synths.
+  phase("reading the SynthDefs");
   const synthCache = new Map<string, SynthInfo | null>();
   const synthFor = (name: string): SynthInfo | null => {
     if (!synthCache.has(name)) {
@@ -190,41 +226,73 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     && (list[0].instrument === "default" || synthFor(list[0].instrument)?.endless === true);
 
   const parts: Part[] = [];
-  let finiteParts = 0;
   for (const [src, list] of bySrc) {
     list.sort((a, b) => a.t - b.t);
-    const instruments = new Set(list.map((e) => e.instrument));
-    const instrument = instruments.size === 1 ? list[0].instrument : "";
+    const rests = (restsBySrc.get(src) ?? []).sort((a, b) => a.t - b.t);
     const drone = isDrone(list);
-    if (!drone) finiteParts++;
-    parts.push({ name: src, line: list[0].line, instrument, events: list, rests: restsBySrc.get(src) ?? [], end: anyInfinite ? null : finiteEnd, drone });
+    const played = reach.get(src) ?? { horizon: HORIZON, ended: false, cap: "horizon" };
+    const life = lifetime(list, rests, played);
+    const base = { line: list[0].line, start: drone ? 0 : life.start, end: drone ? null : life.end, horizon: life.horizon, cap: played.cap, drone };
+    const instruments = [...new Set(list.map((e) => e.instrument))];
+    // Events that take turns between SynthDefs: one part per SynthDef, so each event keeps its own SynthDef's
+    // sound, fixed controls, envelopes and effects. The other SynthDefs' events are rests there (for random durations).
+    if (instruments.length > 1 && instruments.every((i) => !i.startsWith("__")) && instruments.some((i) => synthFor(i) !== null)) {
+      note("Line " + base.line + " plays " + instruments.map((i) => "\\" + i).join(", ") + " in turn: each becomes a part of its own, with its own SynthDef's sound and effects.");
+      for (const inst of instruments) {
+        const own = list.filter((e) => e.instrument === inst);
+        const others = list.filter((e) => e.instrument !== inst).map((e) => ({ ...e, rest: true }));
+        parts.push({ ...base, name: src + ":" + inst, instrument: inst, events: own, rests: [...rests, ...others].sort((a, b) => a.t - b.t) });
+      }
+      continue;
+    }
+    parts.push({ ...base, name: src, instrument: instruments.length === 1 ? instruments[0] : "", events: list, rests });
   }
-  if (!anyInfinite && finiteEnd !== null && finiteParts > 0) {
-    note("In SuperCollider this plays once (" + fmt(finiteEnd) + (finiteEnd === 1 ? " beat" : " beats") + "); in TidalJS it loops.");
+  // Everything stops (no endless pattern, routine or synth): SuperCollider plays it once, and the TidalJS code
+  // loops the whole piece, as a preview, every `loopLength` beats.
+  const loopLength = !open && parts.length && parts.every((p) => !p.drone && p.end !== null) ? Math.max(...parts.map((p) => p.end as number)) : null;
+  if (loopLength !== null) {
+    note("In SuperCollider this plays once (" + fmt(loopLength) + (loopLength === 1 ? " beat" : " beats") + "); here the whole piece loops, every "
+      + fmt(loopLength) + (loopLength === 1 ? " beat" : " beats") + ", as a preview.");
   }
   if (parts.some((p) => p.drone)) {
     note("A synth that nothing stops plays until you stop it in SuperCollider; here its note restarts every cycle.");
   }
 
   // Write each part.
-  const written = parts.map((part) => writePart(part, ctx));
-  const valid = written.filter((w): w is WrittenPart => w !== null);
+  phase("finding the loops and writing the parts");
+  const written = parts.map((part) => ({ part, w: writePart(part, ctx) }));
+  const valid = written.filter((x): x is { part: Part; w: WrittenPart } => x.w !== null);
   const keys = played.filter((r) => (r.kind === "midikeys" || r.kind === "oscplay") && r.synth).map((r) => writeMidiKeys(r, ctx));
   if (played.some((r) => r.kind === "midikeys")) note("MIDI keys play through midikeys(): the browser asks for permission to use MIDI input.");
   if (played.some((r) => r.kind === "oscplay")) note("Synths started by OSC messages play through oscplay(): the messages come in over TidalJS's OSC bridge (setOscUrl() sets its address).");
 
   // Beats per cycle: the period most parts share (4, a bar, when it fits).
-  const periods = valid.filter((w) => !w.rhythm).map((w) => w.period);
-  const beatsPerCycle = chooseCycle(periods);
+  const periods = valid.filter(({ w }) => !w.rhythm).map(({ w }) => w.period);
+  let beatsPerCycle = chooseCycle(periods);
+  // TidalJS plays 0.05 to 10 cycles per second: outside that, a cycle of more (or fewer) beats keeps the tempo exact.
+  const chosen = beatsPerCycle;
+  while (tempo / beatsPerCycle > MAX_CPS && beatsPerCycle < 2 ** 20) beatsPerCycle *= 2;
+  while (tempo / beatsPerCycle < MIN_CPS && beatsPerCycle > 2 ** -20) beatsPerCycle /= 2;
+  if (beatsPerCycle !== chosen) {
+    note("At " + fmt(tempo * 60) + " beats per minute, one cycle is " + fmt(beatsPerCycle) + (beatsPerCycle === 1 ? " beat" : " beats")
+      + ", so that the tempo stays within what TidalJS plays (" + MIN_CPS + " to " + MAX_CPS + " cycles per second) and is kept exactly.");
+  }
+  const cps = tempo / beatsPerCycle;
+  if (cps > MAX_CPS || cps < MIN_CPS) {
+    note("The tempo (" + fmt(tempo * 60) + " beats per minute) is outside what TidalJS plays: it plays at " + (cps > MAX_CPS ? MAX_CPS : MIN_CPS) + " cycles per second instead.");
+  }
+  const cycles = (beats: number) => ratioCode(beats / beatsPerCycle);
 
   const usedNames = new Set<string>();
   const blocks: string[] = [];
   const names: string[] = [];
-  for (const w of valid) {
+  let loopNeeded = false;
+  for (const { part, w } of valid) {
     const name = uniqueName(w.label, usedNames);
     names.push(name);
     const span = w.period / beatsPerCycle;
     let body = w.body;
+    const comment = [...w.comment];
     if (w.rhythm) {
       // One event per cycle (the k-th at cycle k), which rhythm() spreads over its random durations, in cycles.
       if (w.rhythm.steps !== 1) body += "\n  .slow(" + fmt(w.rhythm.steps) + ")";
@@ -232,100 +300,425 @@ export function emitTidal(interp: Interpreter, sourceName: string): EmitResult {
     } else if (Math.abs(span - 1) > 1e-9) {
       body += span > 1 ? "\n  .slow(" + ratioCode(span) + ")" : "\n  .fast(" + ratioCode(1 / span) + ")";
     }
-    blocks.push(w.comment.map((c) => "// " + c).join("\n") + "\n" + (valid.length > 1 ? "const " + name + " = " : "") + body);
+    // The written loop starts at w.start: shifted there when that is not where its loops fall anyway.
+    // Controls over several loops of the rhythm start there too: the shift is modulo all of them (w.span).
+    const loopSpan = w.span ?? w.period;
+    const late = w.rhythm ? w.start : mod(w.start, loopSpan);
+    const shifted = late > 1e-9 && (w.rhythm || loopSpan - late > 1e-9);
+    if (shifted) body += "\n  .late(" + cycles(late) + ")";
+    // Values that grow each loop count from the part's first loop: the loop of the written code it falls in.
+    body = firstLoop(body, w.rhythm ? 0 : Math.round((w.start - (shifted ? late : 0)) / w.period));
+    // When it plays: from its start (its first event or rest), until it stops.
+    const start = part.drone ? 0 : Math.max(0, part.start);
+    // The written loop repeats its steps before the part's first loop and after its last one, so where the part
+    // begins or ends with rests (or with another SynthDef's events) the loop may have onsets there: then it plays
+    // from its first event, and until the loop's next onset after its last one.
+    let from = start;
+    let until = part.end;
+    let offsets: number[] = [];
+    if (!part.drone && !w.rhythm) {
+      const sounding = part.events;
+      const first = sounding[0].t, last = sounding[sounding.length - 1].t;
+      offsets = sounding.filter((e) => e.t >= w.start - 1e-9 && e.t < w.start + w.period - 1e-9).map((e) => e.t - w.start);
+      // The loop's first onset at or after t.
+      const onsetFrom = (t: number) => Math.min(...offsets.map((o) => w.start + o + w.period * Math.ceil((t - w.start - o) / w.period - 1e-9)));
+      if (first > from + 1e-9 && onsetFrom(from) < first - 1e-9) from = first;
+      if (until !== null && onsetFrom(last + 1e-6) < until - 1e-9) until = onsetFrom(last + 1e-6);
+    }
+    // TidalJS compares where each event starts with these bounds exactly. An event's start is the sum of the
+    // part's shift and its place in the loop: when those are not binary fractions (of a cycle, of the loop), the
+    // sum may round to just below a bound that falls on an onset, and the event there would be left out (or the
+    // one at the end let in). Then that bound is written a little early, below any rounding and far from the
+    // onsets before it.
+    const shared = [shifted ? late : 0, w.period, loopSpan].every((x) => isBinary(x / beatsPerCycle));
+    const exactAt = (beats: number) => {
+      const at = offsets.find((o) => { const d = mod(beats - w.start - o, w.period); return d < 1e-9 || w.period - d < 1e-9; });
+      return at === undefined || (shared && isBinary(beats / beatsPerCycle) && isBinary(at / w.period));
+    };
+    const edge = (beats: number) => {
+      if (exactAt(beats)) return cycles(beats);
+      note("Where a part starts or stops at a time that is not a binary fraction of a cycle (or of its loop), the time is written " + EDGE
+        + " cycle early: TidalJS compares event times exactly, and rounding could otherwise leave out the event there or let in the next one.");
+      return Math.abs(beats) < 1e-9 ? "-" + EDGE : cycles(beats) + " - " + EDGE;
+    };
+    if (part.end !== null && until !== null) {
+      const whole = loopLength !== null && Math.abs(loopLength / w.period - Math.round(loopLength / w.period)) < 1e-6;
+      if (loopLength === null || from > 1e-9 || until < loopLength - 1e-9 || !whole) {
+        body += "\n  .playFor(" + edge(from) + ", " + edge(until) + ")";
+        if (loopLength !== null) loopNeeded = true;
+      }
+      comment.push(loopLength === null
+        ? "It plays once, from beat " + fmt(start) + " to beat " + fmt(part.end) + ", as in SuperCollider."
+        : "It plays from beat " + fmt(start) + " to beat " + fmt(part.end) + " of the piece.");
+    } else if (from > 1e-9) {
+      body += "\n  .stopFor(" + edge(0) + ", " + edge(from) + ")";
+      comment.push("It starts at beat " + fmt(start) + ", as in SuperCollider.");
+    }
+    blocks.push(comment.map(commentLine).join("\n") + "\n" + (valid.length > 1 ? "const " + name + " = " : "") + body);
   }
 
   for (const n of interp.notes) note(n);
   const header: string[] = [];
-  header.push("// " + (sourceName ? sourceName + ": c" : "C") + "onverted from SuperCollider by TidalJS.");
+  header.push(commentLine((sourceName ? sourceName + ": c" : "C") + "onverted from SuperCollider by TidalJS."));
   if (notes.length) {
     header.push("// Notes on the conversion:");
-    for (const n of notes) header.push("// - " + n);
+    for (const n of notes) header.push(commentLine("- " + n));
   }
   const tempoComment = (firstClock.explicit || tempo !== 1 ? "tempo " + fmt(tempo) + " beats per second" : "SuperCollider's default tempo, 1 beat per second")
     + ", " + fmt(beatsPerCycle) + " beat" + (beatsPerCycle === 1 ? "" : "s") + " per cycle";
   const lines = [
     header.join("\n"),
-    tempoLine(tempo, beatsPerCycle) + " // " + tempoComment,
+    tempoLine(tempo, beatsPerCycle) + " " + commentLine(tempoComment),
     "setOutput(1, false) // as SuperCollider: no master volume and no limiter",
   ];
   if (ctx.banks.size) {
     // The sound files the SuperCollider code reads with Buffer.read, as TidalJS sample banks.
-    const banks = [...ctx.banks].map((b) => "  " + (/^[a-z_$][\w$]*$/i.test(b.bank) ? b.bank : JSON.stringify(b.bank)) + ": [" + JSON.stringify(webPath(b.path ?? "")) + "],");
+    const banks = [...ctx.banks].map((b) => "  " + (/^[a-z_$][\w$]*$/i.test(b.bank) ? b.bank : str(b.bank)) + ": [" + str(webPath(b.path ?? "")) + "],");
     lines.push("samples({\n" + banks.join("\n") + "\n}) // the files SuperCollider reads with Buffer.read: they must be reachable from the browser (a URL or a path next to the page)");
   }
   for (const k of keys) {
     const name = uniqueName(k.label, usedNames);
     names.push(name);
-    blocks.push(k.comment.map((c) => "// " + c).join("\n") + "\n" + (valid.length + keys.length > 1 ? "const " + name + " = " : "") + k.body);
+    blocks.push(k.comment.map(commentLine).join("\n") + "\n" + (valid.length + keys.length > 1 ? "const " + name + " = " : "") + k.body);
   }
   // The GUI's windows: groups of the Controls panel, laid out as in SuperCollider (only controls the code uses).
   const code = blocks.join("\n");
   const inCode = (name: string) => code.includes("slider(" + str(name) + ",") || code.includes("toggle(" + str(name) + ")") || code.includes("toggle(" + str(name) + ",");
   for (const win of interp.windowLayouts()) {
     const rows = win.rows.map((r) => r.filter(inCode)).filter((r) => r.length);
-    if (rows.length) lines.push("controlLayout(" + str(win.title) + ", [" + rows.map((r) => "[" + r.map((n) => str(n)).join(", ") + "]").join(", ") + "]) // the window " + str(win.title) + " of the SuperCollider GUI");
+    if (rows.length) lines.push("controlLayout(" + str(win.title) + ", [" + rows.map((r) => "[" + r.map((n) => str(n)).join(", ") + "]").join(", ") + "]) " + commentLine("the window " + str(win.title) + " of the SuperCollider GUI"));
   }
   const total = valid.length + keys.length;
   if (total === 0) {
     lines.push("", "// Nothing to play was found.");
-    return { code: lines.join("\n") + "\n", parts: 0 };
+    return { code: checked(lines.join("\n") + "\n"), parts: 0 };
   }
   lines.push("", blocks.join("\n\n"));
-  if (total > 1) lines.push("", "stack([" + names.join(", ") + "])");
-  return { code: lines.join("\n") + "\n", parts: total };
+  const preview = loopNeeded && loopLength !== null
+    ? ".timeLoop(" + cycles(loopLength) + ") " + commentLine("a preview: SuperCollider plays this once (" + fmt(loopLength) + " beats); here it loops")
+    : "";
+  if (total > 1) lines.push("", "stack([" + names.join(", ") + "])" + preview);
+  else if (preview) lines[lines.length - 1] += "\n  " + preview;
+  return { code: checked(lines.join("\n") + "\n"), parts: total };
 }
 
-/** The tempo as TidalJS code: setTempo(bpm) for 4 beats per cycle, else setCPS. */
+/** Why a pattern was not played further, when it did not end: the horizon, or MAX_EVENTS events. */
+type Cap = "horizon" | "events" | null;
+
+/**
+ * How far a source was played, whether the stream that played it really ended (its pattern ran out, or it was
+ * stopped: then it has an end), and if not, why it was not played further (the horizon or the most events: an
+ * observation limit, not an end).
+ */
+interface Reach {
+  horizon: number;
+  ended: boolean;
+  cap: Cap;
+  /** Where it was stopped (.stop), in beats: it ends there, even with a note still sounding. */
+  stop?: number;
+}
+
+/** A source a playback gives more than once (a Pbind twice in a Ppar or a Pseq) ends only when every one of its streams ended. */
+function mergeReach(reach: Map<string, Reach>, src: string, r: Reach) {
+  const old = reach.get(src);
+  if (!old) { reach.set(src, r); return; }
+  const ended = old.ended && r.ended;
+  const stop = ended && old.stop !== undefined && r.stop !== undefined ? Math.max(old.stop, r.stop) : undefined;
+  reach.set(src, { horizon: Math.min(old.horizon, r.horizon), ended, cap: ended ? null : r.horizon < old.horizon ? r.cap : old.cap, ...(stop === undefined ? {} : { stop }) });
+}
+
+/**
+ * When a source starts and ends. It ends where its last event (or rest) ends when what played it ended (a finite
+ * pattern), or when it stopped long before the others did (an intro beside a part that plays on, a section):
+ * still playing, its last event reaches the horizon, or the time since it is no longer than its own longest gap.
+ */
+function lifetime(list: SimEvent[], rests: SimEvent[], reach: Reach): { start: number; end: number | null; horizon: number } {
+  let start = Infinity, last = -Infinity;
+  const times: number[] = [];
+  for (const e of [...list, ...rests]) {
+    start = Math.min(start, e.t);
+    last = Math.max(last, e.t + Math.max(0, e.delta));
+    times.push(e.t);
+  }
+  if (!Number.isFinite(start)) return { start: 0, end: null, horizon: reach.horizon };
+  if (reach.ended) return { start, end: reach.stop ?? Math.max(last, start), horizon: reach.horizon };
+  times.sort((a, b) => a - b);
+  let gap = 0;
+  for (let i = 1; i < times.length; i++) gap = Math.max(gap, times[i] - times[i - 1]);
+  const playing = last >= reach.horizon - 1e-6 || reach.horizon - last <= gap + 1e-6;
+  return { start, end: playing ? null : last, horizon: reach.horizon };
+}
+
+/** What TidalJS's setCPS accepts, in cycles per second (it clamps other values). */
+const MIN_CPS = 0.05;
+const MAX_CPS = 10;
+/** What TidalJS's setTempo accepts, in beats per minute (4 beats per cycle; it clamps other values). */
+const MIN_BPM = 20;
+const MAX_BPM = 300;
+
+/** The tempo as TidalJS code: setTempo(bpm) for 4 beats per cycle within its range, else setCPS. */
 function tempoLine(tempo: number, beats: number): string {
   const bpm = tempo * 60;
   const exact = (x: number) => Math.abs(Number(fmt(x)) - x) < 1e-12 * Math.max(1, Math.abs(x));
-  if (beats === 4 && exact(bpm)) return "setTempo(" + fmt(bpm) + ")";
-  const cps = tempo / beats;
+  if (beats === 4 && exact(bpm) && bpm >= MIN_BPM && bpm <= MAX_BPM) return "setTempo(" + fmt(bpm) + ")";
+  const cps = Math.min(MAX_CPS, Math.max(MIN_CPS, tempo / beats));
+  if (cps !== tempo / beats) return "setCPS(" + fmt(cps) + ")";
   if (exact(cps)) return "setCPS(" + fmt(cps) + ")";
-  if (exact(tempo)) return "setCPS(" + fmt(tempo) + " / " + fmt(beats) + ")";
-  if (exact(bpm)) return "setCPS(" + fmt(bpm) + " / 60 / " + fmt(beats) + ")";
+  if (exact(tempo) && exact(beats)) return "setCPS(" + fmt(tempo) + " / " + fmt(beats) + ")";
+  if (exact(bpm) && exact(beats)) return "setCPS(" + fmt(bpm) + " / 60 / " + fmt(beats) + ")";
   return "setCPS(" + String(cps) + ")";
 }
 
 // ---------------------------------------------------------------- simulation
 
-function simulate(interp: Interpreter, rec: PlayRecord, scale: number): { events: SimEvent[]; end: number | null } {
+/**
+ * What a played pattern gave: its events, where its own stream ended (null: it plays on), how far it was played,
+ * why not further, each source's own reach (the patterns it started have theirs), and whether it, or a pattern it
+ * started, plays on past where it was followed.
+ */
+interface Sim {
+  events: SimEvent[];
+  end: number | null;
+  horizon: number;
+  cap: Cap;
+  reach: Map<string, Reach>;
+  open: boolean;
+}
+
+/** What every playback is simulated with: the common tempo (beats per second), and the streams playbacks stopped. */
+interface SimCtx {
+  interp: Interpreter;
+  tempo: number;
+  note: (s: string) => void;
+  /** Each playback's stream where it stopped: x.resume (or x.play) after x.stop goes on from there. */
+  streams: Map<number, Stream>;
+  /**
+   * Each Pdef's playbacks so far, in the order of their plays: when it was played (in beats of the common timeline)
+   * and its order in the file (`Playback.seq`), and when it stopped playing (stopped or ran out; null: it plays on).
+   */
+  pdefs: Map<string, { at: number; seq: number; end: number | null }[]>;
+}
+
+/** A Pdef's play waiting for its turn: when it was called, in beats of the common timeline, and its order in the file. */
+interface Turn {
+  at: number;
+  seq: number;
+}
+
+/** Whether `a` happens before `b`: earlier, or at the same time and earlier in the file. */
+function before(a: Turn, b: Turn): boolean {
+  return a.at < b.at - 1e-9 || (Math.abs(a.at - b.at) <= 1e-9 && a.seq < b.seq);
+}
+
+function clockTempo(clock: { tempo: number }): number {
+  return clock.tempo > 0 ? clock.tempo : 1;
+}
+
+/** A moment (beats of a clock) in beats of the common timeline. */
+function beatsOf(m: Moment, tempo: number): number {
+  return m.beats * tempo / clockTempo(m.clock);
+}
+
+/**
+ * TempoClock.nextTimeOnGrid: the first multiple of `quant` at or after `beats`, plus `phase` (quant 0: `phase`
+ * after `beats`), never before `beats`. One path for every .play, at the top of the file or in a routine.
+ */
+function onGrid(beats: number, quant: number, phase: number): number {
+  if (!(quant > 0)) return beats + Math.max(0, phase);
+  const p = phase < 0 ? ((phase % quant) + quant) % quant : phase;
+  const at = Math.ceil((beats - (p % quant)) / quant - 1e-9) * quant + p;
+  return Math.max(beats, at);
+}
+
+/** When a playback starts, in beats of the common timeline: its .play's time on its clock's grid. */
+function onsetOf(pb: Playback, tempo: number): number {
+  const own = tempo / clockTempo(pb.clock);
+  return onGrid(beatsOf(pb.at, tempo) / own, pb.quant, pb.phase) * own;
+}
+
+/**
+ * Whether a playback plays, and until when (in beats of the common timeline; undefined: until it runs out). A
+ * pattern's playback ends at its first stop (x.stop) after its .play. A Pdef's play does nothing while the Pdef
+ * plays already (from an earlier play, until it stopped or ran out), as in SuperCollider; otherwise it ends at the
+ * first Pdef(\x).stop after it. A stop before the onset (while the player waits for its quant) means it never
+ * plays: it ends at its onset. `done` notes when a Pdef's playback stopped playing, once it was played. null: the
+ * play does nothing.
+ */
+function decide(ctx: SimCtx, pb: Playback | undefined, onset: number): { until?: number; done: (sim: Sim) => void } | null {
+  const none = () => {};
+  if (!pb) return { done: none };
+  const tempo = ctx.tempo;
+  const call: Turn = { at: beatsOf(pb.at, tempo), seq: pb.seq };
+  const pdef = pb.pattern instanceof PdefRef ? pb.pattern.key : null;
+  const list = pdef === null ? [] : ctx.pdefs.get(pdef) ?? [];
+  if (list.some((p) => before(p, call) && (p.end === null || call.at < p.end - 1e-9))) return null;
+  let stop: number | undefined;
+  const stops = pdef === null ? pb.stops.map((at) => ({ at, seq: Infinity })) : ctx.interp.pdefStops.get(pdef) ?? [];
+  for (const s of stops) {
+    const at = beatsOf(s.at, tempo);
+    if (before(call, { at, seq: s.seq }) && (stop === undefined || at < stop)) stop = at;
+  }
+  if (stop !== undefined && stop < onset - 1e-9) {
+    ctx.note("Line " + pb.line + ": " + (pdef === null ? "a pattern" : "Pdef(\\" + pdef + ")") + " is stopped at beat " + fmt(stop)
+      + " while it waits for its quant (beat " + fmt(onset) + "): it does not play then, as in SuperCollider.");
+  }
+  return {
+    ...(stop === undefined ? {} : { until: Math.max(onset, stop) }),
+    done: (sim) => {
+      if (pdef === null) return;
+      // It stops playing where it is stopped (before its onset too) or where it runs out, whichever comes first.
+      list.push({ ...call, end: stop === undefined ? sim.end : Math.min(stop, sim.end ?? Infinity) });
+      ctx.pdefs.set(pdef, list);
+    },
+  };
+}
+
+function* simulate(ctx: SimCtx, rec: PlayRecord, index: number, scale: number): Generator<Turn, Sim, void> {
+  const { interp } = ctx;
   const out: SimEvent[] = [];
   if (rec.kind === "event" && rec.event) {
     const ev = rec.event;
-    out.push(resolve(ev, 0, ownDelta(ev), "e" + rec.line + ":" + describeText(ev.get("instrument") ?? new Sym("default")), rec.line, scale));
-    return { events: out, end: ownDelta(ev) * scale };
+    const src = "e" + rec.line + ":" + describeText(ev.get("instrument") ?? new Sym("default"));
+    out.push(resolve(ev, 0, ownDelta(ev), src, rec.line, scale));
+    const end = ownDelta(ev) * scale;
+    return { events: out, end, horizon: end, cap: null, reach: new Map([[src, { horizon: end, ended: true, cap: null }]]), open: false };
   }
   const source = rec.pattern;
-  if (!isPattern(source)) return { events: out, end: 0 };
-  return run(interp, source, rec.start, rec.line, scale, out, 0);
+  if (!isPattern(source)) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
+  const pb = rec.playback === undefined ? undefined : interp.playbacks[rec.playback];
+  // A pattern played at the top of the file starts on its clock's grid, as one played in a routine (run).
+  const start = pb ? onsetOf(pb, ctx.tempo) : rec.start * scale;
+  if (pb?.pattern instanceof PdefRef) yield { at: beatsOf(pb.at, ctx.tempo), seq: pb.seq };
+  const launch = decide(ctx, pb, start);
+  if (launch === null) return { events: out, end: 0, horizon: 0, cap: null, reach: new Map(), open: false };
+  const sim = yield* run(ctx, source, start / scale, rec.line, scale, out, 0, { endless: rec.endless, ...(launch.until === undefined ? {} : { until: launch.until / scale }) },
+    (rec.kind === "routine" ? "R" : "P") + index, rec.playback);
+  launch.done(sim);
+  return sim;
 }
 
-function run(interp: Interpreter, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number): { events: SimEvent[]; end: number | null } {
-  const stream = new Stream(source, { host: interp });
+/** One playback a routine started, while the routine is played: its own key, which pattern, its events (out[from..to)). */
+interface Launch {
+  key: string;
+  group: string;
+  from: number;
+  to: number;
+  sim: Sim;
+}
+
+/** The most playbacks of one pattern a routine that loops forever starts that are written each as a part of its own. */
+const MAX_SPLIT = 16;
+
+/**
+ * How a playback ends besides its pattern running out: `endless`, a routine that was cut at the horizon (its
+ * stream ends there, but only because it was not played further); `until`, where it is stopped, in beats of its clock.
+ */
+interface Life {
+  endless?: boolean;
+  until?: number;
+}
+
+/**
+ * Plays a pattern from `start` (in beats of its clock; `scale` turns them into beats of the common timeline) until
+ * it ends, reaches the horizon (512 beats) or has given MAX_EVENTS events. A pattern that stops giving events (an
+ * empty pattern repeated forever: SuperCollider hangs there) ends where it stopped, with a note; so do events that
+ * take no time, again and again. `key` names this playback: its sources are its patterns in it (`src@key`).
+ * `playback`: the pattern's playback (where it is stopped; a resumed one goes on with the stream it continues).
+ */
+function* run(ctx: SimCtx, source: Value, start: number, line: number, scale: number, out: SimEvent[], depth: number, life: Life, key: string, playback?: number): Generator<Turn, Sim, void> {
+  const { interp, note } = ctx;
+  const resumes = playback === undefined ? undefined : interp.playbacks[playback]?.resumes;
+  const stream = (resumes !== undefined ? ctx.streams.get(resumes) : undefined) ?? new Stream(source, { host: interp });
+  if (playback !== undefined) ctx.streams.set(playback, stream);
+  const first = out.length;
   let t = start;
   let count = 0;
+  // Events a negative timingOffset moves earlier are known only up to that much before where it stopped.
+  let earliest = 0;
+  const known = () => (t + earliest) * scale;
+  // The sources this stream plays itself, and whether the stream that gave each one ended (a Ppar's pattern that
+  // ran out while the others play on); the patterns it starts (a routine's) are playbacks of their own.
+  const own = new Map<string, boolean>();
+  const reach = new Map<string, Reach>();
+  // Whether a pattern it started plays on past where it was followed, and the playbacks it started.
+  let open = false;
+  const launches: Launch[] = [];
+  const groups = new Map<Value, string>();
+  // Where the playback ends (null: it plays on), how far it was played, and why not further. A routine cut at the
+  // horizon has not ended: it was not played further.
+  const finish = (end: number | null, horizon: number, cap: Cap): Sim => {
+    const ended = end !== null && !life.endless;
+    const stopped = end !== null && ended && life.until !== undefined && Math.abs(end - life.until * scale) < 1e-9;
+    const why: Cap = end !== null ? "horizon" : cap;
+    for (const [src, marked] of own) {
+      const r: Reach = end !== null && ended ? { horizon: end, ended: true, cap: null, ...(stopped ? { stop: end } : {}) }
+        : marked ? { horizon, ended: true, cap: null }
+        : { horizon, ended: false, cap: why };
+      mergeReach(reach, src, r);
+    }
+    if (series(launches, groups.size, key, horizon, life, out, reach)) {
+      note("Line " + line + ": the routine loops forever; the patterns it starts are followed for its first " + fmt(horizon) + " beats: the new ones it would start after that are not written.");
+    }
+    return { events: out, end: ended ? end : null, horizon, cap: ended ? null : why, reach, open: open || !ended };
+  };
   for (;;) {
-    if (t * scale >= HORIZON || count++ > MAX_EVENTS) return { events: out, end: null };
+    if (life.until !== undefined && t >= life.until - 1e-9) return finish(life.until * scale, life.until * scale, null);
+    if (t * scale >= HORIZON) return finish(null, known(), "horizon");
+    if (count++ > MAX_EVENTS) {
+      if (t <= start + 1e-9) {
+        // No time passed: in SuperCollider the clock never moves on.
+        note("Line " + line + " plays events that take no time (dur 0), one after another forever: SuperCollider would hang there, so they are left out.");
+        out.length = first;
+        return finish(t * scale, t * scale, null);
+      }
+      return finish(null, known(), "events");
+    }
     interp.time = t;
     interp.inPattern = true;
+    // Each event has its own allowance of work: a pattern that never yields is stopped (TooMuchWork).
+    interp.resetWork();
     let ev;
     try {
       ev = stream.next(new SCEvent());
+    } catch (err) {
+      if (!(err instanceof TooMuchWork)) throw err;
+      note("Line " + line + ": a pattern stops giving values (an empty pattern repeated forever, such as Pn(Pseq([], inf))): SuperCollider would hang there, so it ends "
+        + (t <= 1e-9 ? "at the start" : "after " + fmt(t * scale) + " beats") + ".");
+      return finish(t * scale, t * scale, null);
     } finally {
       interp.inPattern = false;
     }
-    if (ev === DONE) return { events: out, end: t * scale };
-    if (!(ev instanceof SCEvent)) return { events: out, end: t * scale };
+    tick();
+    if (ev === DONE || !(ev instanceof SCEvent)) return finish(t * scale, t * scale, null);
     const sub = ev.get("__pattern");
     if (sub !== undefined && depth < 4) {
-      // A pattern a routine started: played from now.
-      run(interp, sub, t, numOf(ev.get("__line"), line), scale, out, depth + 1);
+      // A pattern a routine started: a playback of its own, on its own clock (the default clock unless it was given
+      // one), from its onset (onsetOf: as at the top of the file), until it ends or is stopped (it outlives the
+      // routine). A Pdef's play first waits for its turn on the common timeline (emitTidal).
+      const index = ev.get("__playback");
+      const pb = typeof index === "number" ? interp.playbacks[index] : undefined;
+      const own = pb ? ctx.tempo / clockTempo(pb.clock) : scale;
+      const onset = pb ? onsetOf(pb, ctx.tempo) : t * scale;
+      const pattern = pb?.pattern ?? sub;
+      if (pb && pattern instanceof PdefRef) yield { at: beatsOf(pb.at, ctx.tempo), seq: pb.seq };
+      const launch = decide(ctx, pb, onset);
+      if (launch !== null) {
+        const id = pattern instanceof PdefRef ? "pdef:" + pattern.key : pattern;
+        if (!groups.has(id)) groups.set(id, String(groups.size));
+        const launchKey = key + "/" + launches.length;
+        const from = out.length;
+        const inner = yield* run(ctx, sub, onset / own, numOf(ev.get("__line"), line), own, out, depth + 1, launch.until === undefined ? {} : { until: launch.until / own }, launchKey, typeof index === "number" ? index : undefined);
+        launches.push({ key: launchKey, group: groups.get(id) as string, from, to: out.length, sim: inner });
+        launch.done(inner);
+        if (inner.open) open = true;
+      }
     } else {
       const offset = numOf(ev.get("timingOffset"), 0);
-      const src = String(ev.get("__src") ?? "p" + line);
+      earliest = Math.min(earliest, offset);
+      const src = String(ev.get("__src") ?? "p" + line) + "@" + key;
       const delta = ownDelta(ev) * scale;
+      // A Ppar marks the last event of a pattern of its that ran out; a later event of that source plays on.
+      own.set(src, ev.get("__srcEnd") === true);
       if (!isRest(ev)) out.push(resolve(ev, (t + offset) * scale, delta, src, numOf(ev.get("__line"), line), scale));
       else if (delta > 1e-9) out.push({ ...resolve(ev, (t + offset) * scale, delta, src, numOf(ev.get("__line"), line), scale), rest: true });
     }
@@ -334,11 +727,67 @@ function run(interp: Interpreter, source: Value, start: number, line: number, sc
   }
 }
 
+/**
+ * The playbacks a routine started, as sources: each its own (with its own start and end), except the playbacks of
+ * one pattern that a routine that loops forever starts again and again, or that all end, which are one source (a
+ * series: their loop holds the gaps between them). The playbacks of one pattern a looping routine starts that do
+ * not repeat (one that plays on while the next starts) stay apart, unless there are more than MAX_SPLIT of them.
+ * Returns whether some playback is its own source in a routine that loops forever (the new patterns it would start
+ * after the horizon are not written).
+ */
+function series(launches: Launch[], count: number, key: string, horizon: number, life: Life, out: SimEvent[], reach: Map<string, Reach>): boolean {
+  let single = false;
+  for (let g = 0; g < count; g++) {
+    const list = launches.filter((l) => l.group === String(g));
+    const ended = list.every((l) => [...l.sim.reach.values()].every((r) => r.ended));
+    // The events of a playback's own patterns (not those of the playbacks it started in turn).
+    const ownEvents = (l: Launch) => out.slice(l.from, l.to).filter((e) => e.src.endsWith("@" + l.key));
+    let merge = list.length > 1 && ended && !life.endless;
+    // The window the series was followed in: up to where the routine, or a playback of it that plays on, was cut.
+    let until = horizon;
+    for (const l of list) for (const r of l.sim.reach.values()) if (!r.ended) until = Math.min(until, r.horizon);
+    if (list.length > 1 && life.endless) {
+      const evs = list.flatMap(ownEvents).filter((e) => !e.rest).sort((a, b) => a.t - b.t);
+      const keys = evs.map((e) => fmtKey(e.delta) + "|" + e.src.slice(0, e.src.lastIndexOf("@")) + "|" + e.instrument);
+      merge = list.length > MAX_SPLIT || findPeriod(evs, keys, until) !== null;
+    }
+    if (!merge) {
+      for (const l of list) for (const [src, r] of l.sim.reach) mergeReach(reach, src, r);
+      if (life.endless) single = true;
+      continue;
+    }
+    // One source per pattern of the series: `src@key/g` (named after the routine's playback and the pattern).
+    const name = key + "/s" + g;
+    const merged = new Map<string, { ends: number[]; open: boolean }>();
+    for (const l of list) {
+      for (const [src, r] of l.sim.reach) {
+        if (!src.endsWith("@" + l.key)) { mergeReach(reach, src, r); continue; }
+        const base = src.slice(0, src.length - l.key.length - 1);
+        const m = merged.get(base) ?? { ends: [], open: false };
+        if (!r.ended) m.open = true;
+        else m.ends.push(r.stop ?? Math.max(0, ...out.slice(l.from, l.to).filter((e) => e.src === src).map((e) => e.t + Math.max(0, e.delta))));
+        merged.set(base, m);
+      }
+      for (const e of ownEvents(l)) e.src = e.src.slice(0, e.src.length - l.key.length) + name;
+    }
+    for (const [base, m] of merged) {
+      const src = base + "@" + name;
+      // A routine that loops forever plays the series on; one that ends, until the last of its playbacks ends.
+      reach.set(src, m.open || life.endless ? { horizon: until, ended: false, cap: "horizon" } : { horizon: Math.max(...m.ends), ended: true, cap: null, stop: Math.max(...m.ends) });
+    }
+  }
+  return single;
+}
+
 function resolve(ev: SCEvent, t: number, delta: number, src: string, line: number, scale: number): SimEvent {
   const type = ev.get("type") instanceof Sym ? (ev.get("type") as Sym).name : "";
   const dirt = type === "dirt";
   let instrument = describeText((dirt ? ev.get("s") : ev.get("instrument")) ?? new Sym("default"));
   if (type === "midi") instrument = "__midi";
+  // A synth a routine started together with others (no wait between them) has no time of its own before the
+  // next one starts; it lasts, as they do, until the routine moves on.
+  const hold = ev.get("__hold");
+  if (ev.get("__synth") && delta < 1e-9 && typeof hold === "number" && hold > 0) delta = hold * scale;
   let sustain: number;
   const sus = ev.get("sustain");
   if (typeof sus === "number") sustain = sus * scale;
@@ -369,12 +818,31 @@ function isRest(ev: SCEvent): boolean {
 
 // ---------------------------------------------------------------- one part
 
+/**
+ * Stands, in a written body, for the loop (of the part's own time, one cycle a loop) where the part's first loop
+ * falls once the part is placed (shifted by its start): values that grow each loop count from there. One
+ * private-use character, replaced (firstLoop) before the code is shown.
+ */
+const FIRST_LOOP = "\uE000";
+
+/** The body with FIRST_LOOP replaced: `t - q` counts the loops from loop q of the written code. */
+function firstLoop(body: string, q: number): string {
+  return body.split(FIRST_LOOP).join(q === 0 ? "" : q > 0 ? " - " + fmt(q) : " + " + fmt(-q));
+}
+
 interface WrittenPart {
   label: string;
   comment: string[];
   body: string;
   /** The part's loop, in beats. */
   period: number;
+  /** Where the written loop starts, in beats (with random durations: where the first step starts). */
+  start: number;
+  /**
+   * How long the written controls take to come round, in beats: `period` times the loops of the rhythm they span
+   * together. They start at `start` too, so the code is shifted by `start` modulo this. Default: `period`.
+   */
+  span?: number;
   /**
    * Random durations: the body plays one step per beat (its values in order, a rest a silent step), and rhythm()
    * plays them one after another, step k as long as `durs[k % durs.length]` (a random duration or a number, in
@@ -411,7 +879,11 @@ interface Step {
   event: SimEvent | null;
 }
 
-function writePart(part: Part, ctx: Context): WrittenPart | null {
+/**
+ * Writes one part. `forced` gives its loop and where the loop starts (each voice of a part that starts several
+ * synths at once is written over the loop of the whole part).
+ */
+function writePart(part: Part, ctx: Context, forced?: { period: number; start: number; loops: boolean }): WrittenPart | null {
   const { synthFor, note, tempo } = ctx;
   let evs = part.events;
   if (evs.length === 0) return null;
@@ -419,8 +891,10 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
     // One long note per loop, as long as the loop; LFOs line up again where it restarts.
     const length = droneBeats(synthFor(part.instrument), tempo);
     evs = [{ ...evs[0], t: 0, delta: length, sustain: length }];
-    part = { ...part, events: evs, end: length };
+    part = { ...part, events: evs, start: 0, end: length };
   }
+  // Each event's index (steps refer to their events).
+  const index = new Map(evs.map((e, i) => [e, i]));
   const varying = part.instrument === "";
   const instruments = [...new Set(evs.map((e) => e.instrument))];
   const infos = new Map(instruments.map((i) => [i, synthFor(i)]));
@@ -483,30 +957,81 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
     for (const row of rows) if (!row.has(key)) row.set(key, fallback);
   }
 
-  // Rhythm: the times, own deltas and (when they vary) the sounds.
-  const rhythmKey = (i: number) => fmtKey(evs[i].delta) + "|" + (varying || soundsVary ? tokens[i] : "");
+  // Rhythm: the times, own deltas and (when they vary) the sounds. Each event's signature is worked out once.
   const cellKey = (c: Cell | undefined) => (c instanceof RandToken || c instanceof SigCell ? c.key() : JSON.stringify(c ?? null, jsonValue));
-  const horizon = part.end ?? HORIZON;
-  let period = findPeriod(evs, rhythmKey, horizon);
+  const rhythmKeys = evs.map((e, i) => fmtKey(e.delta) + "|" + (varying || soundsVary ? tokens[i] : ""));
+  const cellKeys = new Map(keys.map((k) => [k, rows.map((row) => cellKey(row.get(k)))]));
+  // Loops are looked for as far as the part was played; one that stops, up to its end.
   const finite = part.end !== null;
-  if (period === null && !finite && evs.some((e) => e.ev.get("__randtime"))) {
-    const random = randomRhythm(part, ctx, label, comment);
-    if (random) return random;
+  const horizon = part.end ?? part.horizon;
+  // How long a part that stops plays, from its start.
+  const life = finite ? Math.max(1e-9, (part.end as number) - part.start) : 0;
+  if (evs[0].t < -1e-9) {
+    note("A timingOffset moves events of line " + part.line + " before the start: SuperCollider plays those late, at once; here the first ones are left out (the later ones play early, as in SuperCollider).");
   }
-  if (period === null) {
-    period = finite ? Math.max(part.end ?? 0, lastEnd(evs)) : FALLBACK;
-    if (!finite) note("The rhythm of line " + part.line + " never repeats: its first " + fmt(period) + " beats loop.");
+  let period: number;
+  let start: number;
+  // Whether the material repeats over the loop (not when the first beats of material that never repeats loop).
+  let loops = true;
+  if (forced) {
+    ({ period, start, loops } = forced);
+  } else {
+    let found = findPeriod(evs, rhythmKeys, horizon);
+    if (found === null && !finite && evs.some((e) => e.ev.get("__randtime"))) {
+      const random = randomRhythm(part, ctx, label, comment);
+      if (random) return random;
+    }
+    // A part that stops and never repeats within its life: all of it, once.
+    let whole = false;
+    if (found === null) {
+      if (finite) whole = true;
+      else if (part.cap === "events") {
+        note("The rhythm of line " + part.line + " does not repeat within its first " + MAX_EVENTS + " events (" + fmt(horizon) + " beats): its first " + fmt(FALLBACK) + " beats loop.");
+      } else note("The rhythm of line " + part.line + " never repeats: its first " + fmt(FALLBACK) + " beats loop.");
+    }
+    period = found ?? (finite ? life : FALLBACK);
+    loops = found !== null || finite;
+    if (finite && !whole && Math.abs(life % period) > 1e-6 && life < period * 2) { period = life; whole = true; }
+    // When the whole part (rhythm and controls) repeats soon, write all of it in one loop.
+    if (!whole) {
+      const fullKeys = rhythmKeys.map((k, i) => k + "|" + keys.map((key) => (cellKeys.get(key) as string[])[i]).join("|"));
+      found = findPeriod(evs, fullKeys, horizon, 16);
+      if (found !== null && found <= 16 + 1e-9 && found >= period - 1e-9) period = found;
+    }
+    // The loop starts where the part's loops fall (a multiple of the period), or for a part written whole, at its start.
+    start = whole ? part.start : Math.floor(evs[0].t / period + 1e-9) * period;
+    // The loop from `start` must hold every event of a loop. When the part begins after `start`, the events of
+    // the loop before its first one are those one period later: if there are any, the loop starts at the first
+    // event instead (and is shifted there when it is written).
+    const first = evs[0].t;
+    if (!whole && first > start + 1e-9 && evs.some((e) => e.t >= start + period - 1e-9 && e.t < first + period - 1e-9)) start = first;
   }
-  if (finite && part.end !== null && part.end > 0 && Math.abs(part.end % period) > 1e-6 && part.end < period * 2) period = part.end;
-  // When the whole part (rhythm and controls) repeats soon, write all of it in one loop.
-  const fullKey = (i: number) => rhythmKey(i) + "|" + keys.map((k) => cellKey(rows[i].get(k))).join("|");
-  const full = findPeriod(evs, fullKey, horizon);
-  if (full !== null && full <= 16 + 1e-9 && full >= period - 1e-9) period = full;
-  const start = Math.floor(evs[0].t / period + 1e-9) * period;
-  if (start > 0) note("Line " + part.line + " starts after " + fmt(start) + " beats in SuperCollider; here it plays from the start.");
+
+  // Synths started at the same instant: each is a voice of its own, with its own controls and length, over the
+  // loop of the whole part.
+  if (!forced && evs.some((e, i) => i > 0 && Math.abs(e.t - evs[i - 1].t) < 1e-9)) {
+    return writeVoices(part, evs, ctx, period, start, loops);
+  }
 
   const steps = stepsOf(evs, start, period);
   const weights = toWeights(steps.map((s) => s.width), note);
+  // Each note keeps its own length (its sustain), whatever the width of its step: a step that a timingOffset, an
+  // early next onset or the end of the loop makes shorter than the event's delta holds a longer legato. (Material
+  // that never repeats is cut off at the end of the loop it is written in: there the next onset counts only.)
+  const widths = stepWidths(evs, start, loops ? period : Infinity);
+  let refit = false;
+  evs.forEach((e, i) => {
+    if (!(e.delta > 1e-9) || Math.abs(widths[i] - e.delta) < 1e-9 || !holdsLength(e, infos.get(e.instrument) ?? null)) return;
+    const legato = round(e.sustain / widths[i]);
+    if (Math.abs(legato - numOf(rows[i].get("legato") as Value, 1)) < 1e-9) return;
+    rows[i].set("legato", legato);
+    refit = true;
+  });
+  if (refit) {
+    if (!keys.includes("legato")) keys.push("legato");
+    for (const row of rows) if (!row.has("legato")) row.set("legato", 1);
+    cellKeys.set("legato", rows.map((row) => cellKey(row.get("legato"))));
+  }
 
   // Structure.
   const lines: string[] = [];
@@ -521,7 +1046,7 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
     const n = steps.length;
     if (!(allX && equal && n === 1)) lines.push(".struct(" + str(allX && equal ? "x*" + n : seq(steps.map((s) => (s.event ? "x" : "~")), weights)) + ")");
   } else if (varying || soundsVary) {
-    const names = steps.map((s) => (s.event ? miniName(tokens[evs.indexOf(s.event)]) : "~"));
+    const names = steps.map((s) => (s.event ? miniName(tokens[index.get(s.event) as number]) : "~"));
     lines.push("sound(" + str(seq(names, weights)) + ")");
   } else {
     lines.push("sound(" + str(tokens[0]) + ")");
@@ -543,9 +1068,12 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
   const order = ["note", "freq", "n", "legato"];
   keys.sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   let tokenIndex = 0;
+  // How many loops of the rhythm the controls span together (the least common multiple of theirs).
+  let spanLoops = 1;
+  const spans = (m: number) => { spanLoops = spanLoops * m / gcd(spanLoops, m); };
   const cellsOf = (key: string, k: number) => {
     const ks = k === 0 ? steps : stepsOf(evs, start + k * period, period);
-    return ks.map((s) => (s.event ? rows[evs.indexOf(s.event)].get(key) ?? GAP : GAP));
+    return ks.map((s) => (s.event ? rows[index.get(s.event) as number].get(key) ?? GAP : GAP));
   };
   const extra: string[] = [];
   if (evs.some((e) => e.ev.get("__mono"))) extra.push(".tie(" + ++ctx.ties + ")");
@@ -568,19 +1096,24 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
       lines.push(".follow(" + str(key) + ", " + tokenCode(t0, key === "note", 0) + ")");
       continue;
     }
-    const m = evs.length === 1 || (finite && period >= horizon - 1e-9) ? 1 : controlPeriod(evs, period, horizon, (i) => cellKey(valueAt(i)));
+    const valueKeys = cellKeys.get(key) as string[];
+    // One value throughout repeats however the rhythm goes.
+    let m = evs.length === 1 || (finite && period >= life - 1e-9) || valueKeys.every((k) => k === valueKeys[0]) ? 1 : controlPeriod(evs, period, horizon, valueKeys);
+    // A part that stops: a value that does not repeat within its life is written for all of it.
+    if (m === null && finite) m = Math.max(1, Math.ceil(((part.end as number) - start) / period - 1e-9));
     if (m === null) {
       // A value that never repeats: a series that grows by the same step each loop, or a list shuffled each loop.
       const loops = Math.min(64, Math.floor((horizon - start) / period + 1e-9));
       const byLoop = Array.from({ length: loops }, (_, k) => cellsOf(key, k));
       const grows = growth(byLoop, key === "note");
       if (grows) {
-        const w = writeControl(key, byLoop[0], weights, 1, () => tokenIndex++, { period, tempo });
+        const w = writeControl(key, byLoop[0], weights, [byLoop[0].length], () => tokenIndex++, { period, tempo });
         if (w !== null) lines.push("." + key + "(" + w + ")");
-        // In the loop's own time each loop is one cycle: floor(t) counts the loops.
+        // In the loop's own time each loop is one cycle: floor(t) counts the loops, from the part's first loop
+        // (FIRST_LOOP: where that loop falls in the written code, known once the part is placed).
         extra.push(grows.op === "add"
-          ? ".add(" + key + "(sig((t) => Math.floor(t)" + (grows.d === 1 ? "" : " * " + fmt(grows.d)) + ")))"
-          : ".mul(" + key + "(sig((t) => " + fmt(grows.d) + " ** Math.floor(t))))");
+          ? ".add(" + key + "(sig((t) => Math.floor(t" + FIRST_LOOP + ")" + (grows.d === 1 ? "" : " * " + fmt(grows.d)) + ")))"
+          : ".mul(" + key + "(sig((t) => " + fmt(grows.d) + " ** Math.floor(t" + FIRST_LOOP + "))))");
         continue;
       }
       // A list shuffled again each time (Pn(Pshuf(list))): it may span several loops of the rhythm.
@@ -591,6 +1124,7 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
           for (let k = 0; k + m <= byLoop.length; k += m) groups.push(byLoop.slice(k, k + m).flat());
           if (isShuffle(groups)) {
             shuffledOver = m;
+            spans(m);
             const list = groups[0];
             lines.push("." + key + "(fastcat(" + str(list.map((c) => miniValue(c, key === "note")).join(" ")) + ").shuffle(" + list.length + ")" + (m > 1 ? ".slow(" + m + ")" : "") + ")");
           }
@@ -600,17 +1134,23 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
       note("The " + key + " of line " + part.line + " never repeats: its first " + fmt(FALLBACK) + " beats loop.");
     }
     const mult = m ?? Math.max(1, Math.floor(FALLBACK / period));
+    spans(mult);
+    // Each value from its own event's onset: every loop of the rhythm with its own steps and widths (the first
+    // and last loops of a part that starts or ends within a loop hold fewer events, and gaps where the others
+    // have them), so that each value starts where its event plays in the written code, not where a step of the
+    // first loop would put it.
     const cells: Cell[] = [];
-    const cellWeights: number[] = [];
+    const cellWidths: number[] = [];
+    const sizes: number[] = [];
     for (let k = 0; k < mult; k++) {
-      // The rhythm repeats, so each period has the same steps.
       const ks = k === 0 ? steps : stepsOf(evs, start + k * period, period);
-      ks.forEach((s, j) => {
-        cells.push(s.event ? rows[evs.indexOf(s.event)].get(key) ?? GAP : GAP);
-        cellWeights.push(weights[j] ?? 1);
-      });
+      for (const s of ks) {
+        cells.push(s.event ? rows[index.get(s.event) as number].get(key) ?? GAP : GAP);
+        cellWidths.push(s.width);
+      }
+      sizes.push(ks.length);
     }
-    const written = writeControl(key, cells, cellWeights, mult, () => tokenIndex++, { period, tempo });
+    const written = writeControl(key, cells, toWeights(cellWidths, note), sizes, () => tokenIndex++, { period, tempo });
     if (written !== null) lines.push("." + key + "(" + written + ")");
   }
   lines.push(...extra);
@@ -671,22 +1211,49 @@ function writePart(part: Part, ctx: Context): WrittenPart | null {
   }
   if (osc) lines.push(".osc(" + str(part.instrument.slice(5)) + ")");
 
-  // Group the controls: up to four per line.
+  // Group the controls: up to four per line (FIRST_LOOP not counted).
   const body = [lines[0]];
   let cur = "";
+  const size = (s: string) => s.length - (s.split(FIRST_LOOP).length - 1);
   for (const l of lines.slice(1)) {
-    if (l.length > 60 || cur.length + l.length > 70) {
+    if (size(l) > 60 || size(cur) + size(l) > 70) {
       if (cur) body.push(cur);
-      if (l.length > 60) { body.push(l); cur = ""; continue; }
+      if (size(l) > 60) { body.push(l); cur = ""; continue; }
       cur = l;
     } else cur += l;
   }
   if (cur) body.push(cur);
   if (channelFns) {
     // layer applies each function to the pattern: the left channel and the right one.
-    return { label, comment, body: "layer([\n  " + channelFns.join(",\n  ") + "\n], " + body.join("\n  ") + ")", period };
+    return { label, comment, body: "layer([\n  " + channelFns.join(",\n  ") + "\n], " + body.join("\n  ") + ")", period, start, span: period * spanLoops };
   }
-  return { label, comment, body: body.join("\n  "), period };
+  return { label, comment, body: body.join("\n  "), period, start, span: period * spanLoops };
+}
+
+/**
+ * A part that starts several synths at the same instant (a routine's Synth calls with no wait between them,
+ * events of no length): each is a voice of its own, the first started at each instant in the first voice, the
+ * second in the second, and so on, each with its own controls and length, all over the loop of the whole part.
+ */
+function writeVoices(part: Part, evs: SimEvent[], ctx: Context, period: number, start: number, loops: boolean): WrittenPart | null {
+  const voices: SimEvent[][] = [];
+  let at = -Infinity;
+  let k = 0;
+  for (const e of evs) {
+    if (Math.abs(e.t - at) < 1e-9) k++;
+    else { at = e.t; k = 0; }
+    if (!voices[k]) voices[k] = [];
+    voices[k].push(e);
+  }
+  if (voices.length > MAX_VOICES) {
+    ctx.note("Line " + part.line + " starts " + voices.length + " synths at the same instant: the first " + MAX_VOICES + " of them are written.");
+    voices.length = MAX_VOICES;
+  }
+  const written = voices.map((list) => writePart({ ...part, events: list, rests: [] }, ctx, { period, start, loops })).filter((w): w is WrittenPart => w !== null);
+  if (written.length === 0) return null;
+  if (written.length === 1) return written[0];
+  const comment = [...written[0].comment, written.length + " synths start at the same time: each is a voice of its own, with its own values and length."];
+  return { label: written[0].label, comment, body: "stack([\n  " + written.map((w) => w.body.split("\n").join("\n  ")).join(",\n  ") + "\n])", period, start, span: period * written.reduce((n, w) => { const m = Math.round((w.span ?? period) / period); return n * m / gcd(n, m); }, 1) };
 }
 
 /** A drone's loop, in beats: 4 or more, so that its LFOs (vib) complete whole cycles. */
@@ -846,64 +1413,85 @@ function pitchOf(ev: SCEvent, note: (s: string) => void): { control: string; val
 
 // ---------------------------------------------------------------- periods
 
-/** The shortest period (in beats) after which events repeat with the same key. */
-function findPeriod(evs: SimEvent[], key: (i: number) => string, horizon: number): number | null {
+/** A time as a whole number of millionths of a beat, to find events at a time. */
+function timeKey(t: number): number {
+  return Math.round(t * 1e6);
+}
+
+/**
+ * The shortest period (in beats, up to `longest`) after which the events repeat with the same signatures
+ * (`keys[i]` is event i's), checked up to the horizon (as far as the part was played).
+ */
+function findPeriod(evs: SimEvent[], keys: string[], horizon: number, longest = Infinity): number | null {
   if (evs.length === 0) return null;
-  const at = new Map<string, number[]>();
+  const at = new Map<number, number[]>();
   evs.forEach((e, i) => {
-    const k = fmtKey(e.t);
-    const list = at.get(k) ?? [];
-    list.push(i);
-    at.set(k, list);
+    const k = timeKey(e.t);
+    const list = at.get(k);
+    if (list) list.push(i);
+    else at.set(k, [i]);
   });
-  const k0 = key(0);
+  const has = (t: number, key: string) => at.get(timeKey(t))?.some((x) => keys[x] === key) ?? false;
+  const k0 = keys[0];
   const t0 = evs[0].t;
-  const tried = new Set<string>();
+  const tried = new Set<number>();
   for (let j = 1; j < evs.length; j++) {
     const p = evs[j].t - t0;
-    if (p <= 1e-9 || key(j) !== k0) continue;
-    const pk = fmtKey(p);
+    if (p <= 1e-9 || keys[j] !== k0) continue;
+    // The events are in order, so the candidates only grow from here.
+    if (p > horizon / 2 + 1e-9 || p > longest + 1e-9) break;
+    const pk = timeKey(p);
     if (tried.has(pk)) continue;
     tried.add(pk);
-    if (p > horizon / 2 + 1e-9) break;
     let ok = true;
     for (let i = 0; i < evs.length && ok; i++) {
+      tick();
       const t = evs[i].t + p;
       if (t > horizon - 1e-9) break;
-      const there = at.get(fmtKey(t));
-      if (!there || !there.some((x) => key(x) === key(i))) ok = false;
+      if (!has(t, keys[i])) ok = false;
     }
     // And nothing extra in the next period.
     for (let i = 0; i < evs.length && ok; i++) {
+      tick();
       const t = evs[i].t - p;
       if (t < t0 - 1e-9) continue;
-      const there = at.get(fmtKey(t));
-      if (!there || !there.some((x) => key(x) === key(i))) ok = false;
+      if (!has(t, keys[i])) ok = false;
     }
     if (ok) return p;
   }
   return null;
 }
 
-/** The smallest multiple of the rhythm's period over which a control repeats. */
-function controlPeriod(evs: SimEvent[], period: number, horizon: number, key: (i: number) => string): number | null {
-  const byTime = new Map(evs.map((e, i) => [fmtKey(e.t), i]));
+/** The smallest multiple of the rhythm's period over which a control repeats (`keys[i]`: its value at event i). */
+function controlPeriod(evs: SimEvent[], period: number, horizon: number, keys: string[]): number | null {
+  const byTime = new Map(evs.map((e, i) => [timeKey(e.t), i]));
   for (let m = 1; m * period <= horizon / 2 + 1e-9; m++) {
     const p = m * period;
     let ok = true;
     for (let i = 0; i < evs.length && ok; i++) {
+      tick();
       const t = evs[i].t + p;
       if (t > horizon - 1e-9) break;
-      const j = byTime.get(fmtKey(t));
-      if (j === undefined || key(j) !== key(i)) ok = false;
+      const j = byTime.get(timeKey(t));
+      if (j === undefined || keys[j] !== keys[i]) ok = false;
     }
     if (ok) return m;
   }
   return null;
 }
 
+/** The steps of one loop from `start`: each event (a chord, or events at one time: the first) and the gaps. */
 function stepsOf(evs: SimEvent[], start: number, period: number): Step[] {
-  const inWindow = evs.filter((e) => e.t >= start - 1e-9 && e.t < start + period - 1e-9);
+  // The events are in order of time: the first in the window by bisection.
+  let lo = 0, hi = evs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (evs[mid].t < start - 1e-9) lo = mid + 1;
+    else hi = mid;
+  }
+  const inWindow: SimEvent[] = [];
+  for (let i = lo; i < evs.length && evs[i].t < start + period - 1e-9; i++) inWindow.push(evs[i]);
+  tick(inWindow.length + 1);
   const steps: Step[] = [];
   let cursor = start;
   inWindow.forEach((e, i) => {
@@ -920,8 +1508,34 @@ function stepsOf(evs: SimEvent[], start: number, period: number): Step[] {
   return steps;
 }
 
-function lastEnd(evs: SimEvent[]) {
-  return evs.reduce((m, e) => Math.max(m, e.t + e.delta), 0);
+/**
+ * The width of each event's step, as stepsOf gives it in the loop (from `start`, `period` long) that holds the
+ * event: its delta, cut at the next onset or at the end of that loop (no end when `period` is Infinity).
+ */
+function stepWidths(evs: SimEvent[], start: number, period: number): number[] {
+  const out: number[] = [];
+  let j = 0;
+  for (let i = 0; i < evs.length; i++) {
+    const e = evs[i];
+    if (j <= i) j = i + 1;
+    while (j < evs.length && Math.abs(evs[j].t - e.t) < 1e-9) j++;
+    const loopEnd = Number.isFinite(period) ? start + period * (Math.floor((e.t - start) / period + 1e-9) + 1) : Infinity;
+    const next = Math.min(j < evs.length ? evs[j].t : Infinity, loopEnd);
+    out.push(Math.max(1e-9, Math.min(e.delta > 0 ? e.delta : next - e.t, next - e.t)));
+  }
+  return out;
+}
+
+/** Whether an event's length is written as a legato (its sustain over its step): not for percussive sounds. */
+function holdsLength(e: SimEvent, info: SynthInfo | null): boolean {
+  if (e.instrument.startsWith("__osc")) return false;
+  if (e.instrument === "__midi") {
+    const cmd = e.ev.get("midicmd");
+    return !(cmd instanceof Sym) || cmd.name === "noteOn";
+  }
+  if (e.ev.get("type") instanceof Sym && (e.ev.get("type") as Sym).name === "dirt") return false;
+  const percussive = (info?.fixed.some((f) => f.control === "hold") ?? false) || (info?.sample !== null && info?.sample !== undefined && !info.fixed.some((f) => f.control === "release"));
+  return !percussive || !!info?.port;
 }
 
 /** Widths as whole numbers (the smallest that keep them exact). */
@@ -934,7 +1548,14 @@ function toWeights(widths: number[], note: (s: string) => void): number[] {
     }
   }
   note("Some durations are not simple fractions of a beat: they are rounded to 1/96 beat.");
-  return widths.map((w) => Math.max(1, Math.round(w * 96)));
+  // Each step ends at its time rounded, so the rounding does not add up over a long loop.
+  let at = 0, done = 0;
+  return widths.map((w) => {
+    at += w;
+    const step = Math.max(1, Math.round(at * 96) - done);
+    done += step;
+    return step;
+  });
 }
 
 function chooseCycle(periods: number[]): number {
@@ -957,7 +1578,13 @@ function isWholeRatio(a: number, b: number) {
 
 // ---------------------------------------------------------------- writing values
 
-function writeControl(key: string, cells: Cell[], weights: number[], mult: number, nextToken: () => number, wctx: WriteCtx): string | null {
+/**
+ * A control's values, one cell per step (GAP where no event starts), each step as wide as its own loop has it.
+ * `loops` gives how many of the cells each loop of the rhythm holds (the first and last loops of a part may
+ * differ from the others): one loop is one sequence; several are one sequence slowed down over them when that is
+ * exact, else cat() of one sequence per loop, so that every value starts at its own event's onset.
+ */
+function writeControl(key: string, cells: Cell[], weights: number[], loops: number[], nextToken: () => number, wctx: WriteCtx): string | null {
   const real = cells.filter((c) => c !== GAP);
   if (real.length === 0) return null;
   if (real.every((c) => c === null)) return null;
@@ -975,34 +1602,58 @@ function writeControl(key: string, cells: Cell[], weights: number[], mult: numbe
     if (c === GAP) filled.push(last);
     else { filled.push(c); last = c; }
   }
-  if (!hasToken) {
+  // The steps from `from` to `to` as a sequence (runs of one value merged when `merge`).
+  const run = (texts: (i: number) => string, merge: boolean, from: number, to: number) => {
     const items: string[] = [];
     const ws: number[] = [];
-    filled.forEach((c, i) => {
-      const text = miniValue(c, isNote);
-      if (items.length && items[items.length - 1] === text) ws[ws.length - 1] += weights[i];
+    for (let i = from; i < to; i++) {
+      const text = texts(i);
+      if (merge && items.length && items[items.length - 1] === text) ws[ws.length - 1] += weights[i];
       else { items.push(text); ws.push(weights[i]); }
-    });
+    }
     const g = ws.map((w) => Math.round(w * 1000)).reduce((a, b) => gcd(a, b));
-    const ints = ws.map((w) => Math.round((w * 1000) / (g || 1)));
-    const body = seq(items, ints);
-    return str(mult > 1 ? "[" + body + "]/" + mult : body);
-  }
+    return { items, ws, body: seq(items, ws.map((w) => Math.round((w * 1000) / (g || 1)))) };
+  };
+  // Several loops: one sequence slowed down over them ("[...]/n") when every value then starts exactly on its
+  // onset (n a power of two, every change a binary fraction of a loop: no rounding); otherwise cat() of one
+  // sequence per loop, each exactly one cycle, laid out like the rhythm's own loop.
+  const sequence = (texts: (i: number) => string, merge: boolean) => {
+    const n = loops.length;
+    if (n === 1) return str(run(texts, merge, 0, cells.length).body);
+    const whole = run(texts, merge, 0, cells.length);
+    const total = whole.ws.reduce((a, b) => a + b, 0);
+    let at = 0;
+    const even = loops.every((size) => { const w = weights.slice(at, at + size).reduce((a, b) => a + b, 0); at += size; return Math.abs(w * n - total) < 1e-9; });
+    let cum = 0;
+    const exact = even && isBinary(1 / n) && whole.ws.every((w) => isBinary(((cum += w) * n) / total));
+    if (exact) return str("[" + whole.body + "]/" + n);
+    const bodies: string[] = [];
+    at = 0;
+    for (const size of loops) {
+      bodies.push(run(texts, merge, at, at + size).body);
+      at += size;
+    }
+    const args = bodies.map(str);
+    if (args.join(", ").length <= 60) return "cat(" + args.join(", ") + ")";
+    // A long list: a few loops per line.
+    const rows: string[] = [];
+    for (const a of args) {
+      if (rows.length && rows[rows.length - 1].length + a.length + 2 <= 72) rows[rows.length - 1] += ", " + a;
+      else rows.push(a);
+    }
+    return "cat(\n    " + rows.join(",\n    ") + "\n  )";
+  };
+  if (!hasToken) return sequence((i) => miniValue(filled[i], isNote), true);
   // Random values mixed with fixed ones: squeeze picks one of them per step.
   const choices: string[] = [];
   const index: string[] = [];
-  const ws: number[] = [];
-  filled.forEach((c, i) => {
+  filled.forEach((c) => {
     const code = c instanceof RandToken || c instanceof SigCell ? valueCode(c, isNote, nextToken, wctx) : str(miniValue(c, isNote));
     let k = choices.indexOf(code);
     if (k < 0 || c instanceof RandToken) { choices.push(code); k = choices.length - 1; }
     index.push(String(k));
-    ws.push(weights[i]);
   });
-  const g = ws.map((w) => Math.round(w * 1000)).reduce((a, b) => gcd(a, b));
-  const ints = ws.map((w) => Math.round((w * 1000) / (g || 1)));
-  const body = seq(index, ints);
-  return "squeeze(" + str(mult > 1 ? "[" + body + "]/" + mult : body) + ", [" + choices.join(", ") + "])";
+  return "squeeze(" + sequence((i) => index[i], false) + ", [" + choices.join(", ") + "])";
 }
 
 function cellKey(c: Cell): string {
@@ -1140,7 +1791,7 @@ function listCode(items: Value[]) {
 
 function listItem(v: Value) {
   if (typeof v === "number") return fmt(v);
-  return JSON.stringify(describeText(v));
+  return str(describeText(v));
 }
 
 /** A value inside a mini-notation string. */
@@ -1166,9 +1817,9 @@ function noteName(m: number): string {
 
 function literal(v: Value): string {
   if (typeof v === "number") return fmt(v);
-  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "string") return str(v);
   if (Array.isArray(v)) return arrayLiteral(v);
-  if (v instanceof Sym) return JSON.stringify(v.name);
+  if (v instanceof Sym) return str(v.name);
   return "0";
 }
 
@@ -1183,18 +1834,96 @@ function seq(items: string[], weights: number[]): string {
   return items.map((it, i) => (weights[i] === 1 ? it : it + "@" + fmt(weights[i]))).join(" ");
 }
 
+/** A string literal: JSON's, with the line and paragraph separators escaped too. */
 function str(s: string) {
-  return JSON.stringify(s);
+  return JSON.stringify(s).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
 
+/**
+ * A line comment. Line breaks (including U+2028 and U+2029, which end a JavaScript comment), other control
+ * characters and invisible or direction-changing characters become spaces, so the text cannot end the comment
+ * and become code, or hide what follows it.
+ */
+function commentLine(text: string): string {
+  return "// " + text.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, " ");
+}
+
+/**
+ * The words a binding may not be called: JavaScript's reserved words (strict mode, in which the editor runs the
+ * code), names the evaluator uses, and globals the code may use itself.
+ */
+const RESERVED = new Set((
+  "break case catch class const continue debugger default delete do else enum export extends false finally for function if "
+  + "import in instanceof new null return super switch this throw true try typeof var void while with yield let static "
+  + "implements interface package private protected public await async of arguments eval undefined NaN Infinity "
+  + "globalThis window self document Math Number String Object Array JSON Symbol Date console Error Function Promise "
+  + "Reflect Proxy Map Set WeakMap BigInt RegExp parseInt parseFloat isNaN isFinite"
+).split(" "));
+
+/**
+ * The globals TidalJS defines (setupGlobalFunctions and _setupTidalLibrary in tidal.js): a binding with one of
+ * these names would hide it from the code after it. The test suite checks that this list has every one.
+ */
+export const TIDAL_GLOBALS: ReadonlySet<string> = new Set((
+  "TidalJS PatternBuilder tidal sound s stack layer cat slowcat fastcat randcat euclidFull samples struct silence sine cosine "
+  + "saw isaw tri square rand irand perlin scale scaleList chord chordList arp fit setBus bus slider toggle midicc midibend "
+  + "miditouch keytouch midikeys oscIn oscplay envelope controlLayout setCPS setcps setTempo stopAll hush choose wchoose "
+  + "cycleChoose setOscUrl midiOutputs record stopRecording exportPattern n note freq midinote gain pan lpf hpf bpf "
+  + "resonance delay reverb size orbit distortion crush vowel speed begin end loop legato sustain attack release nudge vel "
+  + "ccn ccv pgm midichan delaytime delayfeedback lock shape coarse cut accelerate djf hpq bpq amp octave unit distort "
+  + "tremolorate tremolodepth phaserrate phaserdepth ring ringf hold decay sustainlevel penv pattack pdecay pcurve peak "
+  + "peakq peakgain vib vibmod portamento voice detune semitone rate lfo squiz waveloss krush kcutoff triode octer octersub "
+  + "octersubsub fshift fshiftnote fshiftphase leslie lrate lsize freeze comb smear scram binshift hbrick lbrick dry "
+  + "freeverb freeroom freedamp cps nrpn nrpnn nrpnv tie lpenv lpattack lpdecay lpsustain lprelease hpenv hpattack hpdecay "
+  + "hpsustain hprelease bpenv bpattack bpdecay bpsustain bprelease peakenv peakattack peakdecay peaksustain peakrelease "
+  + "cutoff ctf hcutoff bandf room sz velocity lpq hresonance bandq delayt delayfb dfb sus att rel tremr tremdp phasr "
+  + "phasdp vibrato up glide run scan toScale markovPat lindenmayer fromList fastFromList listToPat fromMaybes timeCat "
+  + "timecat wrandcat binaryN binary ascii necklace brand brandBy chooseBy wchooseBy select squeeze pickF selectF sew "
+  + "stitch wedge spread fastspread sine2 cosine2 saw2 isaw2 tri2 square2 envL envLR envEq envEqR stepcat s_cat stepalt "
+  + "stepzip ur inhabit swap weaveWith weave snowball sig perlinWith perlin2With perlin2 interlace seqP seqPLoop "
+  + "fastAppend slowAppend spreadf toScaleBy fitSlices resetCycles setOutput first once asap only panic setbpm getcps "
+  + "getnow setCycle d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11 d12 d13 d14 d15 d16 p xfadeIn xfade jumpIn jump jumpMod jumpInNext "
+  + "jumpModOffset histpan waitT clutchIn clutch anticipateIn anticipate interpolateIn interpolate wait mortal mute unmute "
+  + "solo unsolo unmuteAll unsoloAll testAudio"
+).split(" "));
+
+/** Can the converted code declare a binding with this name? */
+export function isSafeBinding(name: string): boolean {
+  return /^[A-Za-z_$][\w$]*$/.test(name) && !name.startsWith("__") && !RESERVED.has(name) && !TIDAL_GLOBALS.has(name) && !TAKEN.has(name);
+}
+
+/** A binding for a part, from its label (an instrument's name): always a safe identifier, never one used before. */
 function uniqueName(label: string, used: Set<string>) {
-  let base = label.replace(/[^A-Za-z0-9_$]/g, "_").replace(/^([0-9])/, "_$1") || "part";
+  let base = label.replace(/[^A-Za-z0-9_$]/g, "_").replace(/^([0-9])/, "_$1").replace(/^__+/, "_") || "part";
   base = base.charAt(0).toLowerCase() + base.slice(1);
-  if (TAKEN.has(base)) base += "Part";
+  if (!isSafeBinding(base)) base += "Part";
   let name = base;
-  for (let i = 2; used.has(name); i++) name = base + i;
+  for (let i = 2; used.has(name) || !isSafeBinding(name); i++) name = base + i;
   used.add(name);
   return name;
+}
+
+/**
+ * The converted code, checked to parse as the editor runs it (a strict function body beside the evaluator's own
+ * names): a mistake of the converter is a clear error, never code that breaks in the editor. Where the page
+ * forbids compiling code (a Content Security Policy), the check is left out.
+ */
+function checked(code: string): string {
+  let error: unknown = null;
+  try {
+    new Function("__out", "__at", "\"use strict\";\n" + code);
+  } catch (err) {
+    error = err;
+  }
+  if (error instanceof SyntaxError) {
+    throw new Error("The importer wrote TidalJS code that does not parse (" + error.message + "): please report the SuperCollider file that caused it.");
+  }
+  return code;
+}
+
+/** a mod n, from 0 to n. */
+function mod(a: number, n: number): number {
+  return ((a % n) + n) % n;
 }
 
 /** A value as a bus index: a bus, a number, or an argument of the synth (the event's value, else its default). */
@@ -1487,11 +2216,12 @@ function randomRhythm(part: Part, ctx: Context, label: string, comment: string[]
     const sustainOf = (e: SimEvent, s: RhythmStep) => (e.ev.get("__synth") && e.delta < 1e-9 ? s.length : e.sustain);
     const placed = steps.flatMap((s, k) => s.events.map((e) => ({ ...e, t: k, delta: 1, sustain: s.length > 0 ? sustainOf(e, s) / s.length : 1 })));
     const loop = durationLoop(steps.map((s) => s.dur));
-    const w = loop && placed.length ? writePart({ ...part, events: placed, rests: [], end: null }, ctx) : null;
+    const w = loop && placed.length ? writePart({ ...part, events: placed, rests: [], start: 0, end: null, horizon: steps.length }, ctx) : null;
     if (w && loop) {
       ctx.note("Line " + part.line + " has random durations: rhythm() plays its " + (steps.some((s) => !s.events.length) ? "events and rests" : "events")
         + " one after another, each with a new random duration (TidalJS's random values repeat after 300 steps).");
-      return { ...w, label, comment: [...comment, ...w.comment.filter((c) => !comment.includes(c))], rhythm: { durs: loop, steps: w.period } };
+      // The first step starts where the part starts.
+      return { ...w, label, comment: [...comment, ...w.comment.filter((c) => !comment.includes(c))], rhythm: { durs: loop, steps: w.period }, start: part.start };
     }
   }
   return randomStretches(part, ctx, label, comment);
@@ -1564,12 +2294,13 @@ function randomStretches(part: Part, ctx: Context, label: string, comment: strin
     const from = start + k * W;
     const evs = part.events.filter((e) => e.t >= from - 1e-9 && e.t < from + W - 1e-9).map((e) => ({ ...e, t: e.t - from }));
     if (evs.length === 0) { bodies.push("silence"); continue; }
-    const w = writePart({ ...part, events: evs, end: W, drone: false }, ctx);
-    if (w) bodies.push(w.body.split("\n").join("\n  "));
+    const w = writePart({ ...part, events: evs, start: 0, end: W, horizon: W, drone: false }, ctx);
+    if (w) bodies.push(firstLoop(w.body, 0).split("\n").join("\n  "));
   }
   if (bodies.every((b) => b === "silence")) return null;
   ctx.note("Line " + part.line + " has random durations: " + K + " random " + W + "-beat stretches of it are written, and randcat picks one each cycle (SuperCollider never repeats).");
-  return { label, comment, body: "randcat(\n  " + bodies.join(",\n  ") + "\n)", period: W };
+  // The stretches start at the part's first event.
+  return { label, comment, body: "randcat(\n  " + bodies.join(",\n  ") + "\n)", period: W, start };
 }
 
 /**
@@ -1636,6 +2367,15 @@ function writeMidiKeys(rec: PlayRecord, ctx: Context): { comment: string[]; body
 }
 
 /** A ratio as exact code: 8 / 3 rather than 2.66667, so long loops do not drift. */
+/** How early a bound that rounding could cross is written, in cycles (see edge in emitTidal). */
+const EDGE = "1e-9";
+
+/** Whether x (in cycles) is a binary fraction that sums of such numbers keep exactly (k / 2^20). */
+function isBinary(x: number): boolean {
+  const scaled = x * 2 ** 20;
+  return Number.isInteger(scaled) && Math.abs(scaled) < 2 ** 32;
+}
+
 function ratioCode(x: number): string {
   if (Math.abs(Number(fmt(x)) - x) < 1e-12 * Math.max(1, x)) return fmt(x);
   for (let d = 2; d <= 192; d++) {

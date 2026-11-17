@@ -1,0 +1,14 @@
+{
+  "about": "Expected events, worked out by hand from SuperCollider's semantics (sclang was not run): timingOffset (in beats) moves when an event plays, not the stream's time nor its sustain. First Pbind: degrees 0 and 4 (MIDI 60, 67), one per beat, offsets 0.5 and 0: onsets 0.5, 1, 2.5, 3, each lasting dur 1 * legato 0.8 = 0.8 beats, although the next onset comes 0.5 beats after the first one. Second Pbind: degrees 7 and 9 (MIDI 72, 76), offsets 0 and -0.5: onsets 0, 0.5, 2, 2.5, each lasting 1 * 0.5 = 0.5 beats, although the step of the first one ends at the early next onset. Tempo 1 beat per second.",
+  "seconds": 4,
+  "events": [
+    { "time": 0, "note": 72, "duration": 0.5 },
+    { "time": 0.5, "note": 60, "duration": 0.8 },
+    { "time": 0.5, "note": 76, "duration": 0.5 },
+    { "time": 1, "note": 67, "duration": 0.8 },
+    { "time": 2, "note": 72, "duration": 0.5 },
+    { "time": 2.5, "note": 60, "duration": 0.8 },
+    { "time": 2.5, "note": 76, "duration": 0.5 },
+    { "time": 3, "note": 67, "duration": 0.8 }
+  ]
+}

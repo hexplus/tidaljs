@@ -77,7 +77,7 @@ export const DOCS: Record<string, Doc> = {
     samples: D(
         'Loads sample banks: recorded sounds. "github:user/repo" reads the strudel.json manifest of a GitHub repository; a URL loads any strudel.json; an object maps bank names to files. A loaded bank replaces the synth of the same name, and .n() or name:n picks the file.',
         'samples("github:tidalcycles/dirt-samples")\nsound("bd*2 [~ bd:3] sn:2 hh*2")',
-        'The first time, the files download in the background; the code runs again once they are loaded. Hover a sound name to see how many files its bank has.',
+        'The first time, the files download in the background; each sound plays its file once it has loaded (nothing runs again). A load that fails is reported once, with Retry. Hover a sound name to see how many files its bank has.',
         ['sound', 'n', 'chop', 'speed', 'begin'],
     ),
 

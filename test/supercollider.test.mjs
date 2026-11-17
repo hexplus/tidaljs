@@ -9,7 +9,9 @@ import vm from 'node:vm';
 import { convertSuperCollider, looksLikeSuperCollider } from '../src/supercollider/index.ts';
 import { parse } from '../src/supercollider/parser.ts';
 import { Interpreter } from '../src/supercollider/interpreter.ts';
-import { parseImport } from '../src/library.ts';
+import { parseImport, parseImportAsync } from '../src/library.ts';
+import { convertSuperColliderAsync } from '../src/supercollider/client.ts';
+import { isSafeBinding, TIDAL_GLOBALS } from '../src/supercollider/emit.ts';
 
 vm.runInThisContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), { filename: 'tidal.js' });
 console.warn = () => {};
@@ -783,6 +785,464 @@ Pbind(\instrument, \sq, \cutoff, ~c.asMap, \dur, 0.5).play;`, 2);
   const { js } = play(String.raw`SynthDef(\held, { |freq = 220, amp = 0.1, gate = 1| Out.ar(0, Saw.ar(freq) * EnvGen.kr(Env.asr(0.1, 1, 0.5), gate, doneAction: 2) * amp ! 2) }).add;
 Synth(\held);`, 1);
   ok(js.includes('.legato(1)'), 'it holds for the whole loop');
+}
+
+// ---------------------------------------------------------------- bounded conversions
+
+/** Converts, and returns the code with the time it took (in milliseconds). */
+function timed(code, options) {
+  const t0 = Date.now();
+  const result = convertSuperCollider(code, 'test.scd', options);
+  return { ...result, ms: Date.now() - t0 };
+}
+
+// Empty patterns repeated forever hang SuperCollider: the conversion ends with a note instead of hanging.
+for (const code of [
+  'Pn(Pseq([], inf), inf).play;',
+  'Pbind(\\degree, Pn(Pseq([], inf), inf), \\dur, 0.5).play;',
+  'Pbind(\\degree, Pseq([Pseq([], 1)], inf)).play;',
+  'Pseq([Pseq([], 1)], inf).play;',
+  'Ppar([], inf).play;',
+]) {
+  const { code: js, parts, ms } = timed(code);
+  eq(parts, 0, code);
+  ok(/would hang/.test(js), 'the note says why nothing plays: ' + code);
+  ok(ms < 5000, code + ' took ' + ms + ' ms');
+}
+// A routine whose loop never waits: noted, and the rest of the file still converts.
+{
+  const { js, events } = play('Routine({ loop { } }).play;\nPbind(\\degree, 1, \\dur, 1).play;', 3);
+  ok(/routine loops without waiting/.test(js), 'the routine that never waits is noted');
+  eq(events.map((e) => [e.time, e.note]), [[0, 62], [1, 62], [2, 62]]);
+}
+{
+  // It played a synth before it got stuck: that one is kept (and plays once: the piece then stops).
+  const { js, events } = play('Routine({ Synth(\\default, [\\freq, 300]); 1.wait; loop { Synth(\\default, [\\freq, 600]) } }).play;', 3);
+  ok(/stops at beat 1/.test(js), 'where it got stuck');
+  ok(events.length > 0 && events.every((e) => e.freq === 300), 'only the synth before the endless loop plays');
+}
+// Events that take no time, forever: SuperCollider hangs; nothing is written.
+eq(timed('Pbind(\\dur, 0).play;').parts, 0);
+// A statement that never ends at the top level is noted and skipped; the next one runs.
+{
+  const { js, events } = play('inf.do { |i| i };\nPbind(\\degree, 2, \\dur, 1).play;', 2);
+  ok(/Line 1 never finishes/.test(js), 'the endless statement is noted');
+  eq(events.map((e) => e.note), [64, 64]);
+}
+// An array too large to make: the statement is noted, the rest converts.
+{
+  const { code: js, parts } = timed('a = 0 ! 1e9;\nb = Array.fill(inf, 1);\nPbind(\\degree, 0).play;');
+  eq(parts, 1);
+  ok(/an array of 1000000000 items/.test(js) && /infinitely many/.test(js), 'the arrays that are too large are noted');
+}
+// Code nested too deeply is a syntax error, not a stack overflow.
+assert.throws(() => convertSuperCollider('x = ' + '['.repeat(3000) + '1' + ']'.repeat(3000) + ';'), /syntax error.*nested more than/i);
+passed++;
+// The whole conversion has a budget: past it (or past its time limit) it stops with a clear error.
+assert.throws(() => convertSuperCollider('Pbind(\\degree, Pseq((0..100), inf)).play;', 'x.scd', { maxSteps: 2000 }), /import was stopped.*more work/);
+passed++;
+assert.throws(() => convertSuperCollider('Pbind(\\degree, Pseq((0..100), inf)).play;', 'x.scd', { timeLimitMs: -1 }), /import was stopped.*took longer/);
+passed++;
+// Dense regular material (an event every 0.05 beats: 6000 events reach only 300 beats) still finds its loop, quickly.
+{
+  const t0 = Date.now();
+  const { js, events } = play('Pbind(\\dur, 0.05, \\degree, Pseq([0, 1, 2, 3], inf)).play;', 2);
+  ok(Date.now() - t0 < 5000, 'dense material converts in ' + (Date.now() - t0) + ' ms');
+  ok(!/never repeats/.test(js) && js.includes('"c4 d4 e4 f4"'), 'its loop of four notes is found');
+  eq(events.length, 40);
+  events.forEach((e, i) => { near(e.time, i * 0.05, 'time'); eq(e.note, [60, 62, 64, 65][i % 4]); });
+}
+// Aperiodic material (each duration 0.001 beats longer than the last) ends with its first 16 beats looping.
+{
+  const t0 = Date.now();
+  const { js, events } = play('Pbind(\\dur, Pseries(0.05, 0.001, inf)).play;', 16);
+  ok(Date.now() - t0 < 5000, 'aperiodic material converts in ' + (Date.now() - t0) + ' ms');
+  ok(/rhythm of line 1 never repeats: its first 16 beats loop/.test(js), 'the note says the rhythm never repeats');
+  // SuperCollider: event k at the sum of the durations before it (written to the nearest 1/96 beat).
+  const ref = [];
+  for (let k = 0, time = 0; time < 16 - 1e-9; time += 0.05 + 0.001 * k, k++) ref.push(time);
+  eq(events.length, ref.length);
+  events.forEach((e, i) => near(e.time, ref[i], 'time', 1 / 96));
+}
+// Dense aperiodic material: the period search stops at the 6000 events played (449.95 beats here), and says so.
+{
+  const { code: js, ms } = timed('Pbind(\\dur, (Pseries(0, 1, inf).sqrt.floor % 2 + 1) * 0.05).play;');
+  ok(ms < 8000, 'dense aperiodic rhythm converts in ' + ms + ' ms');
+  ok(/does not repeat within its first 6000 events \(449\.95 beats\): its first 16 beats loop/.test(js), 'the note gives how far it was played');
+  ok(!/legato of line 1 never repeats/.test(js), 'a value that never changes is not reported as never repeating');
+  const notes = timed('Pbind(\\dur, 0.05, \\degree, Pseries(0, 1, inf).sqrt.floor).play;');
+  ok(notes.ms < 8000 && /note of line 1 never repeats/.test(notes.code), 'a dense value that never repeats');
+}
+// The editor's converter: in a worker in the browser; here (no Worker) the same conversion, with the same API.
+{
+  const code = 'Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5).play;';
+  const r = await convertSuperColliderAsync(code, 'tune.scd', { timeoutMs: 10000 });
+  eq(r, convertSuperCollider(code, 'tune.scd'));
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(convertSuperColliderAsync(code, 'tune.scd', { signal: aborted.signal }), (err) => err.name === 'AbortError' && /cancelled/.test(err.message));
+  passed++;
+  await assert.rejects(convertSuperColliderAsync('Pbind(\\dur, 1', 'x.scd'), /syntax error/i);
+  passed++;
+  const imported = await parseImportAsync(code, 'my-tune.scd');
+  eq([imported.kind, imported.from, imported.title, imported.parts], ['code', 'supercollider', 'my tune', 1]);
+  eq((await parseImportAsync('sound("bd")', 'beat.js')).kind, 'code');
+}
+
+// ---------------------------------------------------------------- when parts start and stop
+
+// An intro that plays once beside a part that plays on: the intro is not repeated.
+{
+  const { js, events } = play('Ppar([Pbind(\\degree, Pseq([0, 1, 2, 3], 1), \\dur, 1), Pbind(\\degree, 7, \\dur, 0.5)]).play;', 12);
+  ok(js.includes('It plays once, from beat 0 to beat 4') && js.includes('.playFor(0, 1)'), 'the intro plays once');
+  eq(events.filter((e) => e.note !== 72).map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65]]);
+  eq(events.filter((e) => e.note === 72).map((e) => e.time), Array.from({ length: 24 }, (_, i) => i * 0.5));
+}
+// A part that starts four beats later starts there, not at the beginning.
+{
+  const { js, events } = play('Ptpar([0, Pbind(\\degree, 0, \\dur, 1), 4, Pbind(\\degree, Pseq([4, 5], inf), \\dur, 0.5)]).play;', 8);
+  ok(js.includes('It starts at beat 4') && !/plays from the start/.test(js), 'the late start is kept');
+  eq(events.filter((e) => e.note !== 60).map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, i) => [4 + i * 0.5, i % 2 ? 69 : 67]));
+  eq(events.filter((e) => e.note === 60).length, 8);
+}
+// A start off the loop's grid keeps every event of the loop (here the second note of each 2-beat loop).
+{
+  const { events } = play('Ptpar([1.5, Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1)]).play;', 5);
+  eq(events.map((e) => [e.time, e.note]), [[1.5, 60], [2.5, 67], [3.5, 60], [4.5, 67]]);
+}
+// A section that plays once, then one that plays on.
+{
+  const { events } = play('Pseq([Pbind(\\degree, Pseq([0, 1], 1), \\dur, 1), Pbind(\\degree, 4, \\dur, 0.5)]).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 67], [2.5, 67], [3, 67], [3.5, 67]]);
+}
+// A routine that waits two beats first.
+{
+  const { events } = play('Routine({ 2.wait; loop { Synth(\\default, [\\freq, 300]); 1.wait } }).play;', 5);
+  eq(events.map((e) => e.time), [2, 3, 4]);
+}
+// Everything stops: the whole piece loops as a preview, said in the code, each part within its own beats.
+{
+  const { js, events } = play('Ptpar([0, Pbind(\\degree, Pseq([0, 1, 2, 3], 1), \\dur, 1), 2, Pbind(\\degree, Pseq([7, 7], 1), \\dur, 0.5)]).play;', 8);
+  ok(js.includes('.timeLoop(1) // a preview: SuperCollider plays this once (4 beats); here it loops'), 'the loop is a preview, and says so');
+  const once = [[0, 60], [1, 62], [2, 64], [2, 72], [2.5, 72], [3, 65]];
+  eq(events.map((e) => [e.time, e.note]), [...once, ...once.map(([time, n]) => [time + 4, n])]);
+}
+// A negative timingOffset: every event plays that much earlier; the one before the start is left out, with a note.
+{
+  const { js, events } = play('Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1, \\timingOffset, -0.25).play;', 4);
+  ok(/timingOffset moves events of line 1 before the start/.test(js), 'the events before the start are noted');
+  eq(events.map((e) => [e.time, e.note]), [[0.75, 62], [1.75, 60], [2.75, 62], [3.75, 60]]);
+}
+
+// ---------------------------------------------------------------- simultaneous voices, alternating SynthDefs
+
+// Two synths a routine starts at the same instant: both play, each with its own frequency and length.
+{
+  const { js, events } = play('Routine({ loop { Synth(\\default, [\\freq, 200]); Synth(\\default, [\\freq, 500]); 0.5.wait } }).play;', 2);
+  ok(js.includes('stack([') && js.includes('.freq(200)') && js.includes('.freq(500)'), 'one voice each');
+  eq(events.map((e) => [e.time, e.freq]), [0, 0.5, 1, 1.5].flatMap((time) => [[time, 200], [time, 500]]));
+  ok(events.every((e) => e.legato === undefined || e.legato > 0), 'no voice has a legato of 0');
+}
+
+/**
+ * The golden fixtures: a SuperCollider file and the events it plays, compared one by one (within `windows`, in
+ * seconds, when given: else from 0 to `seconds`). `sounding`: [time, n] pairs, how many notes sound at that time.
+ */
+for (const name of ['voices', 'alternating', 'routine-children', 'timing-offset', 'stop-replay', 'periodic-gaps', 'overlap', 'second-clock',
+  'quant-onsets', 'quant-stop', 'pdef-routine-order', 'pdef-stop-routines', 'quant-phase-values']) {
+  const dir = new URL('./fixtures/supercollider/', import.meta.url);
+  const source = fs.readFileSync(new URL(name + '.scd', dir), 'utf8');
+  const golden = JSON.parse(fs.readFileSync(new URL(name + '.json', dir), 'utf8'));
+  const { events } = play(source, golden.seconds);
+  const windows = golden.windows ?? [[0, golden.seconds]];
+  const pitch = (e) => e.note ?? e.freq ?? 0;
+  const want = golden.events.slice().sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
+  const got = events.filter((e) => windows.some(([from, to]) => e.time >= from - 1e-9 && e.time < to - 1e-9)).sort((a, b) => a.time - b.time || pitch(a) - pitch(b));
+  eq(got.length, want.length, name + ': the number of events (voices included)');
+  want.forEach((w, i) => {
+    const g = got[i];
+    for (const [key, value] of Object.entries(w)) {
+      if (key === 'absent') { for (const k of value) eq(g[k], undefined, name + ' event ' + i + ' has no ' + k); continue; }
+      if (key === 'duration') { near((g.legato ?? NaN) * g.length, value, name + ' event ' + i + ' duration'); continue; }
+      near(g[key], value, name + ' event ' + i + ' ' + key);
+    }
+  });
+  for (const [time, n] of golden.sounding ?? []) {
+    eq(events.filter((e) => e.time <= time + 1e-9 && time < e.time + e.legato * e.length - 1e-9).length, n, name + ': notes sounding at ' + time);
+  }
+  if (name === 'voices') near(got[1].amp / got[0].amp, 0.5, 'the second voice keeps its own level');
+}
+
+// ---------------------------------------------------------------- lifetimes and lengths
+
+// A routine that ends starts an endless Pbind: the Pbind plays on (the routine's end, or the 512 beats the
+// importer follows, is not where it ends). Event k plays degree [0, 2, 4][k % 3] at beat k / 4.
+{
+  const { js, events } = play('Routine({ Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 0.25).play; 2.wait; }).play;', 514);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'the Pbind a finished routine started is not written as ending:\n' + js);
+  const late = events.filter((e) => e.time >= 510);
+  eq(late.map((e) => [e.time, e.note]), Array.from({ length: 16 }, (_, i) => [510 + i / 4, [60, 64, 67][(2040 + i) % 3]]));
+  late.forEach((e) => near(e.legato * e.length, 0.2, 'each note lasts dur * legato'));
+}
+// A pattern a finished routine started, cut by the most events the importer follows (6000, 300 beats here): it
+// plays on too.
+{
+  const { js, events } = play('Routine({ Pbind(\\degree, Pseq([0, 1, 2], inf), \\dur, 0.05).play; 1.wait; }).play;', 401);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'an event cap is not an end');
+  // Event k at beat k / 20: the 8000th at beat 400.
+  eq(events.filter((e) => e.time >= 400 - 1e-9).map((e) => e.note), Array.from({ length: 20 }, (_, i) => [60, 62, 64][(8000 + i) % 3]));
+}
+// A routine stops the pattern it started: it ends there (events at beats 0 to 1.75 only), and so does the piece.
+{
+  const { js, events } = play('Routine({ var p = Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 0.25).play; 2.wait; p.stop; }).play;', 2);
+  ok(/plays once \(2 beats\)/.test(js), 'the piece ends where the pattern is stopped');
+  eq(events.map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, k) => [k / 4, [60, 64, 67][k % 3]]));
+}
+// A routine stops a pattern the file started, at beat 3: it plays until then (not at all, before).
+{
+  const { js, events } = play('x = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5).play;\nRoutine({ 3.wait; x.stop; }).play;', 3);
+  ok(/plays once \(3 beats\)/.test(js), 'it ends at beat 3');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64], [1, 60], [1.5, 64], [2, 60], [2.5, 64]]);
+}
+// A Ppar whose finite pattern ends while the other plays on: it ends after its own four events.
+{
+  const { events } = play('Ppar([Pbind(\\degree, Pseq([0, 1, 2, 3]), \\dur, 1), Pbind(\\degree, 7, \\dur, 0.5)]).play;', 8);
+  eq(events.filter((e) => e.note !== 72).map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65]]);
+  eq(events.filter((e) => e.note === 72).length, 16);
+}
+// A routine that loops forever, starting the same pattern every 4 beats: each playback ends, the piece does not.
+{
+  const { js, events } = play('p = Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5);\nRoutine({ loop { p.play; 4.wait } }).play;', 520);
+  ok(!/playFor|timeLoop|plays once/.test(js), 'it plays on');
+  eq(events.filter((e) => e.time >= 512).map((e) => [e.time, e.note]), [[512, 60], [512.5, 62], [516, 60], [516.5, 62]]);
+}
+// ... and starting a new pattern every 4 beats: those after the 512 beats followed are not written, and it says so.
+{
+  const { code: js } = convertSuperCollider('Routine({ loop { Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5).play; 4.wait } }).play;', 'test.scd');
+  ok(!/this plays once|timeLoop/.test(js), 'the piece is not written as ending at the horizon');
+  ok(/the routine loops forever; the patterns it starts are followed for its first 512 beats/.test(js), 'the note says how far it was followed');
+}
+// A timingOffset keeps each note's own length (dur * legato), whatever the width of its step.
+{
+  const { events } = play('Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1, \\timingOffset, Pseq([0.5, 0], inf)).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0.5, 60], [1, 67], [2.5, 60], [3, 67]]);
+  events.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+}
+// So does a step that the next onset (moved early) cuts short, and one that the end of the loop cuts short (Ptpar).
+{
+  const { events } = play('Pbind(\\degree, Pseq([0, 4], inf), \\dur, 1, \\timingOffset, Pseq([0, -0.5], inf)).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 67], [2, 60], [2.5, 67]]);
+  events.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+  const ptpar = play('Ptpar([0, Pbind(\\note, 0, \\dur, 1), 0.5, Pbind(\\note, 7, \\dur, 1)]).play;', 2).events;
+  eq(ptpar.map((e) => [e.time, e.note]), [[0, 60], [0.5, 67], [1, 60], [1.5, 67]]);
+  ptpar.forEach((e) => near(e.legato * e.length, 0.8, 'the note at ' + e.time + ' lasts 0.8 beats'));
+}
+
+// Each .play is a playback of its own (the fixtures stop-replay, periodic-gaps, overlap and second-clock check more).
+// Played, stopped and played again by a routine that then loops forever: the gap stays, the second playback plays
+// on from its own first note (degrees 0 and 2 alternate: event k of it at beat 6 + k).
+{
+  const { js, events } = play('p = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1);\nRoutine({ x = p.play; 4.wait; x.stop; 2.wait; p.play; loop { 1.wait } }).play;', 10);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 64], [2, 60], [3, 64], [6, 60], [7, 64], [8, 60], [9, 64]]);
+  ok(js.includes('.playFor(0, 1)') && js.includes('.stopFor(0, 1.5)'), 'one part per playback, each from its own start');
+  const late = play('p = Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1);\nRoutine({ x = p.play; 4.wait; x.stop; 2.wait; p.play; loop { 1.wait } }).play;', 802).events;
+  eq(late.filter((e) => e.time >= 798).map((e) => [e.time, e.note]), [[798, 60], [799, 64], [800, 60], [801, 64]]);
+}
+// A routine that ends after playing and stopping the same pattern 8 times: one part, its gaps in its loop, once.
+{
+  const { js, parts, events } = play('p = Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1);\nRoutine({ 8.do { x = p.play; 3.wait; x.stop; 1.wait } }).play;', 31);
+  eq(parts, 1);
+  ok(/plays once \(31 beats\)/.test(js), 'it ends where the last playback is stopped');
+  eq(events.map((e) => [e.time, e.note]), Array.from({ length: 8 }, (_, n) => [[4 * n, 60], [4 * n + 1, 62], [4 * n + 2, 64]]).flat());
+}
+// x.resume after x.stop goes on from where the stream stopped (an EventStreamPlayer is not reset).
+{
+  const { events } = play('x = Pbind(\\degree, Pseq([0, 1, 2, 3, 4, 5], inf), \\dur, 1).play;\nRoutine({ 2.wait; x.stop; 2.wait; x.resume; }).play;', 9);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [4, 64], [5, 65], [6, 67], [7, 69], [8, 60]]);
+}
+// A Pdef stopped and played again: each play starts it again, from its first note.
+{
+  const { events } = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2], inf), \\dur, 0.5));\nRoutine({ Pdef(\\a).play; 2.wait; Pdef(\\a).stop; 1.wait; Pdef(\\a).play; 2.wait; Pdef(\\a).stop }).play;', 5);
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64], [1, 60], [1.5, 64], [3, 60], [3.5, 64], [4, 60], [4.5, 64]]);
+}
+// A Pdef that plays already does not start again: played twice at the top of the file it is one part (its last
+// definition), and played again by a routine while it plays it goes on, not from its first note. A finite one that
+// ended does start again.
+{
+  const twice = play('Pdef(\\a, Pbind(\\degree, 0)).play;\nPdef(\\a, Pbind(\\degree, 4)).play;', 3);
+  eq([twice.parts, twice.events.map((e) => [e.time, e.note])], [1, [[0, 67], [1, 67], [2, 67]]]);
+  const again = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1)).play;\nRoutine({ 2.wait; Pdef(\\a).play }).play;', 6);
+  eq(again.events.map((e) => [e.time, e.note]), [[0, 60], [1, 62], [2, 64], [3, 65], [4, 60], [5, 62]]);
+  const ended = play('Pdef(\\f, Pbind(\\degree, Pseq([0, 1]), \\dur, 0.5));\nRoutine({ loop { Pdef(\\f).play; 4.wait } }).play;', 9);
+  eq(ended.events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 62], [4, 60], [4.5, 62], [8, 60], [8.5, 62]]);
+}
+// quant: a pattern played at beat 0.5 with quant 2 starts at beat 2; a Pdef starts on the next beat (its default quant is 1).
+{
+  const { events } = play('p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\nPdef(\\a, Pbind(\\degree, 7, \\dur, 1));\nRoutine({ 0.5.wait; p.play(quant: 2); Pdef(\\a).play; }).play;', 4);
+  eq(events.map((e) => [e.time, e.note]), [[1, 72], [2, 60], [2, 72], [3, 62], [3, 72]]);
+}
+// One quant rule at the top of the file and in routines (the fixture quant-onsets checks more): the same .play at
+// time 0 starts at the same beat (the phase counts at the top of the file too), a negative quant counts bars of 4
+// beats, a phase larger than the quant is added whole (beat 2.5 for [1, 2.5]), and Pdef(\x).quant = q is its quant.
+{
+  const p = 'p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\n';
+  const times = (code, seconds = 8) => play(p + code, seconds).events.map((e) => [e.time, e.note]);
+  for (const quant of ['[4, 1.5]', '[2, 0.5]', '[1, 2.5]', '-1']) {
+    const top = times('p.play(quant: ' + quant + ');');
+    eq(times('Routine({ p.play(quant: ' + quant + ') }).play;'), top, 'quant ' + quant + ' in a routine at time 0 as at the top of the file');
+    eq(times('Routine({ Routine({ p.play(quant: ' + quant + ') }).play(TempoClock(3)) }).play;'), top, 'quant ' + quant + ' in a routine on another clock');
+  }
+  eq(times('p.play(quant: [4, 1.5]);', 4), [[1.5, 60], [2.5, 62], [3.5, 60]]);
+  eq(times('p.play(quant: [1, 2.5]);', 4), [[2.5, 60], [3.5, 62]]);
+  eq(times('Routine({ 0.5.wait; p.play(quant: -1) }).play;', 6), [[4, 60], [5, 62]]);
+  eq(times('Pdef(\\a, p);\nPdef(\\a).quant = 4;\nRoutine({ 0.5.wait; Pdef(\\a).play }).play;', 6), [[4, 60], [5, 62]]);
+}
+// A player stopped while it waits for its quant never plays (the fixture quant-stop checks more): in a routine
+// (played at beat 0.5 with quant 4, stopped at beat 1.5), and at the top of the file (waiting for beat 2, stopped
+// at beat 1). Played again after the stop, a Pdef starts on its own quant from the second play.
+{
+  const p = 'p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\n';
+  const nested = play(p + 'Routine({ 0.5.wait; x = p.play(quant: 4); 1.wait; x.stop; }).play;', 12);
+  eq(nested.events, []);
+  ok(/Line 2: a pattern is stopped at beat 1.5 while it waits for its quant \(beat 4\): it does not play then/.test(nested.js), 'the code says why it does not play');
+  eq(play(p + 'x = p.play(quant: [4, 2]);\nRoutine({ 1.wait; x.stop; }).play;', 12).events, []);
+  const again = play(p + 'Pdef(\\a, p);\nRoutine({ 0.5.wait; Pdef(\\a).play(quant: 4); 1.wait; Pdef(\\a).stop; 1.wait; Pdef(\\a).play }).play;', 6);
+  eq(again.events.map((e) => [e.time, e.note]), [[3, 60], [4, 62], [5, 60]]);
+}
+// Each value plays at its own event's onset, however the part's first and last loops fall (the fixture
+// quant-phase-values checks the first case). Expected by hand: a .play with quant [q, p] at beat b starts at
+// roundUp(b - p % q, q) + p; then the events follow their durs, the values their own Pseqs; amp (on \default)
+// is written as 1.2 * amp. `first` is SuperCollider's single play; past its end, the preview loops it.
+{
+  const pairs = (code, seconds, keys = ['note']) => play(code, seconds).events.map((e) => [e.time, ...keys.map((k) => Math.round(e[k] * 1e9) / 1e9)]);
+  // The finding: a part that starts at beat 0.5 within its loop and ends within a later loop (2.5 beats, so the
+  // preview loops every 2.5 seconds).
+  const repro = 'Pbind(\\midinote, Pseq([60, 61], 1), \\dur, 1).play(quant: [2, 0.5]);';
+  eq(pairs(repro, 2.5), [[0.5, 60], [1.5, 61]], 'quant [2, 0.5]: first pass');
+  eq(pairs(repro, 5), [[0.5, 60], [1.5, 61], [3, 60], [4, 61]], 'quant [2, 0.5]: the preview loop');
+  eq(pairs(repro.replace('\\midinote, Pseq([60, 61], 1)', '\\note, Pseq([0, 1], 1)'), 5), [[0.5, 60], [1.5, 61], [3, 60], [4, 61]], '\\note');
+  // A second control over another period: amp 0.1, 0.2, 0.3 round and round while the notes play twice.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61], 2), \\amp, Pseq([0.1, 0.2, 0.3], inf), \\dur, 1).play(quant: [2, 0.5]);', 5.5, ['note', 'amp']),
+    [[0.5, 60, 0.12], [1.5, 61, 0.24], [2.5, 60, 0.36], [3.5, 61, 0.12], [5, 60, 0.12]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61], inf), \\amp, Pseq([0.1, 0.2, 0.3], inf), \\dur, 1).play(quant: [2, 0.5]);', 7, ['note', 'amp']),
+    [[0.5, 60, 0.12], [1.5, 61, 0.24], [2.5, 60, 0.36], [3.5, 61, 0.12], [4.5, 60, 0.24], [5.5, 61, 0.36], [6.5, 60, 0.12]]);
+  // A phase that is no multiple of the step (half a beat): the loop starts at beat 1, the part at 1.25.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62], 1), \\dur, 0.5).play(quant: [4, 1.25]);', 5.5),
+    [[1.25, 60], [1.75, 61], [2.25, 62], [4, 60], [4.5, 61], [5, 62]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62], inf), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.5).play(quant: [4, 1.25]);', 4.5, ['note', 'amp']),
+    [[1.25, 60, 0.12], [1.75, 61, 0.24], [2.25, 62, 0.12], [2.75, 60, 0.24], [3.25, 61, 0.12], [3.75, 62, 0.24], [4.25, 60, 0.12]]);
+  // Finite parts that end within a loop: five notes over a rhythm of 1.5 beats (they end at beat 5.25), and one
+  // stopped at beat 3.6.
+  eq(pairs('Pbind(\\midinote, Pseq([60, 61, 62, 63, 64], 1), \\amp, Pseq([0.1, 0.2], inf), \\dur, Pseq([1, 0.5], inf)).play(quant: [4, 1.25]);\nPbind(\\midinote, 40, \\dur, 4).play;', 8, ['note', 'amp'])
+    .filter((e) => e[1] !== 40), [[1.25, 60, 0.12], [2.25, 61, 0.24], [2.75, 62, 0.12], [3.75, 63, 0.24], [4.25, 64, 0.12]]);
+  eq(pairs('x = Pbind(\\midinote, Pseq([60, 61, 62], inf), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.5).play(quant: [4, 1.25]);\nRoutine({ 3.6.wait; x.stop }).play;', 5.5, ['note', 'amp']),
+    [[1.25, 60, 0.12], [1.75, 61, 0.24], [2.25, 62, 0.12], [2.75, 60, 0.24], [3.25, 61, 0.12], [4.85, 60, 0.12], [5.35, 61, 0.24]]);
+  // Launched by routines: at beat 1 with quant [2, 0.5] it starts at 2.5; at beat 0.75 (two routines) with
+  // quant [1, 0.5], at 1.5.
+  eq(pairs('Routine({ 1.wait; Pbind(\\midinote, Pseq([60, 61], 1), \\dur, 1).play(quant: [2, 0.5]) }).play;', 4.5), [[2.5, 60], [3.5, 61]]);
+  eq(pairs('Routine({ 0.5.wait; Routine({ 0.25.wait; Pbind(\\midinote, Pseq([60, 61, 62], 1), \\amp, Pseq([0.1, 0.2], inf), \\dur, 0.75).play(quant: [1, 0.5]) }).play }).play;', 3.75, ['note', 'amp']),
+    [[1.5, 60, 0.12], [2.25, 61, 0.24], [3, 62, 0.12]]);
+  // A value that grows each loop counts from the part's first event, not from the start of the piece.
+  eq(pairs('Routine({ 4.wait; Pbind(\\midinote, Pseries(60, 1, inf), \\dur, 1).play }).play;', 8), [[4, 60], [5, 61], [6, 62], [7, 63]]);
+  eq(pairs('Pbind(\\midinote, Pseries(60, 1, inf), \\dur, 0.5).play(quant: [4, 1.25]);', 3), [[1.25, 60], [1.75, 61], [2.25, 62], [2.75, 63]]);
+  // A part that begins with a rest: nothing plays where the loop would have a step before its first note.
+  eq(pairs('Pbind(\\midinote, Pseq([\\rest, 60, 61], 1), \\amp, Pseq([0.4, 0.2], inf), \\dur, 1).play(quant: [2, 0.5]);', 3.5, ['note', 'amp']),
+    [[1.5, 60, 0.24], [2.5, 61, 0.48]]);
+  // Times that are no binary fraction of a cycle (a cycle of 2.75 beats, steps of thirds): no onset is lost or
+  // doubled by rounding, at the bounds or where a value changes.
+  eq(pairs('Routine({ 3.wait; Pbind(\\midinote, Pseq([65, 60, 68], 1), \\dur, Pseq([1, 0.75], inf)).play(quant: [2, 0.5]) }).play;', 7.25), [[4.5, 65], [5.5, 60], [6.25, 68]]);
+  eq(pairs('Pbind(\\midinote, Pseq([67, 70, 61, 64, 60], 2), \\amp, Pseq([0.1, 0.3], inf), \\dur, 0.5).play(quant: [1, 2.5]);', 7.5, ['note', 'amp']),
+    [[2.5, 67, 0.12], [3, 70, 0.36], [3.5, 61, 0.12], [4, 64, 0.36], [4.5, 60, 0.12], [5, 67, 0.36], [5.5, 70, 0.12], [6, 61, 0.36], [6.5, 64, 0.12], [7, 60, 0.36]]);
+  eq(pairs('Pbind(\\midinote, Pseq([60, 62, 64], 1), \\dur, 1/3).play(quant: [1, 2.5]);', 3.5), [[2.5, 60], [2.833333333, 62], [3.166666667, 64]]);
+}
+// Pdef plays are taken in the order of their times, whichever routine (and however far in the file) calls them: a
+// later routine that starts the Pdef before an earlier routine plays it again leaves one voice at every onset (the
+// fixtures pdef-routine-order and pdef-stop-routines check more).
+{
+  const code = 'Pdef(\\a, Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 0.5));\nRoutine({ 4.wait; Pdef(\\a).play; loop { 8.wait; Pdef(\\a).play } }).play;\nRoutine({ 1.wait; Pdef(\\a).play }).play;';
+  const { events } = play(code, 600);
+  const voices = new Map();
+  for (const e of events) voices.set(e.time, (voices.get(e.time) ?? 0) + 1);
+  eq([...voices.values()].filter((n) => n !== 1), [], 'one voice at every onset');
+  eq(voices.size, 1198, 'an event every half beat from beat 1');
+  // Started by one routine, stopped by another and played again by a third: it restarts on the beat after the play.
+  const restart = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2, 4], inf), \\dur, 1));\nRoutine({ 6.5.wait; Pdef(\\a).play }).play;\nRoutine({ 3.5.wait; Pdef(\\a).stop }).play;\nRoutine({ Pdef(\\a).play }).play;', 10);
+  eq(restart.events.map((e) => [e.time, e.note]), [[0, 60], [1, 64], [2, 67], [3, 60], [7, 60], [8, 64], [9, 67]]);
+  // Two routines play it at the same beat: the second finds it playing (one voice).
+  const same = play('Pdef(\\a, Pbind(\\degree, Pseq([0, 2], inf), \\dur, 1));\nRoutine({ 2.wait; Pdef(\\a).play }).play;\nRoutine({ 2.wait; Pdef(\\a).play }).play;', 6);
+  eq(same.events.map((e) => [e.time, e.note]), [[2, 60], [3, 64], [4, 60], [5, 64]]);
+}
+// Clocks: a pattern played in a routine on TempoClock(2) without a clock plays on the default clock (1 beat per
+// second); the routine stops it 1.5 of its beats (0.75 s) after each start, every 4 of its beats (2 s), for ever.
+{
+  const { events } = play('p = Pbind(\\degree, Pseq([0, 1], inf), \\dur, 1);\nRoutine({ loop { x = p.play; 1.5.wait; x.stop; 2.5.wait } }).play(TempoClock(2));', 606);
+  eq(events.filter((e) => e.time < 7 || e.time >= 600).map((e) => [e.time, e.note]), [[0, 60], [2, 60], [4, 60], [6, 60], [600, 60], [602, 60], [604, 60]]);
+}
+// A routine started by a routine on a faster clock waits in beats of that clock: 4 beats at 4 per second are 1 s.
+{
+  const { js, events } = play('x = Pbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 0.5).play;\nRoutine({ 1.wait; Routine({ 4.wait; x.stop }).play(TempoClock(4)) }).play;', 2);
+  ok(/plays once \(2 beats\)/.test(js), 'stopped at 2 s');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 62], [1, 64], [1.5, 65]]);
+}
+
+// ---------------------------------------------------------------- safe code, tempo
+
+// Instruments named like reserved words, the evaluator's names and TidalJS's globals: the code still runs.
+{
+  const names = ['yield', 'let', 'static', 'implements', 'await', 'arguments', 'eval', '__out', 'sound', 'stack', 'sine', 'note', 'Math'];
+  const code = names.map((n, i) => `SynthDef('${n}', { |out, freq = 440, amp = 0.1| Out.ar(out, SinOsc.ar(freq) * Env.perc(0.01, 0.1).ar(2) * amp ! 2) }).add;\nPbind(\\instrument, '${n}', \\dur, 1, \\degree, ${i}).play;`).join('\n');
+  const { js, parts, events } = play(code, 1);
+  eq(parts, names.length);
+  ok(js.includes('const yieldPart = ') && js.includes('const soundPart = ') && !/const (yield|let|static|await|sound|stack|note) =/.test(js), 'safe bindings');
+  eq(events.length, names.length);
+}
+{
+  const { js, events } = play(String.raw`SynthDef(\yield, { |out, freq = 440, amp = 0.1| Out.ar(out, SinOsc.ar(freq) * Env.perc(0.01, 0.2).ar(2) * amp ! 2) }).add;
+Pbind(\instrument, \yield, \degree, Pseq([0, 2], inf), \dur, 0.5).play;`, 1);
+  ok(js.includes('sound("sine")'), 'a SynthDef named yield converts');
+  eq(events.map((e) => [e.time, e.note]), [[0, 60], [0.5, 64]]);
+}
+// Every global TidalJS defines is a name a binding avoids (and the importer's list has them all).
+{
+  const context = vm.createContext({ console: { warn() {}, error() {}, log() {} } });
+  const before = new Set(vm.runInContext('Object.getOwnPropertyNames(globalThis)', context));
+  vm.runInContext(fs.readFileSync(new URL('../tidal.js', import.meta.url), 'utf8'), context);
+  vm.runInContext(`const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1, setValueAtTime() {}, linearRampToValueAtTime() {}, cancelScheduledValues() {} } });
+    const engine = new TidalJS(); engine.audioContext = { currentTime: 0, state: 'running', createGain: node, resume() {} };
+    engine.masterGain = node(); engine.setupGlobalFunctions();`, context);
+  const globals = [...vm.runInContext('Object.getOwnPropertyNames(globalThis)', context)].filter((n) => !before.has(n));
+  ok(globals.length > 200, 'the engine defines its globals');
+  const missing = globals.filter((n) => !TIDAL_GLOBALS.has(n));
+  eq(missing, [], 'TIDAL_GLOBALS in emit.ts lists every global of tidal.js');
+  ok(globals.every((n) => !isSafeBinding(n)), 'no binding hides a global');
+  ok(['yield', 'let', 'static', 'implements', 'await', 'package', '__out', '__at', 'eval', 'arguments'].every((n) => !isSafeBinding(n)), 'nor a reserved word or an evaluator name');
+}
+// Line breaks and other control characters in names cannot end a comment and become code.
+{
+  const evil = 'x\u2028sound("bd*16")\u2029//\ny';
+  const { js, events } = play(`Pbind(\\instrument, '${evil}', \\dur, 1).play;`, 2, /Unknown sound/);
+  ok(!/[\u2028\u2029]/.test(js), 'no line or paragraph separator in the code');
+  ok(js.split('\n').every((line) => !/^sound\("bd\*16"\)/.test(line.trim())), 'the name stays inside its comment');
+  eq(events.length, 2);
+  const named = convertSuperCollider('Pbind(\\dur, 1).play;', 'a\nsound("bd")\u2028.scd');
+  ok(named.code.split(/\r\n|[\n\r\u2028\u2029]/).every((line) => line.startsWith('//') || !line.includes('sound("bd")')), 'nor can the file name');
+  ok(t.eval(named.code).success, 'the code runs');
+  t.stopAll();
+}
+// 360 beats per minute (TempoClock.default.tempo = 6): setTempo stops at 300 BPM, so setCPS keeps the tempo.
+{
+  const { js, events } = play('TempoClock.default.tempo = 6;\nPbind(\\degree, Pseq([0, 1, 2, 3], inf), \\dur, 1).play;', 1);
+  ok(js.includes('setCPS(1.5)') && !js.includes('setTempo('), 'the tempo is set exactly');
+  events.forEach((e, i) => { near(e.time, i / 6, 'a beat is 1/6 s'); eq(e.note, [60, 62, 64, 65][i % 4]); });
+  eq(events.length, 6);
+}
+// Faster than TidalJS's 10 cycles per second at 4 beats a cycle: a cycle of more beats keeps it exact.
+{
+  const { js, events } = play('TempoClock.default.tempo = 100;\nPbind(\\dur, 0.25).play;', 0.1);
+  ok(js.includes('setCPS(6.25)') && /one cycle is 16 beats/.test(js), 'the tempo stays exact');
+  eq(t.cps, 6.25);
+  events.forEach((e, i) => near(e.time, i * 0.0025, 'a quarter beat is 2.5 ms'));
+  eq(events.length, 40);
 }
 
 // The README's example converts to the code the README shows.

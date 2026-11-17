@@ -1,0 +1,22 @@
+{
+  "about": "Expected events, worked out by hand from SuperCollider's semantics (sclang was not run): a player waits for its quant (TempoClock.nextTimeOnGrid), and one stopped while it waits never plays (EventStreamPlayer.stop clears its stream before it wakes). Tempo 1 beat per second. x = p.play(quant: [4, 2]) at the top of the file waits for beat 2 and is stopped at beat 1: note 0 (MIDI 60) never plays. The routine plays note 7 (MIDI 67) at beat 0.5 with quant 4 (beat 4) and stops it at beat 1.5: it never plays. Pdef(\\c) is the same (played at 0.5 with quant 4, stopped at 1.5), then played again at beat 2.5: stopped, it starts again, on the next beat (its quant is 1), beat 3, notes 4, 5 (MIDI 64, 65) in turn, every beat, each 0.8 beats long (at beat 300, its event 297: note 5). Note 12 (MIDI 72, dur 2, 1.6 beats long) plays from beat 0 throughout. At beat 1.7 nothing sounds; at beat 4.5 only MIDI 72 and 65 (the routine's note 7 would have started at beat 4).",
+  "seconds": 302,
+  "windows": [[0, 9], [300, 302]],
+  "sounding": [[1.7, 0], [3.5, 2], [4.5, 2]],
+  "events": [
+    { "time": 0, "note": 72, "duration": 1.6 },
+    { "time": 2, "note": 72, "duration": 1.6 },
+    { "time": 3, "note": 64, "duration": 0.8 },
+    { "time": 4, "note": 65, "duration": 0.8 },
+    { "time": 4, "note": 72, "duration": 1.6 },
+    { "time": 5, "note": 64, "duration": 0.8 },
+    { "time": 6, "note": 65, "duration": 0.8 },
+    { "time": 6, "note": 72, "duration": 1.6 },
+    { "time": 7, "note": 64, "duration": 0.8 },
+    { "time": 8, "note": 65, "duration": 0.8 },
+    { "time": 8, "note": 72, "duration": 1.6 },
+    { "time": 300, "note": 65, "duration": 0.8 },
+    { "time": 300, "note": 72, "duration": 1.6 },
+    { "time": 301, "note": 64, "duration": 0.8 }
+  ]
+}

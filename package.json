@@ -10,12 +10,14 @@
     "build": "tsc --noEmit && sibujs build",
     "preview": "sibujs preview",
     "lint": "sibujs lint",
-    "test": "node test/engine.test.mjs && node test/docs.test.mjs && node test/library.test.mjs && node test/supercollider.test.mjs && node test/reference.test.mjs && node test/share.test.mjs"
+    "test": "node test/engine.test.mjs && node test/core.test.mjs && node test/statements.test.mjs && node test/output.test.mjs && node test/docs.test.mjs && node test/library.test.mjs && node test/editor.test.mjs && node test/supercollider.test.mjs && node test/reference.test.mjs && node test/share.test.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "sibujs": "^4.14.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "sibujs-cli": "^1.7.0",
     "typescript": "~6.0.3",
     "vite": "^8.3.1"

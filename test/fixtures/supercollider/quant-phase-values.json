@@ -1,0 +1,8 @@
+{
+  "about": "Expected events, worked out by hand from SuperCollider's semantics (sclang was not run): .play(quant: [2, 0.5]) at beat 0 starts on TempoClock.nextTimeOnGrid(2, 0.5) = roundUp(0 - 0.5, 2) + 0.5 = beat 0.5. Then the Pbind plays MIDI 60 at beat 0.5 and MIDI 61 at beat 1.5 (dur 1), each dur 1 * legato 0.8 = 0.8 beats long, and ends at beat 2.5 (the converted code then loops the piece every 2.5 beats as a preview, past this fixture's window). Tempo 1 beat per second. Nothing else plays: no third event, and neither value is moved to the other onset.",
+  "seconds": 2.5,
+  "events": [
+    { "time": 0.5, "note": 60, "duration": 0.8 },
+    { "time": 1.5, "note": 61, "duration": 0.8 }
+  ]
+}

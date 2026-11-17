@@ -5,6 +5,7 @@
  * as sclang does; patterns become generators (patterns.ts); a SynthDef's
  * function runs with symbolic signals (GNode) so its graph can be analysed.
  */
+import { ConversionLimit, sized, tick } from "./budget.ts";
 import type { Node } from "./parser.ts";
 import {
   DONE, Pattern, Pdraw, Pbind, Pbinop, Pbjorklund, Pbrown, Pchain, Pcollect, Pconst, PdefRef, Pdup, Pfin, Pfindur,
@@ -12,7 +13,7 @@ import {
   Pswitch, Psync, Punop, Pwhite, Stream, mod, type Host,
 } from "./patterns.ts";
 import {
-  Assoc, BufferV, BusV, ClockV, EnvSpec, GNode, MidiOutV, NetAddrV, Opaque, ProxyV, RandToken, RestV, RoutineV, SCClass,
+  Assoc, BufferV, BusV, ClockV, EnvSpec, GNode, MidiOutV, NetAddrV, Opaque, PlayerV, ProxyV, RandToken, RestV, RoutineV, SCClass,
   SCEvent, SCFunc, ScaleV, Scope, Sym, SynthDefV, SynthV, WidgetV, WindowV, LayoutV, TextV, describe, isPattern, seededRandom, type Value,
 } from "./values.ts";
 
@@ -35,6 +36,8 @@ export interface PlayRecord {
   start: number;
   /** A routine that loops forever (it ran until the horizon). */
   endless?: boolean;
+  /** A pattern's playback (its index in `playbacks`): where it is stopped. */
+  playback?: number;
   /** midikeys: the MIDI channel its notes come from (null: any). */
   channel?: number | null;
   /** midikeys: how far the pitch-bend wheel bends the held notes, in semitones (0: not at all). */
@@ -46,6 +49,47 @@ export interface PlayRecord {
   label: string;
 }
 
+/** A moment of the program: beats of a clock (converted to the common timeline with the clock's tempo). */
+export interface Moment {
+  beats: number;
+  clock: ClockV;
+}
+
+/**
+ * One playback of a pattern (each .play, a routine's included): its own start and end. A routine's playback
+ * starts at the routine's time (the event that holds it has `__playback`, its index); a pattern played without
+ * a clock plays on the default clock, as in SuperCollider, wherever it is played from.
+ */
+export interface Playback {
+  pattern: Value;
+  /** The clock it plays on. */
+  clock: ClockV;
+  /** When .play was called (0 at the top of the file). */
+  at: Moment;
+  /**
+   * quant: it starts on the next multiple of `quant` beats of its clock at or after `at`, plus `phase` (quant 0:
+   * `phase` beats after `at`), as TempoClock.nextTimeOnGrid does, wherever it is played from (emit.ts, onsetOf).
+   */
+  quant: number;
+  phase: number;
+  /**
+   * Where it is stopped (each x.stop): it ends at the first of them after `at`; a stop before its onset (while it
+   * waits for its quant) means it never plays. A Pdef's stops are the Pdef's own (`pdefStops`).
+   */
+  stops: Moment[];
+  /** x.play or x.resume after x.stop: the playback it continues (its stream goes on from where it stopped). */
+  resumes?: number;
+  /** Its order among the plays and stops of the file (statement by statement, each routine in turn). */
+  seq: number;
+  line: number;
+}
+
+/** Pdef(\x).stop: when, and its order among the plays and stops of the file (as `Playback.seq`). */
+export interface PdefStop {
+  at: Moment;
+  seq: number;
+}
+
 /** A timed event from a routine: Synth(...) or an event's play. */
 export interface RoutineEvent {
   time: number;
@@ -53,7 +97,12 @@ export interface RoutineEvent {
 }
 
 class Horizon extends Error {}
-class TooMuchWork extends Error {}
+/** A statement, routine or pattern did too much work without getting anywhere (an endless loop that never waits). */
+export class TooMuchWork extends Error {}
+/** The most work one statement, routine or pattern event may do. */
+const MAX_WORK = 2_000_000;
+/** The most events a routine may start at one instant (a loop that starts synths without waiting). */
+const MAX_SAME_TIME = 10_000;
 class StopCollect extends Error {}
 
 /** SuperCollider's built-in scales (degrees in semitones). */
@@ -226,14 +275,25 @@ export class Interpreter implements Host {
   readonly notes = new Set<string>();
   readonly synthDefs = new Map<string, SynthDefV>();
   readonly played: PlayRecord[] = [];
+  /** Every playback of a pattern, in the order .play was called. */
+  readonly playbacks: Playback[] = [];
+  /**
+   * Each Pdef's stops (Pdef(\x).stop), in the order they were called. Which of its playbacks a stop ends is decided
+   * on the common timeline when the file is played (emit.ts), since the routines are run here one after another.
+   */
+  readonly pdefStops = new Map<string, PdefStop[]>();
+  /** Pdef(\x).quant = q: the quant of its plays that give none. */
+  private readonly pdefQuants = new Map<string, Value>();
+  /** How many plays and stops there were so far (`Playback.seq`). */
+  private seq = 0;
   readonly defaultClock = new ClockV(1);
   private readonly global = new Scope();
   private readonly envir = new Map<string, Value>();
   private readonly pdefs = new Map<string, Value>();
   private readonly pdefns = new Map<string, Value>();
   private work = 0;
-  /** While a routine runs: its time in beats and the events it plays. */
-  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV } | null = null;
+  /** While a routine runs: its time in beats, the events it plays, and the work done when it last waited. */
+  private routine: { time: number; horizon: number; events: RoutineEvent[]; clock: ClockV; waited: number; sameTime: number; rate: number } | null = null;
   /** While a Prout runs to collect its values. */
   private collecting: Value[] | null = null;
   /** Whether the bounds of the Pwhite being made were written as floats (1.0), as SuperCollider tells. */
@@ -289,21 +349,41 @@ export class Interpreter implements Host {
   /** Runs a program; a statement that fails is noted and skipped. */
   run(program: Node[]) {
     for (const node of program) {
+      // Each statement has its own allowance of work.
+      this.work = 0;
       try {
         this.eval(node, this.global);
       } catch (err) {
-        if (err instanceof Horizon || err instanceof TooMuchWork) continue;
+        if (err instanceof ConversionLimit) throw err;
+        if (err instanceof Horizon) continue;
+        if (err instanceof TooMuchWork) {
+          this.note("Line " + node.line + " never finishes (a loop that does not end?): SuperCollider would hang there, so it was stopped.");
+          continue;
+        }
         this.note("Line " + node.line + " could not be run: " + (err instanceof Error ? err.message : String(err)));
       }
     }
+    this.work = 0;
     this.finishInputs();
+    this.work = 0;
     this.finishProxies();
+  }
+
+  /** A fresh allowance of work (each event the conversion plays has its own). */
+  resetWork() {
+    this.work = 0;
+  }
+
+  /** A step of work (a pattern's step too): an endless loop stops here. */
+  tick() {
+    if (++this.work > MAX_WORK) throw new TooMuchWork("too much work");
+    tick();
   }
 
   // ------------------------------------------------------------ evaluation
 
   eval(node: Node, scope: Scope): Value {
-    if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+    this.tick();
     switch (node.t) {
       case "num": return node.v;
       case "str": return node.v;
@@ -393,7 +473,7 @@ export class Interpreter implements Host {
           try {
             last = this.eval(st, inner);
           } catch (err) {
-            if (err instanceof Horizon || err instanceof TooMuchWork || err instanceof StopCollect) throw err;
+            if (err instanceof Horizon || err instanceof TooMuchWork || err instanceof StopCollect || err instanceof ConversionLimit) throw err;
             this.note("Line " + st.line + " could not be run: " + (err instanceof Error ? err.message : String(err)));
           }
         }
@@ -438,7 +518,7 @@ export class Interpreter implements Host {
   }
 
   call(fn: SCFunc, args: Value[], kwargs: Record<string, Value> = {}): Value {
-    if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+    this.tick();
     const scope = new Scope(fn.scope);
     fn.params.forEach((p, i) => {
       let v: Value | undefined = i < args.length ? args[i] : kwargs[p.name];
@@ -579,6 +659,7 @@ export class Interpreter implements Host {
     if (recv instanceof RandToken) return this.tokenSend(recv, method, args);
     if (recv instanceof SynthDefV) return this.synthDefSend(recv, method, line);
     if (recv instanceof RoutineV) return this.routineSend(recv, method, args, kwargs, line);
+    if (recv instanceof PlayerV) return this.playerSend(recv, method, args, kwargs, line);
     if (recv instanceof ClockV) return this.clockSend(recv, method, args);
     if (recv instanceof ScaleV) return this.scaleSend(recv, method, args);
     if (recv instanceof Assoc) return method === "key" ? recv.key : method === "value" ? recv.value : null;
@@ -654,7 +735,7 @@ export class Interpreter implements Host {
       case "odd": return mod(x, 2) === 1;
       case "isInteger": return Number.isInteger(x);
       case "dup": case "!": {
-        const n = num(args[0] ?? kwargs.n, 2);
+        const n = sized(num(args[0] ?? kwargs.n, 2));
         return Array.from({ length: n }, () => x);
       }
       case "do": case "reverseDo": {
@@ -666,7 +747,7 @@ export class Interpreter implements Host {
       }
       case "collect": {
         const fn = args[0];
-        return Array.from({ length: Math.floor(x) }, (_, i) => (fn instanceof SCFunc ? this.call(fn, [i, i]) : i));
+        return Array.from({ length: sized(x) }, (_, i) => (fn instanceof SCFunc ? this.call(fn, [i, i]) : i));
       }
       case "for": case "forBy": {
         const end = num(args[0], x);
@@ -734,8 +815,8 @@ export class Interpreter implements Host {
       case "mirror": return [...arr, ...arr.slice(0, -1).reverse()];
       case "mirror1": return [...arr, ...arr.slice(1, -1).reverse()];
       case "mirror2": return [...arr, ...arr.slice().reverse()];
-      case "stutter": case "dupEach": { const n = num(args[0], 2); return arr.flatMap((v) => Array.from({ length: n }, () => v)); }
-      case "dup": case "!": { const n = num(args[0], 2); return Array.from({ length: n }, () => arr.slice()); }
+      case "stutter": case "dupEach": { const n = sized(num(args[0], 2)); sized(n * arr.length); return arr.flatMap((v) => Array.from({ length: n }, () => v)); }
+      case "dup": case "!": { const n = sized(num(args[0], 2)); sized(n * arr.length); return Array.from({ length: n }, () => arr.slice()); }
       case "sum": return arr.reduce((s: Value, v) => this.binop("+", s, v), 0);
       case "mean": return num(this.arraySend(arr, "sum", [], {}, line), 0) / (arr.length || 1);
       case "maxItem": return Math.max(...arr.map((v) => num(v, -Infinity)));
@@ -786,12 +867,12 @@ export class Interpreter implements Host {
       case "drop": { const n = num(args[0], 0); return n >= 0 ? arr.slice(n) : arr.slice(0, n); }
       case "flat": case "flatten": return arr.flat(Infinity as 1) as Value[];
       case "lace": {
-        const n = num(args[0], arr.length);
+        const n = sized(num(args[0], arr.length));
         return Array.from({ length: n }, (_, i) => { const item = arr[i % arr.length]; return Array.isArray(item) ? item[Math.floor(i / arr.length) % item.length] : item; });
       }
-      case "wrapExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => arr[i % arr.length]); }
-      case "clipExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => arr[Math.min(i, arr.length - 1)]); }
-      case "foldExtend": { const n = num(args[0], arr.length); return Array.from({ length: n }, (_, i) => this.arraySend(arr, "foldAt", [i], {}, line)); }
+      case "wrapExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => arr[i % arr.length]); }
+      case "clipExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => arr[Math.min(i, arr.length - 1)]); }
+      case "foldExtend": { const n = sized(num(args[0], arr.length)); return Array.from({ length: n }, (_, i) => this.arraySend(arr, "foldAt", [i], {}, line)); }
       case "pyramid": { const out: Value[] = []; for (let i = 1; i <= arr.length; i++) out.push(...arr.slice(0, i)); return out; }
       case "asSpec": return this.spec(arr[0] ?? 0, arr[1] ?? 1, arr[2] ?? new Sym("lin"), arr[4] ?? null);
       case "join": return arr.map(describeText).join(typeof args[0] === "string" ? args[0] : "");
@@ -821,7 +902,7 @@ export class Interpreter implements Host {
       case "value": case "valueEnvir": return this.call(fn, args, kwargs);
       case "valueArray": return this.call(fn, asList(args[0] ?? []));
       case "dup": case "!": {
-        const n = num(args[0], 2);
+        const n = sized(num(args[0], 2));
         return Array.from({ length: n }, (_, i) => this.call(fn, [i]));
       }
       case "fork": case "forkIfNeeded": case "r": case "asRoutine": case "routine":
@@ -837,7 +918,7 @@ export class Interpreter implements Host {
           this.call(fn, []);
           if (this.routine && this.routine.time === before) {
             // A loop that never waits would never end in SuperCollider either.
-            if (++this.work > 2_000_000) throw new TooMuchWork("too much work");
+            this.tick();
           }
         }
       }
@@ -948,15 +1029,45 @@ export class Interpreter implements Host {
   private patternSend(p: Pattern, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
     switch (method) {
       case "play": {
+        // Pattern.play(clock, protoEvent, quant) and Pdef(\x).play(clock, protoEvent, quant): a new playback,
+        // from the start of the pattern (a Pdef played again after it stopped starts again too). A pattern's play
+        // gives its player (x.stop stops that playback); a Pdef's gives the Pdef.
         const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
-        this.recordPattern(p, clock instanceof ClockV ? clock : this.defaultClock, line, labelOf(p));
-        return p;
+        // A Pdef starts on the next beat by default (EventPatternProxy.defaultQuant is 1; Pdef(\x).quant = q gives
+        // it its own); a pattern at once.
+        const quant = quantOf(kwargs.quant ?? args[2] ?? (p instanceof PdefRef ? this.pdefQuants.get(p.key) ?? 1 : 0));
+        // A Pdef that plays already is not started again (a new definition plays in its player): at the top of the
+        // file, where nothing has ended yet, here; in a routine, when it is played (emit.ts).
+        if (p instanceof PdefRef && !this.routine && this.played.some((r) => r.pattern instanceof PdefRef && r.pattern.key === p.key)) return p;
+        const index = this.recordPattern(p, clock instanceof ClockV ? clock : this.defaultClock, line, labelOf(p), quant);
+        return p instanceof PdefRef ? p : new PlayerV(index);
       }
       case "stop": {
-        const i = this.played.findIndex((r) => r.pattern === p || (r.pattern instanceof PdefRef && p instanceof PdefRef && r.pattern.key === p.key));
-        if (i >= 0) this.played.splice(i, 1);
+        if (p instanceof PdefRef) {
+          // Pdef(\x).stop stops its player, whichever routine started it: the Pdef's plays and stops are taken in
+          // the order of their times when the file is played (emit.ts). At the top of the file it also takes out
+          // the Pdef's plays at the top of the file (as stopPlayback does).
+          if (!this.routine) {
+            for (let r = this.played.length - 1; r >= 0; r--) {
+              const q = this.played[r].pattern;
+              if (this.played[r].playback !== undefined && q instanceof PdefRef && q.key === p.key) this.played.splice(r, 1);
+            }
+          }
+          const list = this.pdefStops.get(p.key) ?? [];
+          list.push({ at: this.now(), seq: this.seq++ });
+          this.pdefStops.set(p.key, list);
+          return p;
+        }
+        // A Pbind has no stop in SuperCollider; here it stops its last playback.
+        const playing = this.playbacks.map((_, i) => i).filter((i) => this.playbacks[i].pattern === p && this.isPlaying(i));
+        for (const i of playing.slice(-1)) this.stopPlayback(i);
         return p;
       }
+      case "quant_": {
+        if (p instanceof PdefRef) this.pdefQuants.set(p.key, args[0] ?? null);
+        return p;
+      }
+      case "quant": return p instanceof PdefRef ? this.pdefQuants.get(p.key) ?? 1 : 0;
       case "repeat": case "loop": return new Pn(p, method === "loop" ? Infinity : num(args[0], Infinity));
       case "stutter": case "dup": return new Pdup(args[0] ?? 2, p);
       case "collect": return args[0] instanceof SCFunc ? new Pcollect("Pcollect", args[0], p) : p;
@@ -964,7 +1075,7 @@ export class Interpreter implements Host {
       case "reject": return args[0] instanceof SCFunc ? new Pcollect("Preject", args[0], p) : p;
       case "finDur": return new Pfindur(num(args[0], 4), p);
       case "fin": return new Pfin(args[0] ?? 1, p);
-      case "asStream": case "iter": case "trace": case "quant_": case "fadeTime_": case "source": return p;
+      case "asStream": case "iter": case "trace": case "fadeTime_": case "source": return p;
       case "embedInStream": return this.advance(0);
       case "asArray": case "all": {
         const s = new Stream(p, { host: this });
@@ -1058,6 +1169,49 @@ export class Interpreter implements Host {
     return def;
   }
 
+  /** A pattern's player (x = p.play): x.stop ends that playback; x.play or x.resume after it goes on from there. */
+  private playerSend(x: PlayerV, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
+    const b = this.playbacks[x.playback];
+    switch (method) {
+      case "stop": case "pause": this.stopPlayback(x.playback); return x;
+      case "play": case "resume": case "start": {
+        if (this.isPlaying(x.playback)) return x;
+        const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
+        const quant = quantOf(kwargs.quant ?? args[2] ?? 0);
+        x.playback = this.recordPattern(b.pattern, clock instanceof ClockV ? clock : b.clock, line, labelOf(b.pattern as Pattern), quant, x.playback);
+        return x;
+      }
+      case "isPlaying": return this.isPlaying(x.playback);
+      case "stream": case "originalStream": return b.pattern;
+    }
+    return x;
+  }
+
+  /** Now: the routine's time, or 0 at the top of the file. */
+  private now(): Moment {
+    return this.routine ? { beats: this.routine.time, clock: this.routine.clock } : { beats: 0, clock: this.defaultClock };
+  }
+
+  /** Whether a playback was started by now and not stopped since (the routines run one after another, each from 0). */
+  private isPlaying(i: number): boolean {
+    const b = this.playbacks[i];
+    const now = seconds(this.now());
+    const at = seconds(b.at);
+    return at <= now + 1e-9 && !b.stops.some((s) => seconds(s) <= now + 1e-9 && seconds(s) >= at - 1e-9);
+  }
+
+  /**
+   * Stops a playback now. At the top of the file (code run before anything plays, or to stop it by hand later)
+   * a playback the file started does not play at all.
+   */
+  private stopPlayback(i: number) {
+    if (!this.routine) {
+      const r = this.played.findIndex((rec) => rec.playback === i);
+      if (r >= 0) this.played.splice(r, 1);
+    }
+    this.playbacks[i].stops.push(this.now());
+  }
+
   private routineSend(r: RoutineV, method: string, args: Value[], kwargs: Record<string, Value>, line: number): Value {
     if (method === "play" || method === "start" || method === "fork") {
       const clock = args.find((a) => a instanceof ClockV) ?? kwargs.clock;
@@ -1076,7 +1230,7 @@ export class Interpreter implements Host {
       case "range": case "exprange": case "unipolar": case "bipolar":
         return new GNode("unop", method, { a: n, lo: args[0] ?? kwargs.lo ?? (method === "bipolar" ? -1 : 0), hi: args[1] ?? kwargs.hi ?? 1 });
       case "madd": return this.binop("+", this.binop("*", n, args[0] ?? 1), args[1] ?? 0);
-      case "dup": case "!": return Array.from({ length: num(args[0], 2) }, () => n);
+      case "dup": case "!": return Array.from({ length: sized(num(args[0], 2)) }, () => n);
       case "lag": case "lag2": case "lag3": case "varlag": case "lagud": return n;
       case "clip": case "fold": case "wrap": return new GNode("unop", method, { a: n, lo: args[0] ?? 0, hi: args[1] ?? 1 });
       case "clip2": case "fold2": case "wrap2": case "round": case "max": case "min": case "pow": case "lcm":
@@ -1176,7 +1330,7 @@ export class Interpreter implements Host {
         return 0;
       }
       case "Mix": {
-        const items = asList(method === "fill" ? Array.from({ length: num(args[0], 1) }, (_, i) => this.value(args[1] ?? null, [i])) : args[0] ?? []);
+        const items = asList(method === "fill" ? Array.from({ length: sized(num(args[0], 1)) }, (_, i) => this.value(args[1] ?? null, [i])) : args[0] ?? []);
         return items.reduce((s: Value, v) => this.binop("+", s, v), 0);
       }
       case "NamedControl": return new GNode("control", describeText(args[0] ?? null), { default: args[1] ?? 0 }, method);
@@ -1316,17 +1470,17 @@ export class Interpreter implements Host {
 
   private arrayClass(method: string, args: Value[]): Value {
     switch (method) {
-      case "series": { const n = num(args[0], 0), start = num(args[1], 0), step = num(args[2], 1); return Array.from({ length: n }, (_, i) => start + i * step); }
-      case "geom": { const n = num(args[0], 0), start = num(args[1], 1), grow = num(args[2], 2); return Array.from({ length: n }, (_, i) => start * Math.pow(grow, i)); }
-      case "fill": { const n = num(args[0], 0); return Array.from({ length: n }, (_, i) => this.value(args[1] ?? null, [i])); }
-      case "interpolation": { const n = num(args[0], 2), a = num(args[1], 0), b = num(args[2], 1); return Array.from({ length: n }, (_, i) => a + ((b - a) * i) / Math.max(1, n - 1)); }
+      case "series": { const n = sized(num(args[0], 0)), start = num(args[1], 0), step = num(args[2], 1); return Array.from({ length: n }, (_, i) => start + i * step); }
+      case "geom": { const n = sized(num(args[0], 0)), start = num(args[1], 1), grow = num(args[2], 2); return Array.from({ length: n }, (_, i) => start * Math.pow(grow, i)); }
+      case "fill": { const n = sized(num(args[0], 0)); return Array.from({ length: n }, (_, i) => this.value(args[1] ?? null, [i])); }
+      case "interpolation": { const n = sized(num(args[0], 2)), a = num(args[1], 0), b = num(args[2], 1); return Array.from({ length: n }, (_, i) => a + ((b - a) * i) / Math.max(1, n - 1)); }
       case "rand": case "exprand": case "rand2": {
         this.note("Array." + method + " is random: the TidalJS code keeps one draw.");
-        const n = num(args[0], 0), lo = num(args[1], 0), hi = num(args[2], 1);
+        const n = sized(num(args[0], 0)), lo = num(args[1], 0), hi = num(args[2], 1);
         return Array.from({ length: n }, () => (method === "exprand" ? lo * Math.pow(hi / lo, this.rng()) : lo + this.rng() * (hi - lo)));
       }
       case "with": return args.slice();
-      case "fib": { const n = num(args[0], 2); const out = [num(args[1], 0), num(args[2], 1)]; while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]); return out.slice(0, n); }
+      case "fib": { const n = sized(num(args[0], 2)); const out = [num(args[1], 0), num(args[2], 1)]; while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]); return out.slice(0, n); }
     }
     return [];
   }
@@ -1706,6 +1860,7 @@ export class Interpreter implements Host {
       try {
         this.call(fn, args);
       } catch (err) {
+        if (err instanceof ConversionLimit) throw err;
         if (!(err instanceof Horizon || err instanceof TooMuchWork)) this.note("Line " + line + ": an input function could not be run: " + (err instanceof Error ? err.message : String(err)));
       }
     };
@@ -2222,12 +2377,16 @@ export class Interpreter implements Host {
 
   // ------------------------------------------------------------ playing
 
-  private recordPattern(p: Value, clock: ClockV, line: number, label: string) {
+  /** A new playback of a pattern, from now: returns its index. */
+  private recordPattern(p: Value, clock: ClockV, line: number, label: string, [quant, phase] = [0, 0], resumes?: number): number {
+    const index = this.playbacks.length;
+    this.playbacks.push({ pattern: p, clock, at: this.now(), quant, phase, stops: [], seq: this.seq++, line, ...(resumes === undefined ? {} : { resumes }) });
     if (this.routine) {
-      this.routine.events.push({ time: this.routine.time, event: new SCEvent([["__pattern", p as Value], ["__line", line]]) });
-      return;
+      this.routine.events.push({ time: this.routine.time, event: new SCEvent([["__pattern", p as Value], ["__line", line], ["__playback", index]]) });
+      return index;
     }
-    this.played.push({ kind: "pattern", pattern: p, start: 0, clock, line, label });
+    this.played.push({ kind: "pattern", pattern: p, start: 0, clock, line, label, playback: index });
+    return index;
   }
 
   private recordSynth(synth: SynthV, line: number, tie?: number) {
@@ -2255,6 +2414,9 @@ export class Interpreter implements Host {
   private recordEvent(ev: SCEvent, line: number): SCEvent {
     const stored = ev.copy();
     if (this.routine) {
+      const last = this.routine.events[this.routine.events.length - 1];
+      this.routine.sameTime = last && Math.abs(last.time - this.routine.time) < 1e-9 ? this.routine.sameTime + 1 : 1;
+      if (this.routine.sameTime > MAX_SAME_TIME) throw new TooMuchWork("too many events at once");
       this.routine.events.push({ time: this.routine.time, event: stored });
       return stored;
     }
@@ -2267,18 +2429,29 @@ export class Interpreter implements Host {
     let endless = false;
     if (!play) return r;
     if (this.routine) {
-      // A routine started from a routine: run it inline, at the current time.
+      // A routine started from a routine: run it inline, at the current time. On a clock of another tempo, its
+      // waits are in beats of that clock (the outer routine's time is in beats of its own).
       const saved = this.routine.time;
-      try { this.call(r.fn, []); } catch (err) { if (!(err instanceof Horizon)) throw err; }
+      const rate = this.routine.rate;
+      if (clock.tempo > 0 && this.routine.clock.tempo > 0) this.routine.rate = this.routine.clock.tempo / clock.tempo;
+      try { this.call(r.fn, []); } catch (err) { if (!(err instanceof Horizon)) throw err; } finally { if (this.routine) this.routine.rate = rate; }
       this.routine.time = saved;
       return r;
     }
-    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock };
+    const state = { time: 0, horizon: 512, events: [] as RoutineEvent[], clock, waited: this.work, sameTime: 0, rate: 1 };
     this.routine = state;
     try {
       this.call(r.fn, []);
     } catch (err) {
-      if (err instanceof Horizon || err instanceof TooMuchWork) endless = true;
+      if (err instanceof ConversionLimit) throw err;
+      if (err instanceof TooMuchWork && (this.work - state.waited > MAX_WORK / 2 || state.sameTime > MAX_SAME_TIME)) {
+        // It went round and round without waiting: SuperCollider would hang there (its clock never moves on).
+        // What it played before is kept; what it started at that instant is not.
+        this.note("Line " + r.line + ": the routine loops without waiting (no wait or yield in the loop): SuperCollider would hang there, so it stops at "
+          + (state.time === 0 ? "the start" : "beat " + +state.time.toPrecision(6)) + ".");
+        const stuck = state.time;
+        state.events = state.events.filter((e) => e.time < stuck - 1e-9);
+      } else if (err instanceof Horizon || err instanceof TooMuchWork) endless = true;
       else {
         this.note("Line " + r.line + ": a routine stopped: " + (err instanceof Error ? err.message : String(err)));
       }
@@ -2323,7 +2496,8 @@ export class Interpreter implements Host {
       }
     }
     if (this.routine && typeof x === "number") {
-      this.routine.time += x;
+      this.routine.time += x * this.routine.rate;
+      this.routine.waited = this.work;
       if (this.routine.time >= this.routine.horizon) throw new Horizon();
     }
     return x;
@@ -2369,6 +2543,7 @@ export class Interpreter implements Host {
       for (const o of outs) { collectControls(o.channels, controls); collectControls(o.bus, controls); }
       return { output, controls, outs, mainBus: main ? main.bus : 0 };
     } catch (err) {
+      if (err instanceof ConversionLimit) throw err;
       this.note("SynthDef \\" + def.name + " could not be analysed: " + (err instanceof Error ? err.message : String(err)));
       return null;
     } finally {
@@ -2378,6 +2553,22 @@ export class Interpreter implements Host {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/** A moment in seconds, at its clock's tempo now. */
+function seconds(m: Moment): number {
+  return m.beats / (m.clock.tempo > 0 ? m.clock.tempo : 1);
+}
+
+/** A TempoClock's beatsPerBar (4: beatsPerBar_ is not followed). A negative quant is that many bars. */
+const BEATS_PER_BAR = 4;
+
+/** quant as [quant, phase]: a number, or [quant, phase, timingOffset]. */
+function quantOf(v: Value | undefined): [number, number] {
+  const list = Array.isArray(v) ? v : [v ?? 0];
+  const q = typeof list[0] === "number" && Number.isFinite(list[0]) ? list[0] : 0;
+  const phase = typeof list[1] === "number" && Number.isFinite(list[1]) ? list[1] : 0;
+  return [q < 0 ? -q * BEATS_PER_BAR : q, phase];
+}
 
 /** A routine's events as an event pattern: each event at its time, then rests. */
 function routinePattern(events: RoutineEvent[], end: number, line: number): Value {
@@ -2394,6 +2585,13 @@ function routinePattern(events: RoutineEvent[], end: number, line: number): Valu
     const next = i + 1 < sorted.length ? sorted[i + 1].time : end > e.time + 1e-9 ? end : e.time + 1;
     const ev = e.event.copy();
     ev.set("delta", next - e.time);
+    if (next - e.time < 1e-9) {
+      // Started together with the next one (no wait between them): it lasts, as they do, until the routine moves on.
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].time - e.time < 1e-9) j++;
+      const moved = j < sorted.length ? sorted[j].time : end > e.time + 1e-9 ? end : e.time + 1;
+      ev.set("__hold", moved - e.time);
+    }
     if (!ev.has("__src")) ev.set("__src", "r" + line + ":" + describeText(ev.get("instrument") ?? null));
     if (!ev.has("__line")) ev.set("__line", line);
     items.push(ev);
