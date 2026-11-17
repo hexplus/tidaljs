@@ -24,6 +24,10 @@ jobs:
       - run: npm ci
       - name: Engine tests
         run: npm test
+      - name: MIDI converter tests (Python, evaluated in TidalJS with Node)
+        run: python3 tool/tests/test_midi2tidal.py -v
+        env:
+          MIDI2TIDAL_REQUIRE_NODE: "1"
       - name: Type-check and build
         run: npm run build
       - name: SibuJS lint
