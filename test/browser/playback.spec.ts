@@ -136,7 +136,8 @@ async function holdManifest(page: Page) {
   const held = new Promise<Record<string, string[]> | number>((resolve) => { answer = resolve; });
   const counts = { manifests: 0 };
   await page.route("https://r6.test/**", async (route) => {
-    if (!route.request().url().endsWith(".json")) return route.fulfill({ status: 404, body: "" });
+    // Sample files load (a 404 would post its own failure, racing the statuses these tests wait for).
+    if (!route.request().url().endsWith(".json")) return route.fulfill({ contentType: "audio/wav", body: silentWav() });
     counts.manifests++;
     const body = await held;
     if (typeof body === "number") return route.fulfill({ status: body, body: "" });

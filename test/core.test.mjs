@@ -1576,5 +1576,71 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.audioContext = savedCtx;
 }
 
+// ---------------------------------------------------------------- Review round 17
+{
+    // 1. Which onsets a handoff decides agrees with the clock events go out on: the kick at cycle 0.5 was sent
+    // early (nudge -0.15, at 0.4 s); a live edit adds a slowdown (0.25 cps) at cycle 0.45, before its onset,
+    // which moves that onset later (past what was sent). The kick is still recognised as sent: it plays once, and
+    // the slowdown takes effect.
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*8"))\nd2(sound("~ ~ kick ~").nudge(-0.15).playFor(0, 1))');
+    let played = run(0, 325);
+    eq(hitsOf(played, 'kick', 1), [0.4], 'sent early');
+    ok(t._dispatchCycle < 0.45, 'its onset and the new slowdown still ahead');
+    t.eval('d1(sound("a*8"))\nd2(stack(sound("~ ~ kick ~").nudge(-0.15), sound("~ ~ ~ ~ ~ ~ ~ ~ ~ s ~ ~ ~ ~ ~ ~ ~ ~ ~ ~").cps(0.25)).playFor(0, 1))', live);
+    played = played.concat(run(350, 2500));
+    eq(hitsOf(played, 'kick', 3), [0.4], 'the kick once');
+    eq(t.cps, 0.25, 'the slowdown took effect');
+    eq(hitsOf(played, 'a', 2.45), gridOf([[0.45, 0.25]], 0.125, 2.45));
+    t.stopAll();
+}
+{
+    // 2. A MIDI hit's identity has its take values as they went out: gainTake 0.2 sent velocity 20; changed to
+    // 0.9 (and nudged past what was sent) it is a new note, sent with velocity 90. Comparing does not count a take:
+    // the counter has moved once per note played.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const velocities = [];
+    reset();
+    t.lookahead = 0.1;
+    t._nTakeCounters.clear();
+    t.midiAccess = { outputs: new Map([['r17a', { id: 'r17a', name: 'round17', send(m) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) velocities.push(m[2]); } }]]) };
+    t.playEvent = TidalJS.prototype.playEvent;
+    eq(t.eval('d1(note("~ c4").midi("round17").gainTake("g", [0.2]).playFor(0, 1))').success, true);
+    for (let ms = 0; ms <= 600; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq([velocities.slice(), t._nTakeCounters.get('gain:g')], [[20], 1]);
+    eq(t.eval('d1(note("~ c4").midi("round17").gainTake("g", [0.9]).nudge(0.3).playFor(0, 1))', live).success, true);
+    for (let ms = 625; ms <= 1800; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(velocities, [20, 90], 'velocity 90 sent');
+    eq(t._nTakeCounters.get('gain:g'), 2, 'counted once per note played, not by the comparison');
+
+    // 3. A followed control is resolved once as a hit goes out, and its identity is read from that: a stateful
+    // signal (each read answers the next note) is read once per note sent, and the stored identity holds the very
+    // note that was sent.
+    reset();
+    t.lookahead = 0.1;
+    const keys = [];
+    t.midiAccess = { outputs: new Map([['r17b', { id: 'r17b', name: 'round17', send(m) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) keys.push(m[1]); } }]]) };
+    globalThis.round17 = 0;
+    eq(t.eval('d1(note("c4*4").midi("round17").follow("note", sine.withValue(() => (globalThis.round17 += 1) % 12)).playFor(0, 1))').success, true);
+    let inDispatch = 0;
+    const savedDispatch = t._dispatch;
+    t._dispatch = function (...args) {
+        const before = globalThis.round17;
+        try { return savedDispatch.apply(this, args); } finally { inDispatch += globalThis.round17 - before; }
+    };
+    for (let ms = 0; ms <= 1200; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    t._dispatch = savedDispatch;
+    eq(keys.length, 4);
+    eq(inDispatch, 4, 'one read per note sent: none for its identity');
+    const stored = [...t._sentOnsets.get('d1').values()].flatMap((x) => x.hits).map((h) => JSON.parse(h.fp.key.slice(5))[3][0]);
+    eq(stored.slice(-keys.length), keys.slice(-stored.length), 'the stored identity is what was sent');
+    delete globalThis.round17;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

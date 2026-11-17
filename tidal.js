@@ -1612,6 +1612,9 @@
     // While a hit is played (see _dispatch): the values its voice reads from its .follow()/.followNote() signals,
     // as [control, cycle, onset cycle, value], so the curves it rendered can be compared later at no extra cost.
     const FOLLOW_READS = { list: null };
+    // While the scheduler plays a hit: the values it went out with (see playEvent), so its identity is read from
+    // them rather than resolved again (takes would advance, a stateful signal could answer differently).
+    const PLAYED = { on: false, v: null };
 
     class Follows {
         constructor(entries, onset) {
@@ -7457,10 +7460,16 @@
             // Only onsets where some new event can still sound (after what was sent, not too late) need deciding:
             // at the others every new event is dropped anyway (see _dispatch), so nothing of them is compared.
             // (A long-nudged hit keeps its stream's records back to its onset; what lies between is skipped.)
+            // The clock before what was sent never changes, so an onset there is judged now; one at or after it
+            // may move with tempo changes this tick reconciles (a slowdown before it), so it is always decided.
             const open = new Set();
             for (let i = 0; i < events.length; i++) {
                 const at = events[i].begin.toFixed(9);
                 if (open.has(at) || !sent.has(at)) continue;
+                if (events[i].begin >= this._dispatchCycle) {
+                    open.add(at);
+                    continue;
+                }
                 const time = this._scheduledAt(events[i], asObject(events[i].value));
                 if (time >= this._sentHorizon && time >= now - 0.02) open.add(at);
             }
@@ -7512,6 +7521,43 @@
             return already;
         }
 
+        /**
+         * An event's values as they go out at `time`: the next value of its
+         * take lists (nTake, gainTake...; counted, so `advance` only when it
+         * is really played) and its followed controls at that onset, with the
+         * signals bound to it (see Follows.bind). Resolved once: an event
+         * already resolved (no takes, its signals bound) comes back as it is.
+         */
+        _resolveOutput(v, time, advance) {
+            const next = (counter, list) => {
+                const index = this._nTakeCounters.get(counter) || 0;
+                if (advance) this._nTakeCounters.set(counter, index + 1);
+                return list[index % list.length];
+            };
+            if (v.nTake) {
+                // The next value of the list, counted per name across cycles.
+                v = { ...v, n: next(v.nTake.name, v.nTake.list) };
+                delete v.nTake;
+            }
+            if (Array.isArray(v.takes)) {
+                // gainTake, panTake... (Tidal's *Take): the next value of each list.
+                v = { ...v };
+                for (const { key, name, list } of v.takes) v[key] = next(`${key}:${name}`, list);
+                delete v.takes;
+            }
+            if (v.follow instanceof Follows && !v.follow.onset) {
+                // The followed controls start at their signals' values at the onset.
+                const cycle = this.cycleAt(time);
+                const follow = v.follow.bind(cycle, time, this.cps);
+                v = { ...v, follow };
+                for (const key of follow.names()) {
+                    const x = follow.valueAt(key, cycle, cycle);
+                    if (x !== undefined) v[key] = x;
+                }
+            }
+            return v;
+        }
+
         /** When an event would sound: its onset on the clock as it is, moved by its nudge (see _tick). */
         _scheduledAt(ev, v) {
             return this.timeAt(ev.begin) + Math.max(nudgeOf(v), -NUDGE_EARLY);
@@ -7527,18 +7573,11 @@
          * but the cycle and tempo (timing, like the nudge). A filter change
          * MIDI does not send is no change there.
          */
-        _hitIdentity(v, ev, time) {
+        _hitIdentity(v, ev, time, resolved) {
             if (v.midi === undefined && v.osc === undefined) return hitFingerprint(v, ev);
             try {
-                let out = v;
-                if (v.follow instanceof Follows) {
-                    const cycle = this.cycleAt(time);
-                    out = { ...v };
-                    for (const name of v.follow.names()) {
-                        const x = v.follow.valueAt(name, cycle, cycle);
-                        if (x !== undefined) out[name] = x;
-                    }
-                }
+                // What was really sent (a sent hit), or what would be at `time` (take counters left as they are).
+                const out = resolved || this._resolveOutput(v, time, false);
                 const duration = (ev.end - ev.begin) / this._cpsAt(ev.begin);
                 if (v.midi !== undefined) {
                     const m = midiEventOf(out, duration);
@@ -7653,17 +7692,24 @@
                 // What it plays as it goes out (a value object changed in place later does not change it), and
                 // of its followed curves what its voice reads from them while it is laid out (nothing more).
                 const follow = followOf(it.v);
-                const hit = { fp: this._hitIdentity(it.v, it.ev, Math.max(it.time, now)), nudge: nudgeOf(it.v), follow, reads: null, ev: it.ev }; // (its own span)
+                const at = Math.max(it.time, now);
+                const hit = { fp: null, nudge: nudgeOf(it.v), follow, reads: null, ev: it.ev }; // (its own span)
                 sentAt.hits.push(hit);
                 const reads = follow ? [] : null;
                 FOLLOW_READS.list = reads;
+                PLAYED.on = true;
+                PLAYED.v = null;
                 try {
-                    this.playEvent(it.v, Math.max(it.time, now), it.duration);
+                    this.playEvent(it.v, at, it.duration);
                 } catch (error) {
                     console.error('TidalJS: could not play event:', error);
                 } finally {
                     FOLLOW_READS.list = null;
+                    PLAYED.on = false;
                 }
+                // Its identity from the values it went out with (resolved once, takes and followed onsets included).
+                hit.fp = this._hitIdentity(it.v, it.ev, at, PLAYED.v);
+                PLAYED.v = null;
                 hit.reads = reads;
             }
         }
@@ -9162,35 +9208,9 @@
          */
         playEvent(v, time, duration = 0.25, hold = false) {
             if (!this.audioContext || !this._session) return null;
-            if (v.nTake) {
-                // The next value of the list, counted per name across cycles.
-                const { name, list } = v.nTake;
-                const index = this._nTakeCounters.get(name) || 0;
-                this._nTakeCounters.set(name, index + 1);
-                v = { ...v, n: list[index % list.length] };
-                delete v.nTake;
-            }
-            if (Array.isArray(v.takes)) {
-                // gainTake, panTake... (Tidal's *Take): the next value of each list.
-                v = { ...v };
-                for (const { key, name, list } of v.takes) {
-                    const counter = `${key}:${name}`;
-                    const index = this._nTakeCounters.get(counter) || 0;
-                    this._nTakeCounters.set(counter, index + 1);
-                    v[key] = list[index % list.length];
-                }
-                delete v.takes;
-            }
-            if (v.follow instanceof Follows) {
-                // The followed controls start at their signals' values at the onset.
-                const cycle = this.cycleAt(time);
-                const follow = v.follow.bind(cycle, time, this.cps);
-                v = { ...v, follow };
-                for (const key of follow.names()) {
-                    const x = follow.valueAt(key, cycle, cycle);
-                    if (x !== undefined) v[key] = x;
-                }
-            }
+            v = this._resolveOutput(v, time, true);
+            // The scheduler keeps what was sent as the hit's identity (see _dispatch and _hitIdentity).
+            if (PLAYED.on && !PLAYED.v) PLAYED.v = v;
             if (v.midi !== undefined) {
                 this._sendMidi(v, time, duration);
                 return null;
