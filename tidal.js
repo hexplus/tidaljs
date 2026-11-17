@@ -1609,6 +1609,10 @@
      * playEvent binds it to the note's onset (cycle, audio time and tempo),
      * so at(name, time) reads the control at an audio time.
      */
+    // While a hit is played (see _dispatch): the values its voice reads from its .follow()/.followNote() signals,
+    // as [control, cycle, onset cycle, value], so the curves it rendered can be compared later at no extra cost.
+    const FOLLOW_READS = { list: null };
+
     class Follows {
         constructor(entries, onset) {
             this.entries = entries;
@@ -1634,8 +1638,13 @@
         at(name, time) {
             const o = this.onset;
             if (!o) return undefined;
-            return this.valueAt(name, o.cycle + (time - o.time) * o.cps, o.cycle);
+            const t = o.cycle + (time - o.time) * o.cps;
+            const x = this.valueAt(name, t, o.cycle);
+            if (FOLLOW_READS.list) FOLLOW_READS.list.push([name, t, o.cycle, x]);
+            return x;
         }
+        /** The controls followed, and whether each is relative to the note (followNote). */
+        shape() { return this.names().sort().map((name) => name + (this.entries[name].note ? '~' : '')).join(','); }
         /** Values sampled over two cycles from `from`, so live updates can tell two sets apart. */
         key(from) {
             return this.names().sort().map((name) => {
@@ -1710,19 +1719,48 @@
         if (n) history.splice(0, n);
     };
     /**
-     * What a hit plays, to tell whether a replacement's onset was already sent: its nominal span (cycles)
-     * and its controls but its nudge (where it sounds) and its tempo change (which goes with the hit), in a
-     * fixed order, with the curves of .follow()/.followNote() as the voice would render them over that span
-     * (see Follows.trace: curves that agree on a coarser grid but sound different are different hits). Read
-     * when the hit is sent, so an object changed in place later does not change what was sent. Any value
-     * withValue() gives is read safely (BigInt, symbols, functions, shared or circular objects, throwing
-     * getters, very large objects): it never throws.
+     * What a hit plays, to tell whether a replacement's onset was already sent: { key, truncated }. The key
+     * is its nominal span (cycles) and its controls but its nudge (where it sounds) and its tempo change
+     * (which goes with the hit), in a fixed order; of .follow()/.followNote() only which controls follow
+     * (their curves are compared apart, see _sameCurves). Read when the hit is sent, so an object changed
+     * in place later does not change what was sent. Any value withValue() gives is read safely (BigInt,
+     * symbols, functions, shared or circular objects, throwing getters): it never throws, and it reads at
+     * most HIT_BUDGET values, counted before each read, enumeration included. A key cut short (too large
+     * or too deep) is truncated: it cannot tell two hits apart, so it never matches (see _handoff).
      */
-    function hitFingerprint(v, ev, cps) {
+    const HIT_BUDGET = 4000;
+    function hitFingerprint(v, ev) {
         const seen = new Set();
-        let budget = 4000; // values read at most: past that, a large object is told apart only so far
+        let budget = HIT_BUDGET;
+        let truncated = false;
+        const spend = () => {
+            if (budget <= 0) {
+                truncated = true;
+                return false;
+            }
+            budget--;
+            return true;
+        };
         const field = (x, k, depth) => {
+            if (!spend()) return '';
             try { return walk(x[k], depth); } catch (e) { return '?'; }
+        };
+        // Own enumerable keys, sorted, each counted as it is found: enumeration stops when the budget is spent.
+        const keysOf = (x, skip) => {
+            const keys = [];
+            if (Array.isArray(x)) {
+                const n = x.length;
+                for (let i = 0; i < n; i++) {
+                    if (!spend()) break;
+                    keys.push(i);
+                }
+                return keys;
+            }
+            for (const k in x) {
+                if (!spend()) break;
+                if (Object.prototype.hasOwnProperty.call(x, k) && !(skip && skip(k))) keys.push(k);
+            }
+            return keys.sort();
         };
         const walk = (x, depth) => {
             if (x === null) return 'null';
@@ -1735,25 +1773,35 @@
                 case 'function': return 'function ' + (x.name || '');
                 default: break;
             }
-            if (x instanceof Follows) return 'follow(' + x.trace(ev.begin, ev.end, cps) + ')';
+            if (x instanceof Follows) return 'follow(' + x.shape() + ')';
             if (seen.has(x)) return '[circular]';
-            if (--budget < 0) return '[large]';
-            if (depth > 8) return '[deep]';
+            if (depth > 8) {
+                truncated = true;
+                return '[deep]';
+            }
             seen.add(x);
             const list = Array.isArray(x);
-            const keys = list ? x.map((_, i) => i) : Object.keys(x).sort();
-            const out = keys.map((k) => k + ':' + field(x, k, depth + 1)).join(',');
+            const out = [];
+            for (const k of keysOf(x)) {
+                if (truncated) break;
+                out.push(k + ':' + field(x, k, depth + 1));
+            }
             seen.delete(x);
-            return (list ? '[' : '{') + out + (list ? ']' : '}');
+            return (list ? '[' : '{') + out.join(',') + (list ? ']' : '}');
         };
-        const span = 'span:' + +(ev.end - ev.begin).toFixed(9);
+        let key = 'span:' + +(ev.end - ev.begin).toFixed(9);
         try {
-            return span + ',' + Object.keys(v).filter((k) => k !== 'nudge' && k !== 'cps').sort().map((k) => k + ':' + field(v, k, 1)).join(',');
+            for (const k of keysOf(v, (name) => name === 'nudge' || name === 'cps')) {
+                if (truncated) break;
+                key += ',' + k + ':' + field(v, k, 1);
+            }
         } catch (e) {
-            return span + ',?';
+            truncated = true;
         }
+        return { key, truncated };
     }
     const nudgeOf = (v) => (isNum(v.nudge) ? v.nudge : 0);
+    const followOf = (v) => (v.follow instanceof Follows ? v.follow : null);
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -7391,21 +7439,23 @@
         /**
          * Which of a replacement's events (indices into `events`) are hits its
          * stream already sent. At each onset where the stream sent something,
-         * the hits that play the same thing (see hitFingerprint) are matched
-         * with the old version's hits there, sent and still held back alike:
-         * first those whose nudge is unchanged, then the rest in nudge order
-         * (sooner with sooner). A new event matched with a sent hit is not
-         * sent again; one matched with a held-back hit, or with none, is the
-         * new version's to play. So layers may be reordered, added or removed,
-         * and of identical simultaneous hits a sent one never stands for an
-         * unsent sibling.
+         * the hits that play the same thing (see hitFingerprint, then
+         * _sameCurves for followed controls) are matched with the old
+         * version's hits there, sent and still held back alike: first those
+         * whose nudge is unchanged, then the rest in nudge order (sooner with
+         * sooner). A new event matched with a sent hit is not sent again; one
+         * matched with a held-back hit, or with none, is the new version's to
+         * play. So layers may be reordered, added or removed, and of identical
+         * simultaneous hits a sent one never stands for an unsent sibling. A
+         * truncated fingerprint proves nothing: such a hit matches no other.
          */
         _handoff(id, pattern, events) {
             const sent = this._sentOnsets.get(id);
             if (!sent) return null;
-            const groups = new Map(); // onset + fingerprint -> { old: [{ nudge, sent }], fresh: [{ i, nudge }] }
+            const groups = new Map(); // onset + fingerprint -> { old: [hit], fresh: [hit] }
+            let unique = 0;
             const group = (at, fp) => {
-                const key = at + '|' + fp;
+                const key = fp.truncated ? '#' + unique++ : at + '|' + fp.key;
                 let g = groups.get(key);
                 if (!g) groups.set(key, (g = { old: [], fresh: [] }));
                 return g;
@@ -7416,36 +7466,63 @@
                 if (!sent.has(at)) continue;
                 ats.add(at);
                 const v = asObject(events[i].value);
-                group(at, hitFingerprint(v, events[i], this._cpsAt(events[i].begin))).fresh.push({ i, nudge: nudgeOf(v) });
+                group(at, hitFingerprint(v, events[i])).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
             }
             if (!ats.size) return null;
             for (const at of ats) {
                 const record = sent.get(at);
-                for (const h of record.hits) group(at, h.fp).old.push({ nudge: h.nudge, sent: true });
+                for (const h of record.hits) group(at, h.fp).old.push({ ...h, ev: record.ev, sent: true });
             }
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
-                group(it.at, hitFingerprint(it.v, it.ev, this._cpsAt(it.ev.begin))).old.push({ nudge: nudgeOf(it.v), sent: false });
+                group(it.at, hitFingerprint(it.v, it.ev)).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
             }
             const already = new Set();
             for (const g of groups.values()) {
                 if (!g.old.some((o) => o.sent) || !g.fresh.length) continue;
                 const old = g.old.slice();
                 const rest = [];
-                for (const f of g.fresh) {
-                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9);
-                    if (k < 0) {
-                        rest.push(f);
-                        continue;
-                    }
+                const pair = (f, k) => {
                     if (old[k].sent) already.add(f.i);
                     old.splice(k, 1);
+                };
+                for (const f of g.fresh) {
+                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9 && this._sameCurves(o, f));
+                    if (k < 0) rest.push(f);
+                    else pair(f, k);
                 }
                 old.sort((a, b) => a.nudge - b.nudge || (a.sent ? 0 : 1) - (b.sent ? 0 : 1));
                 rest.sort((a, b) => a.nudge - b.nudge || a.i - b.i);
-                for (let k = 0; k < rest.length && k < old.length; k++) if (old[k].sent) already.add(rest[k].i);
+                for (const f of rest) {
+                    const k = old.findIndex((o) => this._sameCurves(o, f));
+                    if (k >= 0) pair(f, k);
+                }
             }
             return already;
+        }
+
+        /**
+         * Whether a new event's followed curves are those of an old hit (both
+         * follow the same controls: see hitFingerprint). A sent hit is
+         * compared where its voice read its signals (FOLLOW_READS), value for
+         * value: the curves it rendered, at no cost when nothing is replaced.
+         * A sent hit whose voice read nothing (MIDI, OSC, a sound not loaded)
+         * and one held back (not rendered yet) are compared over the note's
+         * nominal span instead (Follows.trace).
+         */
+        _sameCurves(old, fresh) {
+            if (!old.follow && !fresh.follow) return true;
+            if (!old.follow || !fresh.follow) return false;
+            if (old.reads && old.reads.length) {
+                return old.reads.every(([name, t, onset, x]) => {
+                    const y = fresh.follow.valueAt(name, t, onset);
+                    return x === y || (isNum(x) && isNum(y) && Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x)));
+                });
+            }
+            const cps = this._cpsAt(fresh.ev.begin);
+            if (old.trace === undefined) old.trace = old.follow.trace(old.ev.begin, old.ev.end, cps);
+            if (fresh.trace === undefined) fresh.trace = fresh.follow.trace(fresh.ev.begin, fresh.ev.end, cps);
+            return old.trace === fresh.trace;
         }
 
         /**
@@ -7508,14 +7585,22 @@
                 let onsets = this._sentOnsets.get(it.id);
                 if (!onsets) this._sentOnsets.set(it.id, (onsets = new Map()));
                 let sentAt = onsets.get(it.at);
-                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, hits: [] }));
-                // What it plays as it goes out (a value object changed in place later does not change it).
-                sentAt.hits.push({ fp: hitFingerprint(it.v, it.ev, this._cpsAt(it.ev.begin)), nudge: nudgeOf(it.v) });
+                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, ev: it.ev, hits: [] }));
+                // What it plays as it goes out (a value object changed in place later does not change it), and
+                // of its followed curves what its voice reads from them while it is laid out (nothing more).
+                const follow = followOf(it.v);
+                const hit = { fp: hitFingerprint(it.v, it.ev), nudge: nudgeOf(it.v), follow, reads: null };
+                sentAt.hits.push(hit);
+                const reads = follow ? [] : null;
+                FOLLOW_READS.list = reads;
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
                 } catch (error) {
                     console.error('TidalJS: could not play event:', error);
+                } finally {
+                    FOLLOW_READS.list = null;
                 }
+                hit.reads = reads;
             }
         }
 

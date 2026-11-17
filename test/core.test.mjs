@@ -1209,5 +1209,134 @@ const runWith = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 13
+/** An audio context whose nodes accept every call, so voices are really laid out (their automation included). */
+const layoutAudio = () => {
+    const param = (value = 0) => ({ value, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {}, setTargetAtTime() {}, setValueCurveAtTime() {}, cancelScheduledValues() {}, cancelAndHoldAtTime() {} });
+    const base = () => ({ connect(x) { return x; }, disconnect() {} });
+    const source = () => ({ ...base(), start() {}, stop() {} });
+    return {
+        currentTime: 0, sampleRate: 48000, state: 'running', resume() {},
+        createGain: () => ({ ...base(), gain: param(1) }),
+        createBiquadFilter: () => ({ ...base(), type: '', frequency: param(350), Q: param(1), gain: param(0) }),
+        createStereoPanner: () => ({ ...base(), pan: param(0) }),
+        createOscillator: () => ({ ...source(), type: 'sine', frequency: param(440), detune: param(0), setPeriodicWave() {} }),
+        createConstantSource: () => ({ ...source(), offset: param(1) }),
+        createBufferSource: () => ({ ...source(), playbackRate: param(1), detune: param(0) }),
+        createWaveShaper: () => base(),
+        createDelay: () => ({ ...base(), delayTime: param(0) }),
+        createChannelMerger: () => base(),
+        createConvolver: () => base(),
+        createBuffer: (ch, length, sampleRate) => ({ numberOfChannels: ch, length, sampleRate, duration: length / sampleRate, getChannelData: () => new Float32Array(length) }),
+        createPeriodicWave: () => ({}),
+    };
+};
+/** Ticks from `fromMs` to `toMs` with the real playEvent, recording `label(v, time)` for each event sent. */
+const runLaidOut = (fromMs, toMs, label) => {
+    const out = [];
+    const real = TidalJS.prototype.playEvent;
+    t.playEvent = function (v, time, duration) {
+        out.push(label(v, +time.toFixed(6)));
+        return real.call(this, v, time, duration);
+    };
+    for (let ms = fromMs; ms <= toMs; ms += 25) {
+        t.audioContext.currentTime = ms / 1000;
+        t._tick();
+    }
+    t.playEvent = real;
+    return out;
+};
+{
+    // 1. Followed curves are compared as their voice rendered them. At 1 cps with legato 0.5 and release 0.1 a
+    // note's filter is laid out over 0.62 s, where sine and sine.fast(68) differ, though they agree on the note's
+    // nominal one-cycle grid. The sine note was sent, the sine.fast(68) one held back (nudge 0.5); after an edit
+    // whose nudges cross, sine.fast(68) plays at 0.65 s (lpf 2000 a 272nd of a cycle in, where the sine is at
+    // 1120.8) and the sine does not play again at 0.85 s.
+    const live = { keepUnchanged: true };
+    const savedCtx = t.audioContext;
+    reset();
+    t.audioContext = layoutAudio();
+    t.lookahead = 0.1;
+    const note = (curve, nudge) => `sound("saw").legato(0.5).release(0.1).followNote("lpf", ${curve}.range(200, 2000)).nudge(${nudge})`;
+    const code = (slow, fast) => `d1(stack(${note('sine.fast(68)', fast)}, ${note('sine', slow)}).playFor(0, 1))`;
+    const label = (v, time) => +v.follow.valueAt('lpf', 1 / 272, 0).toFixed(1) + '@' + time;
+    eq(t.eval(code(0, 0.5)).success, true);
+    let played = runLaidOut(0, 300, label);
+    eq(played, ['1120.8@0.05'], 'the sine sent, sine.fast(68) held');
+    const sent = [...t._sentOnsets.get('d1').values()][0].hits[0];
+    ok(sent.reads.length > 40, 'what its voice read while laying out its filter: ' + sent.reads.length);
+    t.eval(code(0.8, 0.6), live);
+    played = played.concat(runLaidOut(325, 1500, label));
+    eq(played, ['1120.8@0.05', '2000@0.65'], 'sine.fast(68) at 0.65 s; the sine not again at 0.85 s');
+    t.stopAll();
+    t.audioContext = savedCtx;
+}
+{
+    // 2. Sending hits reads their followed signals no more than laying them out does: a 32-voice burst with five
+    // followed controls, its signals counted. With voices laid out, every read during dispatch is the voices' own;
+    // without (events only recorded), dispatch reads none.
+    const counted = (name, curve) => `.follow("${name}", ${curve}.withValue((x) => (globalThis.round13++, x)))`;
+    const burst = 'd1(sound("saw*32")' + counted('lpf', 'sine.range(300, 3000)') + counted('hpf', 'saw.range(20, 200)')
+        + counted('pan', 'tri.range(-1, 1)') + counted('gain', 'cosine.range(0.5, 1)') + counted('resonance', 'square.range(0, 0.3)') + '.playFor(0, 1))';
+    const savedCtx = t.audioContext;
+    const savedDispatch = t._dispatch;
+    for (const laidOut of [true, false]) {
+        reset();
+        if (laidOut) t.audioContext = layoutAudio();
+        t.lookahead = 0.1;
+        globalThis.round13 = 0;
+        eq(t.eval(burst).success, true);
+        let inDispatch = 0;
+        let inVoices = 0;
+        let sentCount = 0;
+        const real = TidalJS.prototype.playEvent;
+        t._dispatch = function (...args) {
+            const before = globalThis.round13;
+            try { return savedDispatch.apply(this, args); } finally { inDispatch += globalThis.round13 - before; }
+        };
+        t.playEvent = function (v, time, duration) {
+            sentCount++;
+            const before = globalThis.round13;
+            try { return laidOut ? real.call(this, v, time, duration) : undefined; } finally { inVoices += globalThis.round13 - before; }
+        };
+        for (let ms = 0; ms <= 1200; ms += 25) {
+            t.audioContext.currentTime = ms / 1000;
+            t._tick();
+        }
+        t.playEvent = real;
+        t._dispatch = savedDispatch;
+        eq(sentCount, 32);
+        if (laidOut) ok(inVoices > 32 * 5, 'the voices read their curves: ' + inVoices);
+        else eq(inVoices, 0);
+        eq(inDispatch, inVoices, (laidOut ? 'laid out' : 'recorded') + ': dispatch reads only what the voices read');
+        t.stopAll();
+        t.audioContext = savedCtx;
+    }
+    delete globalThis.round13;
+}
+{
+    // 3. The fingerprint budget is spent before each read, enumeration included: a value carrying 10000 getters
+    // has at most 4000 of them read when it is sent (BigInt and circular metadata alongside stay safe). Such a
+    // fingerprint is cut short, so it proves nothing: after a nudge edit, cycle 0.5 (sent at 0.65 s) plays again
+    // at 0.85 s rather than being taken for the hit already sent.
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    globalThis.round13 = { reads: 0, meta: {} };
+    for (let i = 0; i < 10000; i++) Object.defineProperty(globalThis.round13.meta, 'k' + i, { enumerable: true, get() { globalThis.round13.reads++; return i; } });
+    const code = (nudge) => `const big = globalThis.round13.meta\nconst extra = { id: 7n }\nextra.self = extra\nd1(sound("a*4").withValue((v) => ({ ...v, extra, big })).nudge(${nudge}))`;
+    eq(t.eval(code(0.1)).success, true);
+    let played = run(0, 600);
+    eq(shown(played, 0.7), ['a@0.15', 'a@0.4', 'a@0.65']);
+    ok(globalThis.round13.reads <= 3 * 4000, 'at most the budget per hit: ' + globalThis.round13.reads);
+    const sent = [...t._sentOnsets.get('d1').values()].map((x) => x.hits[0].fp.truncated);
+    eq(sent, [true, true, true], 'cut short');
+    eq(t.eval(code(0.3), live).success, true);
+    played = played.concat(run(625, 1600));
+    eq(shown(played, 1.6), ['a@0.15', 'a@0.4', 'a@0.65', 'a@0.85', 'a@1.1', 'a@1.35', 'a@1.6'], 'inconclusive: not taken for the sent hit');
+    delete globalThis.round13;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
