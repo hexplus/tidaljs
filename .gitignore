@@ -6,3 +6,6 @@ AGENTS.md
 test-results/
 playwright-report/
 tool/*.mid
+tool/*.js
+__pycache__/
+*.py[cod]
