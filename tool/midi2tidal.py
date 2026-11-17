@@ -365,7 +365,8 @@ def _play(song: Song, events: List[RawEvent]) -> None:
     holds released notes while the sustain pedal (controller 64) is down, and
     gives every note the program its channel has at that moment. All Sound Off
     (120) ends every note at once, sounding or held, and leaves the pedal as it
-    is (a pedal still down holds the notes that come after); Reset All
+    is (a pedal still down holds the notes that come after); the note-off that
+    later arrives for a silenced note is consumed with no effect. Reset All
     Controllers (121) lifts the pedal;
     All Notes Off (123, and the mode changes 124 to 127, which imply it) releases
     every note, as note-offs would. Counts the messages that are dropped.
@@ -374,7 +375,9 @@ def _play(song: Song, events: List[RawEvent]) -> None:
     Key = Tuple[int, int]  # (port, channel)
     programs: Dict[Key, int] = {}
     pedal: Dict[Key, bool] = {}
-    sounding: Dict[Tuple[int, int, int], Deque[Tuple[int, int, int, Optional[int]]]] = defaultdict(deque)
+    # Notes waiting for their note-off, first on first off: (start, velocity, track, program, silenced).
+    # A note silenced by All Sound Off keeps its place, so the note-off meant for it ends nothing else.
+    sounding: Dict[Tuple[int, int, int], Deque[Tuple[int, int, int, Optional[int], bool]]] = defaultdict(deque)
     held: Dict[Key, List[Tuple[int, int, int, int, Optional[int], int]]] = defaultdict(list)  # released under the pedal
     dropped: Dict[str, int] = defaultdict(int)
 
@@ -397,32 +400,45 @@ def _play(song: Song, events: List[RawEvent]) -> None:
         started = sounding.get(key + (pitch,))
         if not started:
             return  # a note-off with no note: nothing to end
-        start, velocity, owner, program = started.popleft()  # first on, first off
+        start, velocity, owner, program, silenced = started.popleft()  # first on, first off
+        if not silenced:  # a silenced note already ended: its note-off has nothing left to do
+            release(key, pitch, start, velocity, owner, program, tick)
+
+    def release(key: Key, pitch: int, start: int, velocity: int, owner: int, program: Optional[int], tick: int) -> None:
+        """A note let go of: it ends now, or later if the pedal is down."""
         if pedal.get(key):
             held[key].append((pitch, start, velocity, owner, program, tick))
         else:
             finish(key, pitch, start, velocity, owner, program, tick)
 
     def all_notes_off(key: Key, tick: int) -> None:
+        """Lets go of every sounding note of the channel, as note-offs would (the pedal still holds them)."""
         for (port, channel, pitch), started in list(sounding.items()):
             if (port, channel) == key:
-                while started:
-                    note_off(key, pitch, tick)
+                for start, velocity, owner, program, silenced in started:
+                    if not silenced:
+                        release(key, pitch, start, velocity, owner, program, tick)
+                sounding[(port, channel, pitch)] = deque(entry for entry in started if entry[4])
 
     def all_sound_off(key: Key, tick: int) -> None:
-        """Ends every note of the channel now, sounding or held by the pedal; the pedal itself stays as it is."""
+        """
+        Ends every note of the channel now, sounding or held by the pedal; the
+        pedal itself stays as it is. A sounding note keeps its place in the
+        queue, silenced, until the note-off meant for it arrives.
+        """
         for (port, channel, pitch), started in list(sounding.items()):
             if (port, channel) == key:
-                while started:
-                    start, velocity, owner, program = started.popleft()
-                    finish(key, pitch, start, velocity, owner, program, tick)
+                for i, (start, velocity, owner, program, silenced) in enumerate(started):
+                    if not silenced:
+                        finish(key, pitch, start, velocity, owner, program, tick)
+                        started[i] = (start, velocity, owner, program, True)
         release_held(key, tick)
 
     for tick, track, _, kind, port, channel, a, b in sorted(events):
         key = (port, channel)
         if kind == 0x90 and b > 0:
             release_held(key, tick, a)  # a key struck again ends its sustained note
-            sounding[key + (a,)].append((tick, b, track, programs.get(key)))
+            sounding[key + (a,)].append((tick, b, track, programs.get(key), False))
         elif kind in (0x80, 0x90):
             note_off(key, a, tick)
         elif kind == 0xB0 and a == 64:
@@ -453,8 +469,9 @@ def _play(song: Song, events: List[RawEvent]) -> None:
             dropped["key pressure"] += 1
     # Notes never released end with their track.
     for (port, channel, pitch), started in sounding.items():
-        for start, velocity, track, program in started:
-            finish((port, channel), pitch, start, velocity, track, program, max(track_end[track], start))
+        for start, velocity, track, program, silenced in started:
+            if not silenced:
+                finish((port, channel), pitch, start, velocity, track, program, max(track_end[track], start))
     for key, entries in held.items():
         for p, start, velocity, track, program, off in entries:
             end = max(track_end[track], off)

@@ -412,6 +412,14 @@ class ConverterTest(unittest.TestCase):
         code = self.convert(mf.midi(0, PPQ, [mf.track([mf.tempo(0, 120)] + events)]))
         self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60), (0.75, 0.75, 64)], places=6)
 
+    def test_the_note_off_of_a_silenced_note_ends_nothing_else(self) -> None:
+        # 120 bpm. C4 at 0.0 s is silenced by all sound off at 0.5 s; C4 again at 0.75 s. The note-off
+        # at 1.0 s belongs to the first C4 (first on, first off): it ends nothing. The one at 1.5 s ends the second.
+        events = [mf.tempo(0, 120), (0, b"\x90\x3c\x64"), mf.control(96, 0, 120, 0), (144, b"\x90\x3c\x64"),
+                  (192, b"\x80\x3c\x40"), (288, b"\x80\x3c\x40")]
+        code = self.convert(mf.midi(0, PPQ, [mf.track(events)]))
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60), (0.75, 0.75, 60)], places=6)
+
     def test_drum_keys_that_sound_alike_keep_every_hit(self) -> None:
         drums = mf.note(0, 10, 35, 127, channel=9) + mf.note(0, 10, 36, 64, channel=9) + mf.note(PPQ, 10, 36, 90, channel=9)
         drums += mf.note(2 * PPQ, 10, 35, 127, channel=9) + mf.note(2 * PPQ, 10, 36, 64, channel=9)
