@@ -1481,5 +1481,100 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.audioContext = savedCtx;
 }
 
+// ---------------------------------------------------------------- Review round 16
+{
+    // 1. MIDI and OSC hits are matched on what the output sends, with followed controls at the onset they are
+    // scheduled for. An absolute .follow("note", saw) at cycle 0.5 sends note 66; nudged 0.49 s later its onset
+    // is cycle 0.99 and it sends 72: a new note, played at 1.04 s. A filter change MIDI does not send (with the
+    // nudge that moves it past what was sent) sends no Note On again; OSC, which sends no cycle as identity, sends
+    // nothing again for a nudge-only edit, and does send the note whose pitch changed.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const notes = [];
+    let outputs = 0;
+    const midiRun = (before, after) => {
+        reset();
+        t.lookahead = 0.1;
+        notes.length = 0;
+        const id = 'r16-' + outputs++; // a fresh output each time: note-offs pending from before do not count
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round16', send(m, at) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) notes.push(m[1]); } }]]) };
+        t.playEvent = TidalJS.prototype.playEvent;
+        eq(t.eval(`d1(${before}.playFor(0, 1))`).success, true);
+        for (let ms = 0; ms <= 600; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        const first = notes.slice();
+        eq(t.eval(`d1(${after}.playFor(0, 1))`, live).success, true);
+        for (let ms = 625; ms <= 1800; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        return [first, notes.slice()];
+    };
+    eq(midiRun('note("~ c4").midi("round16").follow("note", saw.range(0, 12))', 'note("~ c4").midi("round16").follow("note", saw.range(0, 12)).nudge(0.49)'),
+        [[66], [66, 72]], 'the pitch it now sends is a new note');
+    eq(midiRun('note("~ c4").midi("round16").lpf(300)', 'note("~ c4").midi("round16").lpf(900).nudge(0.3)'),
+        [[60], [60]], 'a filter change MIDI does not send: no Note On again');
+    t.midiAccess = savedAccess;
+
+    const packets = [];
+    t._oscSocket = function () { return { readyState: 1, send(p) { packets.push(p); } }; };
+    t._socket = { readyState: 1, send(p) { packets.push(p); } };
+    const oscRun = (before, after) => {
+        reset();
+        t.lookahead = 0.1;
+        packets.length = 0;
+        t.playEvent = TidalJS.prototype.playEvent;
+        t._socket = { readyState: 1, send(p) { packets.push(p); } };
+        eq(t.eval(`d1(${before}.playFor(0, 1))`).success, true);
+        for (let ms = 0; ms <= 600; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        const first = packets.length;
+        eq(t.eval(`d1(${after}.playFor(0, 1))`, live).success, true);
+        for (let ms = 625; ms <= 1800; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        return [first, packets.length];
+    };
+    eq(oscRun('note("~ c4").osc("/round16")', 'note("~ c4").osc("/round16").nudge(0.3)'), [1, 1], 'OSC, nudge only: nothing sent again');
+    eq(oscRun('note("~ c4").osc("/round16").follow("note", saw.range(0, 12))', 'note("~ c4").osc("/round16").follow("note", saw.range(0, 12)).nudge(0.49)'),
+        [1, 2], 'OSC: the note whose pitch changed is sent');
+    delete t._oscSocket;
+    t._socket = null;
+    t.stopAll();
+}
+{
+    // 2. Replacing a stack with a long-nudged kick (60 s) and a dense followed synth: the kick keeps its stream's
+    // records back to cycle 0, but the synth's onsets in between can no longer sound, so their curves are not
+    // compared again. Changing the delay to 61 s reads the signal only as the queries do (once per onset), and
+    // the kick plays once, at 61.05 s.
+    const live = { keepUnchanged: true };
+    const savedCtx = t.audioContext;
+    reset();
+    t.audioContext = layoutAudio();
+    t.lookahead = 0.1;
+    globalThis.round16 = 0;
+    const code = (delay) => `d1(stack(sound("kick").nudge(${delay}).playFor(0, 1), sound("saw*16").legato(0.5).followNote("lpf", sine.withValue((x) => (globalThis.round16++, x)).range(200, 2000))))`;
+    eq(t.eval(code(60)).success, true);
+    const real = TidalJS.prototype.playEvent;
+    const kicks = [];
+    t.playEvent = function (v, time, duration) {
+        if (v.s === 'kick') kicks.push(+time.toFixed(6));
+        return real.call(this, v, time, duration);
+    };
+    for (let ms = 0; ms <= 59900; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(kicks, [], 'still held');
+    eq(t.eval(code(61), live).success, true);
+    const before = globalThis.round16;
+    t.audioContext.currentTime = 59.925;
+    t._tick(); // the handoff
+    const reads = globalThis.round16 - before;
+    // The lookback asks for about 60 cycles of 16 notes, and the query reads each onset's value; beyond that only
+    // the onset still open (cycle 0) is compared and the notes this tick sends are laid out.
+    const asked = globalThis.round16;
+    t.channels.get('d1').query(0, t._queried.get('d1').to);
+    const byQuery = globalThis.round16 - asked;
+    ok(byQuery > 16 * 59, 'the query itself: ' + byQuery);
+    ok(reads - byQuery < 300, 'bounded signal reads at the handoff: ' + reads + ' (the query: ' + byQuery + ')');
+    for (let ms = 59950; ms <= 61300; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    t.playEvent = real;
+    eq(kicks, [61.05], 'the kick once, at 61.05 s');
+    delete globalThis.round16;
+    t.stopAll();
+    t.audioContext = savedCtx;
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

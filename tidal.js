@@ -7360,7 +7360,7 @@
                 }
                 // A replacement does not send again a hit its stream already sent, whatever its nudge now (nor
                 // its tempo change); see _handoff.
-                const already = fresh ? this._handoff(id, pattern, events) : null;
+                const already = fresh ? this._handoff(id, pattern, events, now) : null;
                 for (let i = 0; i < events.length; i++) {
                     if (already && already.has(i)) continue;
                     const at = events[i].begin.toFixed(9);
@@ -7451,9 +7451,20 @@
          * simultaneous hits a sent one never stands for an unsent sibling. A
          * truncated fingerprint proves nothing: such a hit matches no other.
          */
-        _handoff(id, pattern, events) {
+        _handoff(id, pattern, events, now) {
             const sent = this._sentOnsets.get(id);
             if (!sent) return null;
+            // Only onsets where some new event can still sound (after what was sent, not too late) need deciding:
+            // at the others every new event is dropped anyway (see _dispatch), so nothing of them is compared.
+            // (A long-nudged hit keeps its stream's records back to its onset; what lies between is skipped.)
+            const open = new Set();
+            for (let i = 0; i < events.length; i++) {
+                const at = events[i].begin.toFixed(9);
+                if (open.has(at) || !sent.has(at)) continue;
+                const time = this._scheduledAt(events[i], asObject(events[i].value));
+                if (time >= this._sentHorizon && time >= now - 0.02) open.add(at);
+            }
+            if (!open.size) return null;
             const groups = new Map(); // onset + fingerprint -> { old: [hit], fresh: [hit] }
             let unique = 0;
             const group = (at, fp) => {
@@ -7462,22 +7473,20 @@
                 if (!g) groups.set(key, (g = { old: [], fresh: [] }));
                 return g;
             };
-            const ats = new Set();
+            const ats = open;
             for (let i = 0; i < events.length; i++) {
                 const at = events[i].begin.toFixed(9);
-                if (!sent.has(at)) continue;
-                ats.add(at);
+                if (!ats.has(at)) continue;
                 const v = asObject(events[i].value);
-                group(at, hitFingerprint(v, events[i])).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
+                group(at, this._hitIdentity(v, events[i], this._scheduledAt(events[i], v))).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
             }
-            if (!ats.size) return null;
             for (const at of ats) {
                 const record = sent.get(at);
                 for (const h of record.hits) group(at, h.fp).old.push({ ...h, sent: true });
             }
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
-                group(it.at, hitFingerprint(it.v, it.ev)).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
+                group(it.at, this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v))).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
             }
             const already = new Set();
             for (const g of groups.values()) {
@@ -7501,6 +7510,51 @@
                 }
             }
             return already;
+        }
+
+        /** When an event would sound: its onset on the clock as it is, moved by its nudge (see _tick). */
+        _scheduledAt(ev, v) {
+            return this.timeAt(ev.begin) + Math.max(nudgeOf(v), -NUDGE_EARLY);
+        }
+
+        /**
+         * What a hit plays, to match it at a handoff (see _handoff): for a
+         * voice, its fingerprint (hitFingerprint); for MIDI and OSC, what that
+         * output sends, with its followed controls at the onset it is
+         * scheduled for (an absolute .follow() gives a nudged note another
+         * value) and nothing else of their curves: the MIDI channel, messages
+         * and note (key, velocity, length), or the OSC address and arguments
+         * but the cycle and tempo (timing, like the nudge). A filter change
+         * MIDI does not send is no change there.
+         */
+        _hitIdentity(v, ev, time) {
+            if (v.midi === undefined && v.osc === undefined) return hitFingerprint(v, ev);
+            try {
+                let out = v;
+                if (v.follow instanceof Follows) {
+                    const cycle = this.cycleAt(time);
+                    out = { ...v };
+                    for (const name of v.follow.names()) {
+                        const x = v.follow.valueAt(name, cycle, cycle);
+                        if (x !== undefined) out[name] = x;
+                    }
+                }
+                const duration = (ev.end - ev.begin) / this._cpsAt(ev.begin);
+                if (v.midi !== undefined) {
+                    const m = midiEventOf(out, duration);
+                    const note = m.note ? [m.note.key, m.note.velocity, +m.note.length.toFixed(6)] : null;
+                    return { key: 'midi:' + JSON.stringify([String(v.midi), m.channel, m.controls, note]), truncated: false };
+                }
+                const args = [];
+                for (const key of Object.keys(out).sort()) {
+                    const value = out[key];
+                    if (key === 'osc' || key === 'nudge' || key === 'cps') continue;
+                    if (typeof value === 'number' || typeof value === 'string') args.push(key, value);
+                }
+                return { key: 'osc:' + JSON.stringify([String(v.osc), +duration.toFixed(6), args]), truncated: false };
+            } catch (error) {
+                return { key: '', truncated: true }; // (a signal that fails at the onset: undecided)
+            }
         }
 
         /**
@@ -7599,7 +7653,7 @@
                 // What it plays as it goes out (a value object changed in place later does not change it), and
                 // of its followed curves what its voice reads from them while it is laid out (nothing more).
                 const follow = followOf(it.v);
-                const hit = { fp: hitFingerprint(it.v, it.ev), nudge: nudgeOf(it.v), follow, reads: null, ev: it.ev }; // (its own span)
+                const hit = { fp: this._hitIdentity(it.v, it.ev, Math.max(it.time, now)), nudge: nudgeOf(it.v), follow, reads: null, ev: it.ev }; // (its own span)
                 sentAt.hits.push(hit);
                 const reads = follow ? [] : null;
                 FOLLOW_READS.list = reads;
