@@ -1642,5 +1642,64 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 18
+{
+    // MIDI through a stub port, with the performance clock tied to the fake audio clock so Note On times read
+    // as audio times.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const savedNow = performance.now;
+    performance.now = () => t.audioContext.currentTime * 1000;
+    const sent = [];
+    let ports = 0;
+    const midiStart = (code) => {
+        reset();
+        t.lookahead = 0.1;
+        t._nTakeCounters.clear();
+        sent.length = 0;
+        const id = 'r18-' + ports++;
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round18', send(m, at) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) sent.push(m[1] + '/' + m[2] + '@' + +(at / 1000).toFixed(6)); } }]]) };
+        t.playEvent = TidalJS.prototype.playEvent;
+        eq(t.eval(code).success, true);
+    };
+    const tickTo = (fromMs, toMs) => { for (let ms = fromMs; ms <= toMs; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); } };
+
+    // 1. A replacement at an onset already sent is compared with the take values that hit used: a nudge-only
+    // edit sends velocity 20 (index 0) at 0.05 s and velocity 90 (index 1) at 1.65 s, two counts in all.
+    midiStart('d1(note("c4").midi("round18").gainTake("meter", [0.2, 0.9]).playFor(0, 2))');
+    tickTo(0, 300);
+    eq(t.eval('d1(note("c4").midi("round18").gainTake("meter", [0.2, 0.9]).nudge(0.6).playFor(0, 2))', live).success, true);
+    tickTo(325, 2200);
+    eq(sent, ['60/20@0.05', '60/90@1.65'], 'the sent note not again, the next one with the next value');
+    eq(t._nTakeCounters.get('gain:meter'), 2, 'two counts');
+    // The value at that index changed (0.2 to 0.5): a new hit at cycle 0 (it goes out with the counter's next
+    // value, 0.9), then cycle 1 with 0.5.
+    midiStart('d1(note("c4").midi("round18").gainTake("meter", [0.2, 0.9]).playFor(0, 2))');
+    tickTo(0, 300);
+    eq(t.eval('d1(note("c4").midi("round18").gainTake("meter", [0.5, 0.9]).nudge(0.6).playFor(0, 2))', live).success, true);
+    tickTo(325, 2200);
+    eq(sent, ['60/20@0.05', '60/90@0.65', '60/50@1.65'], 'a changed value is a new hit');
+    eq(t._nTakeCounters.get('gain:meter'), 3);
+
+    // 2. The handoff reads a replacement's output on the clock it goes out on. Note 60 went out early (cycle 0.5,
+    // nudge -0.06, at 0.49 s, where saw.range(0, 1) gives 0.44). The edit changes its absolute pitch curve and,
+    // in the same tick, slows down to 0.2 cps at cycle 0.45: the note now goes out at 0.69 s, at cycle 0.488,
+    // where the new curve gives 12: note 72 is sent (on the clock before the slowdown, cycle 0.44, it would read
+    // 0, the note already sent).
+    const pitched = (curve) => `note("~ c4").midi("round18").follow("note", ${curve}).nudge(-0.06).playFor(0, 1)`;
+    midiStart(`d1(${pitched('saw.range(0, 1)')})`);
+    tickTo(0, 400);
+    eq(sent, ['60/100@0.49'], 'sent early');
+    eq(+t._dispatchCycle.toFixed(9), 0.45);
+    eq(t.eval(`d1(${pitched('saw.range(-110, 140)')})\nd2(sound("~ ~ ~ ~ ~ ~ ~ ~ ~ s ~ ~ ~ ~ ~ ~ ~ ~ ~ ~").cps(0.2).playFor(0, 1))`, live).success, true);
+    tickTo(425, 1500);
+    eq(sent, ['60/100@0.49', '72/100@0.69'], 'note 72 at 0.69 s');
+    eq(t.cps, 0.2, 'the slowdown took effect');
+
+    performance.now = savedNow;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

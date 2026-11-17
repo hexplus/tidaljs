@@ -1614,7 +1614,7 @@
     const FOLLOW_READS = { list: null };
     // While the scheduler plays a hit: the values it went out with (see playEvent), so its identity is read from
     // them rather than resolved again (takes would advance, a stateful signal could answer differently).
-    const PLAYED = { on: false, v: null };
+    const PLAYED = { on: false, v: null, takes: null };
 
     class Follows {
         constructor(entries, onset) {
@@ -7331,8 +7331,9 @@
             // later), whether or not the old pattern had such an onset waiting. Simultaneous events keep a
             // fixed order: the streams' order, then the order each stream gives them. Silent streams are
             // asked too, for their tempo changes only (those count again if the stream is heard before them).
-            const items = [];
+            let items = [];
             const requests = [];
+            const handoffs = []; // replacements' events at onsets already sent but not yet passed (see below)
             let order = 0;
             for (const [id, pattern] of [...this.channels]) {
                 const stream = order++;
@@ -7362,8 +7363,12 @@
                     continue;
                 }
                 // A replacement does not send again a hit its stream already sent, whatever its nudge now (nor
-                // its tempo change); see _handoff.
-                const already = fresh ? this._handoff(id, pattern, events, now) : null;
+                // its tempo change); see _handoff. Onsets before what was sent are decided now (the clock there
+                // is fixed); those at or after it once this tick's tempo changes are in (below), on the clock
+                // their events go out on.
+                const sentBefore = fresh && audible ? this._sentOnsets.get(id) : null;
+                const already = sentBefore ? this._handoff(id, pattern, events, now, 'past') : null;
+                const ahead = [];
                 for (let i = 0; i < events.length; i++) {
                     if (already && already.has(i)) continue;
                     const at = events[i].begin.toFixed(9);
@@ -7372,6 +7377,7 @@
                     // when that stream is muted, replaced or removed before it goes out.
                     const item = audible ? { ev: events[i], v, stream, i, id, pattern, at, after: fresh ? this._sentHorizon : -Infinity } : null;
                     if (item) items.push(item);
+                    if (item && sentBefore && sentBefore.has(at) && events[i].begin >= this._dispatchCycle) ahead.push(item);
                     // Tidal's cps control, settled when its event is sent or dropped (see _commitTempo). Onsets
                     // before what was sent were the old pattern's to make, except those a replacement recovers:
                     // still unsent, moved by a positive nudge to sound after the boundary (the tempo there follows
@@ -7380,6 +7386,7 @@
                         requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i, item });
                     }
                 }
+                if (ahead.length) handoffs.push({ id, pattern, items: ahead });
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
             for (const id of [...this._sentOnsets.keys()]) if (!this.channels.has(id)) this._sentOnsets.delete(id);
@@ -7394,6 +7401,25 @@
             requests.sort((a, b) => a.cycle - b.cycle || a.stream - b.stream || a.i - b.i);
             for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++, r.item);
             if (requests.length) this._reconcileTempo();
+
+            // The handoff at onsets not yet passed, on the clock with this tick's tempo changes (a slowdown
+            // before an onset moves it, and with it where an absolute curve is read): a hit already sent is
+            // dropped, with the tempo change it carries.
+            if (handoffs.length) {
+                let dropped = false;
+                for (const h of handoffs) {
+                    const already = this._handoff(h.id, h.pattern, h.items.map((it) => it.ev), now, 'ahead');
+                    if (!already) continue;
+                    for (const k of already) {
+                        h.items[k].dropped = true;
+                        dropped = true;
+                    }
+                }
+                if (dropped) {
+                    items = items.filter((it) => !it.dropped);
+                    this._reconcileTempo();
+                }
+            }
 
             // Then in the order they sound (nudge included), so the last word on
             // an orbit's effects or a cut group is the latest event's. A note's
@@ -7454,7 +7480,7 @@
          * simultaneous hits a sent one never stands for an unsent sibling. A
          * truncated fingerprint proves nothing: such a hit matches no other.
          */
-        _handoff(id, pattern, events, now) {
+        _handoff(id, pattern, events, now, phase) {
             const sent = this._sentOnsets.get(id);
             if (!sent) return null;
             // Only onsets where some new event can still sound (after what was sent, not too late) need deciding:
@@ -7462,11 +7488,13 @@
             // (A long-nudged hit keeps its stream's records back to its onset; what lies between is skipped.)
             // The clock before what was sent never changes, so an onset there is judged now; one at or after it
             // may move with tempo changes this tick reconciles (a slowdown before it), so it is always decided.
+            // ('past': the onsets before what was sent; 'ahead': those at or after it, all decided.)
             const open = new Set();
             for (let i = 0; i < events.length; i++) {
                 const at = events[i].begin.toFixed(9);
                 if (open.has(at) || !sent.has(at)) continue;
-                if (events[i].begin >= this._dispatchCycle) {
+                if ((events[i].begin >= this._dispatchCycle) !== (phase === 'ahead')) continue;
+                if (phase === 'ahead') {
                     open.add(at);
                     continue;
                 }
@@ -7474,6 +7502,18 @@
                 if (time >= this._sentHorizon && time >= now - 0.02) open.add(at);
             }
             if (!open.size) return null;
+            // The take indices the hits sent there used: a new event there is compared with the values its lists
+            // give at those indices (the counters have moved on since). Two different indices for one counter
+            // (simultaneous layers sharing a take) cannot tell which is which: undecided.
+            const indicesAt = new Map();
+            for (const at of open) {
+                const indices = new Map();
+                for (const h of sent.get(at).hits) {
+                    if (!h.takes) continue;
+                    for (const [counter, index] of h.takes) indices.set(counter, indices.has(counter) && indices.get(counter) !== index ? NaN : index);
+                }
+                indicesAt.set(at, indices);
+            }
             const groups = new Map(); // onset + fingerprint -> { old: [hit], fresh: [hit] }
             let unique = 0;
             const group = (at, fp) => {
@@ -7487,7 +7527,7 @@
                 const at = events[i].begin.toFixed(9);
                 if (!ats.has(at)) continue;
                 const v = asObject(events[i].value);
-                group(at, this._hitIdentity(v, events[i], this._scheduledAt(events[i], v))).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
+                group(at, this._hitIdentity(v, events[i], this._scheduledAt(events[i], v), null, indicesAt.get(at))).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
             }
             for (const at of ats) {
                 const record = sent.get(at);
@@ -7495,7 +7535,7 @@
             }
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
-                group(it.at, this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v))).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
+                group(it.at, this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v), null, indicesAt.get(it.at))).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
             }
             const already = new Set();
             for (const g of groups.values()) {
@@ -7524,14 +7564,23 @@
         /**
          * An event's values as they go out at `time`: the next value of its
          * take lists (nTake, gainTake...; counted, so `advance` only when it
-         * is really played) and its followed controls at that onset, with the
-         * signals bound to it (see Follows.bind). Resolved once: an event
-         * already resolved (no takes, its signals bound) comes back as it is.
+         * is really played; `indices` reads given ones instead, and `used`
+         * collects the ones read) and its followed controls at that onset,
+         * with the signals bound to it (see Follows.bind). Resolved once: an
+         * event already resolved (no takes, its signals bound) comes back as
+         * it is.
          */
-        _resolveOutput(v, time, advance) {
+        _resolveOutput(v, time, advance, indices, used) {
             const next = (counter, list) => {
-                const index = this._nTakeCounters.get(counter) || 0;
-                if (advance) this._nTakeCounters.set(counter, index + 1);
+                let index;
+                if (indices && indices.has(counter)) {
+                    index = indices.get(counter);
+                    if (Number.isNaN(index)) throw new Error('undecided take index'); // (see _handoff)
+                } else {
+                    index = this._nTakeCounters.get(counter) || 0;
+                    if (advance) this._nTakeCounters.set(counter, index + 1);
+                }
+                if (used) used.set(counter, index);
                 return list[index % list.length];
             };
             if (v.nTake) {
@@ -7573,11 +7622,12 @@
          * but the cycle and tempo (timing, like the nudge). A filter change
          * MIDI does not send is no change there.
          */
-        _hitIdentity(v, ev, time, resolved) {
+        _hitIdentity(v, ev, time, resolved, indices) {
             if (v.midi === undefined && v.osc === undefined) return hitFingerprint(v, ev);
             try {
-                // What was really sent (a sent hit), or what would be at `time` (take counters left as they are).
-                const out = resolved || this._resolveOutput(v, time, false);
+                // What was really sent (a sent hit), or what would be at `time` (take counters left as they are,
+                // or the indices the hit sent at that onset used).
+                const out = resolved || this._resolveOutput(v, time, false, indices);
                 const duration = (ev.end - ev.begin) / this._cpsAt(ev.begin);
                 if (v.midi !== undefined) {
                     const m = midiEventOf(out, duration);
@@ -7699,6 +7749,7 @@
                 FOLLOW_READS.list = reads;
                 PLAYED.on = true;
                 PLAYED.v = null;
+                PLAYED.takes = null;
                 try {
                     this.playEvent(it.v, at, it.duration);
                 } catch (error) {
@@ -7709,7 +7760,9 @@
                 }
                 // Its identity from the values it went out with (resolved once, takes and followed onsets included).
                 hit.fp = this._hitIdentity(it.v, it.ev, at, PLAYED.v);
+                hit.takes = PLAYED.takes && PLAYED.takes.size ? PLAYED.takes : null;
                 PLAYED.v = null;
+                PLAYED.takes = null;
                 hit.reads = reads;
             }
         }
@@ -9208,9 +9261,13 @@
          */
         playEvent(v, time, duration = 0.25, hold = false) {
             if (!this.audioContext || !this._session) return null;
-            v = this._resolveOutput(v, time, true);
-            // The scheduler keeps what was sent as the hit's identity (see _dispatch and _hitIdentity).
-            if (PLAYED.on && !PLAYED.v) PLAYED.v = v;
+            // The scheduler keeps what was sent (and the take indices it used) as the hit's identity (see _dispatch).
+            const used = PLAYED.on && !PLAYED.v ? new Map() : null;
+            v = this._resolveOutput(v, time, true, null, used);
+            if (used) {
+                PLAYED.v = v;
+                PLAYED.takes = used;
+            }
             if (v.midi !== undefined) {
                 this._sendMidi(v, time, duration);
                 return null;
