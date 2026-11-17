@@ -1410,5 +1410,76 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.audioContext = savedCtx;
 }
 
+// ---------------------------------------------------------------- Review round 15
+{
+    // 1. MIDI (and OSC) send only a followed control's value at the onset, so a handoff compares only that: the
+    // rest of the curve is not heard. A nudge-only edit with a signal that fails away from the onset sends nothing
+    // again and compares nothing (no error); nor does an edit to a curve whose emitted bytes are the same (both
+    // start at 200), even though the edit also moves the notes past what was sent.
+    const live = { keepUnchanged: true };
+    const failing = 'sine.withValue((x) => { if (x > 0.75) throw new Error("bad curve"); return x })';
+    const errors = [];
+    const savedError = console.error;
+    console.error = (...args) => errors.push(String(args[0]));
+    const savedAccess = t.midiAccess;
+    const messages = [];
+    let outputs = 0;
+    for (const [before, after] of [
+        [`note("c4 e4").midi("round15").followNote("lpf", ${failing}.range(200, 2000)).nudge(0.1)`, `note("c4 e4").midi("round15").followNote("lpf", ${failing}.range(200, 2000)).nudge(0.3)`],
+        ['note("c4 e4").midi("round15").followNote("lpf", saw.range(200, 2000)).nudge(0.1)', 'note("c4 e4").midi("round15").followNote("lpf", saw.range(200, 4000)).nudge(0.3)'],
+    ]) {
+        reset();
+        t.lookahead = 0.1;
+        messages.length = 0;
+        errors.length = 0;
+        const id = 'r15-' + outputs++; // a fresh output each time: note-offs pending from before do not count
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round15', send(message) { if (message[0] < 0xb0 || message[1] !== 123) messages.push(message.join(' ')); } }]]) };
+        t.playEvent = TidalJS.prototype.playEvent;
+        eq(t.eval(`d1(${before}.playFor(0, 1))`).success, true);
+        for (let ms = 0; ms <= 700; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        const first = messages.slice();
+        eq(first.filter((m) => m.startsWith('144 ')), ['144 60 100', '144 64 100'], 'both notes sent: ' + before);
+        eq(t.eval(`d1(${after}.playFor(0, 1))`, live).success, true);
+        for (let ms = 725; ms <= 1800; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        eq(messages, first, 'nothing sent again: ' + after);
+        eq(errors.filter((e) => e.includes('compare')), [], 'nothing compared');
+    }
+    console.error = savedError;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+{
+    // 2. A stream's sent-hit records are kept for that stream's own needs: a hit nudged 60 s in d1 keeps the clock
+    // back to its onset, but not the records (with the automation their voices read) of a dense followed synth in
+    // d2. The synth's records stay bounded, and the delayed hit plays on time, once.
+    const savedCtx = t.audioContext;
+    reset();
+    t.audioContext = layoutAudio();
+    t.lookahead = 0.1;
+    eq(t.eval('d1(sound("late").nudge(60).playFor(0, 1))\nd2(sound("saw*16").legato(0.5).followNote("lpf", sine.range(200, 2000)))').success, true);
+    const real = TidalJS.prototype.playEvent;
+    const late = [];
+    let largest = 0;
+    let synth = 0;
+    t.playEvent = function (v, time, duration) {
+        if (v.s === 'late') late.push(+time.toFixed(6));
+        else synth++;
+        return real.call(this, v, time, duration);
+    };
+    for (let ms = 0; ms <= 61000; ms += 25) {
+        t.audioContext.currentTime = ms / 1000;
+        t._tick();
+        const records = t._sentOnsets.get('d2');
+        if (records) largest = Math.max(largest, records.size);
+    }
+    t.playEvent = real;
+    eq(late, [60.05], 'the delayed hit on time, once');
+    ok(synth > 900, 'the synth played on: ' + synth);
+    ok(largest <= 40, 'the synth records stay bounded: ' + largest);
+    ok(t._sentOnsets.get('d1') === undefined || t._sentOnsets.get('d1').size <= 1, 'd1 keeps its own');
+    t.stopAll();
+    t.audioContext = savedCtx;
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

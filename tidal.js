@@ -1793,7 +1793,9 @@
         return { key, truncated };
     }
     const nudgeOf = (v) => (isNum(v.nudge) ? v.nudge : 0);
-    const followOf = (v) => (v.follow instanceof Follows ? v.follow : null);
+    // The followed curves a hit's output consumes: a voice moves its parameters along them; MIDI and OSC send
+    // only the values at the onset (already among its controls), so for them the rest of a curve is not heard.
+    const followOf = (v) => (v.follow instanceof Follows && v.midi === undefined && v.osc === undefined ? v.follow : null);
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -7408,23 +7410,31 @@
         }
 
         /**
-         * Forgets what no one needs any more: the earliest cycle still needed
-         * is the earliest onset held back, or how far back a replacement looks
-         * (see _tick), or the playhead a second ago, whichever is earliest.
-         * Tempo segments that end before it go (notes held back keep the
-         * mapping of their onset, however many tempo changes came since), and
-         * so do the records of onsets sent before it.
+         * Forgets what no one needs any more. The clock is needed back to the
+         * earliest onset held back in any stream, how far back a replacement
+         * looks (see _tick) or the playhead a second ago, whichever is
+         * earliest: tempo segments that end before it go (notes held back keep
+         * the mapping of their onset, however many tempo changes came since).
+         * A stream's records of the hits it sent (see _handoff) are needed
+         * back to how far a replacement of that stream looks: the look back,
+         * or that stream's own earliest onset held back, never another's.
          */
         _pruneTimeline(now) {
             const edge = Number.isFinite(this._sentHorizon) ? Math.max(this._sentHorizon, now) : now;
-            let floor = Math.min(this.cycleAt(edge - NUDGE_LATE), this.cycleAt(now - 1));
-            for (const it of this._nudged) if (it.ev.begin < floor) floor = it.ev.begin;
+            const lookback = Math.min(this.cycleAt(edge - NUDGE_LATE), this.cycleAt(now - 1));
+            let floor = lookback;
+            const heldFrom = new Map(); // stream -> its earliest onset held back
+            for (const it of this._nudged) {
+                if (it.ev.begin < floor) floor = it.ev.begin;
+                if (!(heldFrom.get(it.id) <= it.ev.begin)) heldFrom.set(it.id, it.ev.begin);
+            }
             // The clock and the copy of it that tempo requests are rebuilt from (see _reconcileTempo), so a
             // reconciliation does not bring back what was pruned.
             pruneSegments(this._tempoHistory, this._anchorCycle, floor);
             if (this._tempoPast) pruneSegments(this._tempoPast.history, this._tempoPast.cycle, floor);
-            for (const onsets of this._sentOnsets.values()) {
-                for (const [at, sent] of onsets) if (sent.cycle < floor) onsets.delete(at);
+            for (const [id, onsets] of this._sentOnsets) {
+                const keep = heldFrom.has(id) ? Math.min(lookback, heldFrom.get(id)) : lookback;
+                for (const [at, sent] of onsets) if (sent.cycle < keep) onsets.delete(at);
             }
         }
 
