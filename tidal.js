@@ -7402,27 +7402,44 @@
             for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++, r.item);
             if (requests.length) this._reconcileTempo();
 
-            // The handoff at onsets not yet passed, on the clock with this tick's tempo changes (a slowdown
-            // before an onset moves it, and with it where an absolute curve is read and how long a note is): a
-            // hit already sent is dropped, with the tempo change it carries. Dropping those changes the clock
-            // again, so the decisions are taken again on the clock that is left, until they hold on it (a
-            // slowdown that came only with a hit already sent changes nothing).
+            // The handoff at onsets not yet passed, on the clock events go out on (a slowdown before an onset
+            // moves it, and with it where an absolute curve is read and how long a note is): a hit already sent
+            // is dropped, with the tempo change it carries. Which tempo changes a decision sees is fixed, so it
+            // never depends on another: onsets are decided in cycle order, each stream's events at an onset
+            // together, on the clock with every tempo change that is not a replacement's at an onset already
+            // sent, those of earlier onsets that were kept, and the stream's own at that onset (it is judged as
+            // it would sound if it played), but no other replacement's at that onset or later (not decided yet,
+            // or deciding at the same time: a slowdown that comes with a hit already sent changes nothing).
             if (handoffs.length) {
-                const candidates = handoffs.flatMap((h) => h.items);
-                let suppressed = new Set();
-                for (let round = 0; round < 8; round++) {
-                    const next = new Set();
-                    for (const h of handoffs) {
-                        const already = this._handoff(h.id, h.pattern, h.items.map((it) => it.ev), now, 'ahead');
-                        if (already) for (const k of already) next.add(h.items[k]);
+                const groups = [];
+                for (const h of handoffs) {
+                    const byOnset = new Map();
+                    for (const it of h.items) {
+                        if (!byOnset.has(it.at)) byOnset.set(it.at, []);
+                        byOnset.get(it.at).push(it);
                     }
-                    const settled = next.size === suppressed.size && [...next].every((it) => suppressed.has(it));
-                    suppressed = next;
-                    for (const it of candidates) it.dropped = suppressed.has(it);
-                    this._reconcileTempo(); // (the requests of dropped events no longer count)
-                    if (settled) break;
+                    for (const list of byOnset.values()) groups.push({ id: h.id, pattern: h.pattern, cycle: list[0].ev.begin, items: list });
                 }
-                if (suppressed.size) items = items.filter((it) => !it.dropped);
+                groups.sort((a, b) => a.cycle - b.cycle);
+                const decided = new Set();
+                let suppressed = 0;
+                for (const g of groups) {
+                    for (const other of groups) {
+                        if (other === g) continue;
+                        for (const it of other.items) if (!decided.has(it)) it.dropped = true; // (undecided: not counted yet)
+                    }
+                    for (const it of g.items) it.dropped = false;
+                    this._reconcileTempo();
+                    const already = this._handoff(g.id, g.pattern, g.items.map((it) => it.ev), now, 'ahead');
+                    for (let k = 0; k < g.items.length; k++) {
+                        const it = g.items[k];
+                        it.dropped = !!(already && already.has(k));
+                        if (it.dropped) suppressed++;
+                        decided.add(it);
+                    }
+                }
+                this._reconcileTempo(); // (the tempo changes of the hits dropped no longer count)
+                if (suppressed) items = items.filter((it) => !it.dropped);
             }
 
             // Then in the order they sound (nudge included), so the last word on

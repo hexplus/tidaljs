@@ -1765,5 +1765,36 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 20
+{
+    // A replacement is judged as it would sound if it played, its own tempo change included, against the tempo
+    // changes that do not depend on the handoff (other replacements' at the same onset or later are left out):
+    // one rule, applied once, so no decision can undo another. Note c4 at cycle 0.5 went out early (nudge -0.15,
+    // at 0.375 s) on a clock with a pending 2 cps control at cycle 0.45 (held back by a positive nudge, so not
+    // sent). The sketch is replaced by the same note, nudged otherwise and carrying cps(2) itself: with its own
+    // 2 cps it is the note sent (same length), so it is dropped, and its 2 cps with it; the held control went with
+    // the old sketch. One Note On, and the tempo back at 1 cps.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const savedNow = performance.now;
+    performance.now = () => t.audioContext.currentTime * 1000;
+    const sent = [];
+    t.midiAccess = { outputs: new Map([['r20', { id: 'r20', name: 'round20', send(m, at) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) sent.push(m[1] + '@' + +(at / 1000).toFixed(6)); } }]]) };
+    reset();
+    t.lookahead = 0.1;
+    t.playEvent = TidalJS.prototype.playEvent;
+    eq(t.eval('d1(note("~ ~ c4 ~").midi("round20").nudge(-0.15).playFor(0, 1))\nd2(sound("~ ~ ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~ ~ ~ ~ ~ ~ ~ ~").cps(2).nudge(0.5).playFor(0, 1))').success, true);
+    for (let ms = 0; ms <= 300; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(sent, ['60@0.375'], 'sent early, on the clock with the pending 2 cps');
+    eq([t.cps, t._tempoRequests.map((r) => [r.cycle, r.committed])], [2, [[0.45, false]]], 'the control still held back');
+    eq(t.eval('d1(note("~ ~ c4 ~").midi("round20").cps(2).nudge(-0.1).playFor(0, 1))', live).success, true);
+    for (let ms = 325; ms <= 1500; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(sent, ['60@0.375'], 'one Note On');
+    eq(t.cps, 1, 'the tempo back at 1 cps');
+    performance.now = savedNow;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
