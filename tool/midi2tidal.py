@@ -364,7 +364,9 @@ def _play(song: Song, events: List[RawEvent]) -> None:
     with the state of each channel kept per port: pairs note-ons with note-offs,
     holds released notes while the sustain pedal (controller 64) is down, and
     gives every note the program its channel has at that moment. All Sound Off
-    (120) ends every note at once; Reset All Controllers (121) lifts the pedal;
+    (120) ends every note at once, sounding or held, and leaves the pedal as it
+    is (a pedal still down holds the notes that come after); Reset All
+    Controllers (121) lifts the pedal;
     All Notes Off (123, and the mode changes 124 to 127, which imply it) releases
     every note, as note-offs would. Counts the messages that are dropped.
     """
@@ -407,6 +409,15 @@ def _play(song: Song, events: List[RawEvent]) -> None:
                 while started:
                     note_off(key, pitch, tick)
 
+    def all_sound_off(key: Key, tick: int) -> None:
+        """Ends every note of the channel now, sounding or held by the pedal; the pedal itself stays as it is."""
+        for (port, channel, pitch), started in list(sounding.items()):
+            if (port, channel) == key:
+                while started:
+                    start, velocity, owner, program = started.popleft()
+                    finish(key, pitch, start, velocity, owner, program, tick)
+        release_held(key, tick)
+
     for tick, track, _, kind, port, channel, a, b in sorted(events):
         key = (port, channel)
         if kind == 0x90 and b > 0:
@@ -419,10 +430,8 @@ def _play(song: Song, events: List[RawEvent]) -> None:
             if pedal.get(key) and not down:
                 release_held(key, tick)
             pedal[key] = down
-        elif kind == 0xB0 and a == 120:  # all sound off: everything stops now, held or not
-            pedal[key] = False
-            all_notes_off(key, tick)
-            release_held(key, tick)
+        elif kind == 0xB0 and a == 120:  # all sound off: everything stops now, held or not; the pedal stays down
+            all_sound_off(key, tick)
         elif kind == 0xB0 and a == 121:  # reset all controllers: the pedal lifts
             if pedal.get(key):
                 release_held(key, tick)

@@ -116,10 +116,10 @@ class ConverterTest(unittest.TestCase):
     # -- 1. Safe JavaScript
 
     def test_names_become_single_line_comments_and_strings_are_json(self) -> None:
-        title = "Lead\nalert('x')\r//   next  */ \"q\" ‮\x85end"
+        title = "Lead\nalert('x')\r// \u2028 next\u2029 */ \"q\" \u202e\x85end"
         data = mf.midi(1, PPQ, [mf.track([mf.name(title)] + mf.notes([(0, PPQ, 60, 100), (PPQ, PPQ, 64, 100)]))])
-        code = self.convert(data, name="two lines.mid")
-        for bad in ("\r", " ", " ", "‮", "\x85"):
+        code = self.convert(data, name="two\u2028lines.mid")
+        for bad in ("\r", "\u2028", "\u2029", "\u202e", "\x85"):
             self.assertNotIn(bad, code)
         for line in code.splitlines():
             if "Lead" in line or "lines.mid" in line:
@@ -134,8 +134,8 @@ class ConverterTest(unittest.TestCase):
         self.assertIn("--sound takes a sound name", run.stderr)
         self.assertIn('.sound("bd:3")', self.convert(data, "--sound", "bd:3"))
         # The helpers themselves.
-        self.assertEqual(midi2tidal.comment("a\nb c d\re\tf​g"), "a b c d e f g")
-        self.assertEqual(midi2tidal.js('a"b\n '), '"a\\"b\\n\\u2028"')
+        self.assertEqual(midi2tidal.comment("a\nb\u2028c\u2029d\re\tf\u200bg"), "a b c d e f g")
+        self.assertEqual(midi2tidal.js('a"b\n\u2028'), '"a\\"b\\n\\u2028"')
 
     def test_rows_stay_readable(self) -> None:
         bar = [(0, PPQ, 60, 100), (PPQ, PPQ, 62, 100), (2 * PPQ, 2 * PPQ, 64, 100)]
@@ -402,6 +402,15 @@ class ConverterTest(unittest.TestCase):
         s = 0.5 / PPQ
         self.assertPlays(self.played(code, 2 - 1e-9), [(0, 96 * s, 60), (96 * s, 144 * s, 64), (288 * s, 48 * s, 67),
                                                          (BAR * s, PPQ * s, 69)], places=6)
+
+    def test_all_sound_off_keeps_the_pedal_down(self) -> None:
+        # 120 bpm: a quarter note (96 ticks) is 0.5 s. The pedal goes down at 0 and lifts at 1.5 s.
+        events = [mf.control(0, 0, 64, 127), mf.note(0, 1000, 60)[0]]  # C4, never switched off
+        events += [mf.control(96, 0, 120, 0)]  # 0.5 s: all sound off silences C4
+        events += mf.notes([(144, 48, 64, 100)])  # E4 from 0.75 s, released at 1.0 s with the pedal still down
+        events += [mf.control(288, 0, 64, 0)]  # 1.5 s: the pedal lifts, E4 ends
+        code = self.convert(mf.midi(0, PPQ, [mf.track([mf.tempo(0, 120)] + events)]))
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60), (0.75, 0.75, 64)], places=6)
 
     def test_drum_keys_that_sound_alike_keep_every_hit(self) -> None:
         drums = mf.note(0, 10, 35, 127, channel=9) + mf.note(0, 10, 36, 64, channel=9) + mf.note(PPQ, 10, 36, 90, channel=9)
