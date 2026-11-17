@@ -1851,5 +1851,57 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 22
+{
+    // A replacement is judged with everything read on the clock it would go out on. MIDI through a stub port.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const savedNow = performance.now;
+    performance.now = () => t.audioContext.currentTime * 1000;
+    const sent = [];
+    let ports = 0;
+    const start = (code, untilMs) => {
+        reset();
+        t.lookahead = 0.1;
+        sent.length = 0;
+        const id = 'r22-' + ports++;
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round22', send(m, at) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) sent.push(m[1] + '@' + +(at / 1000).toFixed(6)); } }]]) };
+        t.playEvent = TidalJS.prototype.playEvent;
+        eq(t.eval(code).success, true);
+        for (let ms = 0; ms <= untilMs; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    };
+    const finish = (code, fromMs) => {
+        eq(t.eval(code, live).success, true);
+        for (let ms = fromMs; ms <= 2500; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    };
+
+    // 1. A tempo-reading signal is read on the candidate's clock. Note 60 went out early (envelope at 0 throughout;
+    // a fixed sustain, so the note's length does not tell the two apart).
+    // The replacement carries cps(2) and envelope([12, 0], [0.5], "hold") on its note, nudged to 0.65 s: on its own
+    // clock (2 cps from its onset) that is cycle 0.7, 0.35 s into the envelope: 12, note 72. (At 1 cps it would be
+    // 0.6 s in: 0, the note already sent.) Note 72 at 0.65 s, and the tempo ends at 2 cps.
+    start('d1(note("~ ~ c4 ~").midi("round22").follow("note", envelope([0, 0], [0.5], "hold")).sustain(0.25).nudge(-0.15).playFor(0, 1))', 325);
+    eq(sent, ['60@0.4'], 'sent early');
+    finish('d1(note("~ ~ c4 ~").midi("round22").follow("note", envelope([12, 0], [0.5], "hold")).sustain(0.25).cps(2).nudge(0.1).playFor(0, 1))', 350);
+    eq(sent, ['60@0.4', '72@0.65'], 'note 72 at 0.65 s');
+    eq(t.cps, 2);
+
+    // 2. An onset already passed but nudged to sound later reads the clock there: note 60 went out at cycle 0.25
+    // (0.3 s); the replacement is nudged to 0.65 s and the same edit adds an independent slowdown (0.25 cps at
+    // cycle 0.45), so it would sound at cycle 0.4875, where its pitch pattern gives 12: note 72. (Before the
+    // slowdown, cycle 0.6: 0, the note already sent.)
+    const pitch = '"0 0 0 12 0 0 0 0"';
+    start(`d1(note("~ c4 ~ ~").midi("round22").follow("note", ${pitch}).playFor(0, 1))`, 400);
+    eq(sent, ['60@0.3']);
+    eq(+t._dispatchCycle.toFixed(9), 0.45);
+    finish(`d1(note("~ c4 ~ ~").midi("round22").follow("note", ${pitch}).nudge(0.35).playFor(0, 1))\nd2(sound("~ ~ ~ ~ ~ ~ ~ ~ ~ s ~ ~ ~ ~ ~ ~ ~ ~ ~ ~").cps(0.25).playFor(0, 1))`, 425);
+    eq(sent, ['60@0.3', '72@0.65'], 'note 72 at 0.65 s');
+    eq(t.cps, 0.25);
+
+    performance.now = savedNow;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

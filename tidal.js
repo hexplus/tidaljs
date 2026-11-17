@@ -7363,21 +7363,28 @@
                     continue;
                 }
                 // A replacement does not send again a hit its stream already sent, whatever its nudge now (nor
-                // its tempo change); see _handoff. Onsets before what was sent are decided now (the clock there
-                // is fixed); those at or after it once this tick's tempo changes are in (below), on the clock
-                // their events go out on.
+                // its tempo change); see _handoff, decided once this tick's tempo changes are in (below). Only
+                // onsets where some new event can still sound (after what was sent, not too late) need deciding:
+                // at the others every new event is dropped anyway (see _dispatch), so nothing of them is compared
+                // (a long-nudged hit keeps its stream's records back to its onset; what lies between is skipped).
+                // An onset not yet passed always is: tempo changes this tick may still move its events.
                 const sentBefore = fresh && audible ? this._sentOnsets.get(id) : null;
-                const already = sentBefore ? this._handoff(id, pattern, events, now, 'past') : null;
-                const ahead = [];
+                const atSent = [];
+                const openAt = new Set();
                 for (let i = 0; i < events.length; i++) {
-                    if (already && already.has(i)) continue;
                     const at = events[i].begin.toFixed(9);
                     const v = asObject(events[i].value);
                     // Each event keeps its stream and the pattern it came from, so one held back can be dropped
                     // when that stream is muted, replaced or removed before it goes out.
                     const item = audible ? { ev: events[i], v, stream, i, id, pattern, at, after: fresh ? this._sentHorizon : -Infinity } : null;
                     if (item) items.push(item);
-                    if (item && sentBefore && sentBefore.has(at) && events[i].begin >= this._dispatchCycle) ahead.push(item);
+                    if (item && sentBefore && sentBefore.has(at)) {
+                        atSent.push(item);
+                        if (!openAt.has(at)) {
+                            const time = this._scheduledAt(events[i], v);
+                            if (events[i].begin >= this._dispatchCycle || (time >= this._sentHorizon && time >= now - 0.02)) openAt.add(at);
+                        }
+                    }
                     // Tidal's cps control, settled when its event is sent or dropped (see _commitTempo). Onsets
                     // before what was sent were the old pattern's to make, except those a replacement recovers:
                     // still unsent, moved by a positive nudge to sound after the boundary (the tempo there follows
@@ -7386,7 +7393,8 @@
                         requests.push({ cycle: events[i].begin, cps: clamp(v.cps, 0.05, 10), owner: { id, pattern }, stream, i, item });
                     }
                 }
-                if (ahead.length) handoffs.push({ id, pattern, items: ahead });
+                const open = atSent.filter((it) => openAt.has(it.at));
+                if (open.length) handoffs.push({ id, pattern, items: open });
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
             for (const id of [...this._sentOnsets.keys()]) if (!this.channels.has(id)) this._sentOnsets.delete(id);
@@ -7402,14 +7410,15 @@
             for (const r of requests) this._requestTempo(r.cycle, r.cps, r.owner, this._eventSeq++, r.item);
             if (requests.length) this._reconcileTempo();
 
-            // The handoff at onsets not yet passed, on the clock events go out on (a slowdown before an onset
-            // moves it, and with it where an absolute curve is read and how long a note is): a hit already sent
-            // is dropped, with the tempo change it carries. Which tempo changes a decision sees is fixed, so it
-            // never depends on another, nor on the order of layers or streams: onsets are decided in cycle order,
-            // and each replacement event is judged as it would sound if it played, on the clock with every tempo
-            // change that is not a replacement's at an onset already sent, those of replacements at earlier
-            // cycles that were kept, and its own; never another replacement's at its cycle or later, whatever
-            // its layer or stream (a slowdown that comes with a sibling already sent changes nothing).
+            // The handoff, on the clock events go out on (a tempo change moves an onset, or where a nudged event
+            // reads an absolute curve, how long a note is, and what a tempo-reading signal such as envelope()
+            // gives): a hit already sent is dropped, with the tempo change it carries. Which tempo changes a
+            // decision sees is fixed, so it never depends on another, nor on the order of layers or streams:
+            // onsets are decided in cycle order, and each replacement event is judged (everything it reads,
+            // see _judge) as it would sound if it played, on the clock with every tempo change that is not a
+            // replacement's at an onset already sent, those of replacements at earlier cycles that were kept,
+            // and its own; never another replacement's at its cycle or later, whatever its layer or stream (a
+            // slowdown that comes with a sibling already sent changes nothing).
             if (handoffs.length) {
                 const groups = [];
                 for (const h of handoffs) {
@@ -7428,13 +7437,14 @@
                     this._reconcileTempo();
                 };
                 for (const g of groups) {
-                    const views = g.items.map((it) => {
+                    counted(g.cycle, null); // (the old version's hits held back are read on this one)
+                    const old = this._oldHits(g.id, g.pattern, g.items[0].at);
+                    const judged = g.items.map((it, k) => {
                         counted(g.cycle, it);
-                        return this._clockView(it.ev, it.v);
+                        return this._judge(it, k, old);
                     });
-                    counted(g.cycle, null); // (the old version's held hits are read on this one)
-                    const already = this._handoff(g.id, g.pattern, g.items.map((it) => it.ev), now, 'ahead', views);
-                    g.items.forEach((it, k) => { if (!(already && already.has(k))) kept.add(it); });
+                    const already = this._handoff(old, judged);
+                    g.items.forEach((it, k) => { if (!already.has(k)) kept.add(it); });
                 }
                 for (const x of all) x.dropped = !kept.has(x);
                 this._reconcileTempo(); // (the tempo changes of the hits dropped no longer count)
@@ -7488,93 +7498,85 @@
         }
 
         /**
-         * Which of a replacement's events (indices into `events`) are hits its
-         * stream already sent. At each onset where the stream sent something,
-         * the hits that play the same thing (see hitFingerprint, then
-         * _sameCurves for followed controls) are matched with the old
-         * version's hits there, sent and still held back alike: first those
-         * whose nudge is unchanged, then the rest in nudge order (sooner with
-         * sooner). A new event matched with a sent hit is not sent again; one
-         * matched with a held-back hit, or with none, is the new version's to
-         * play. So layers may be reordered, added or removed, and of identical
-         * simultaneous hits a sent one never stands for an unsent sibling. A
-         * truncated fingerprint proves nothing: such a hit matches no other.
+         * The old version's hits at an onset where its stream sent something:
+         * those sent (with what they played: see _dispatch) and those still
+         * held back (their identity read on the clock as it is).
          */
-        _handoff(id, pattern, events, now, phase, views) {
-            const sent = this._sentOnsets.get(id);
-            if (!sent) return null;
-            // Only onsets where some new event can still sound (after what was sent, not too late) need deciding:
-            // at the others every new event is dropped anyway (see _dispatch), so nothing of them is compared.
-            // (A long-nudged hit keeps its stream's records back to its onset; what lies between is skipped.)
-            // The clock before what was sent never changes, so an onset there is judged now; one at or after it
-            // may move with tempo changes this tick reconciles (a slowdown before it), so it is always decided.
-            // ('past': the onsets before what was sent; 'ahead': those at or after it, all decided.)
-            const open = new Set();
-            for (let i = 0; i < events.length; i++) {
-                const at = events[i].begin.toFixed(9);
-                if (open.has(at) || !sent.has(at)) continue;
-                if ((events[i].begin >= this._dispatchCycle) !== (phase === 'ahead')) continue;
-                if (phase === 'ahead') {
-                    open.add(at);
-                    continue;
-                }
-                const time = this._scheduledAt(events[i], asObject(events[i].value));
-                if (time >= this._sentHorizon && time >= now - 0.02) open.add(at);
-            }
-            if (!open.size) return null;
-            const groups = new Map(); // onset -> { old: [hit], fresh: [hit] }
-            const group = (at) => {
-                let g = groups.get(at);
-                if (!g) groups.set(at, (g = { old: [], fresh: [] }));
-                return g;
-            };
-            for (let i = 0; i < events.length; i++) {
-                const at = events[i].begin.toFixed(9);
-                if (!open.has(at)) continue;
-                const v = asObject(events[i].value);
-                // (views: the clock each event is judged on, when the caller fixes it; else the clock as it is)
-                const view = views ? views[i] : this._clockView(events[i], v);
-                group(at).fresh.push({ i, v, view, nudge: nudgeOf(v), follow: followOf(v), ev: events[i], fp: this._hitIdentity(v, events[i], view), byTakes: new Map() });
-            }
-            for (const at of open) for (const h of sent.get(at).hits) group(at).old.push({ ...h, sent: true });
+        _oldHits(id, pattern, at) {
+            const record = this._sentOnsets.get(id).get(at);
+            const old = record.hits.map((h) => ({ ...h, sent: true, src: h }));
             for (const it of this._nudged) {
-                if (it.id !== id || it.pattern === pattern || !open.has(it.at)) continue;
-                group(it.at).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false, fp: this._hitIdentity(it.v, it.ev, this._clockView(it.ev, it.v)) });
+                if (it.id !== id || it.pattern === pattern || it.at !== at) continue;
+                old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false, src: it, fp: this._hitIdentity(it.v, it.ev, this._clockView(it.ev, it.v)) });
             }
-            // A new event plays the same as an old hit when their identities agree (a truncated one agrees with
-            // none) and so do their followed curves. Against a sent hit that read take lists, the new event is
-            // read at that hit's own indices (the counters have moved on since; simultaneous layers sharing a
-            // counter each used their own index).
-            const identityFor = (f, o) => {
-                if (!(o.sent && o.takes)) return f.fp;
-                const at = [...o.takes].map(([counter, index]) => counter + '=' + index).join('&');
-                if (!f.byTakes.has(at)) f.byTakes.set(at, this._hitIdentity(f.v, f.ev, f.view, null, o.takes));
-                return f.byTakes.get(at);
-            };
-            const same = (o, f) => {
-                const fp = identityFor(f, o);
-                return !fp.truncated && !o.fp.truncated && fp.key === o.fp.key && this._sameCurves(o, f);
-            };
+            return old;
+        }
+
+        /**
+         * Everything a replacement event's match reads, on the clock as it is
+         * now (the caller sets the clock it is judged on): when it would sound
+         * and its output there (see _hitIdentity), also at the take indices of
+         * each sent hit that read take lists (the counters have moved on since;
+         * simultaneous layers sharing a counter each used their own index),
+         * and whether its followed curves are each old hit's (see _sameCurves).
+         * Signals that read the tempo (envelope()) are read on that clock too.
+         */
+        _judge(it, i, old) {
+            const view = this._clockView(it.ev, it.v);
+            const fresh = { i, nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, view };
+            const fp = this._hitIdentity(it.v, it.ev, view);
+            const identity = new Map(); // old hit -> its identity as read against it
+            const curves = new Map();   // old hit -> whether the curves are the same
+            const byTakes = new Map();
+            for (const o of old) {
+                let mine = fp;
+                if (o.sent && o.takes) {
+                    const at = [...o.takes].map(([counter, index]) => counter + '=' + index).join('&');
+                    if (!byTakes.has(at)) byTakes.set(at, this._hitIdentity(it.v, it.ev, view, null, o.takes));
+                    mine = byTakes.get(at);
+                }
+                identity.set(o.src, mine);
+                curves.set(o.src, this._sameCurves({ ...o }, fresh));
+            }
+            return { ...fresh, identity, curves };
+        }
+
+        /**
+         * Which replacement events (their indices, as judged: see _judge) are
+         * hits their stream already sent, at one onset. A new event plays the
+         * same as an old hit when their identities agree (a truncated one
+         * agrees with none) and so do their followed curves. They are matched
+         * with the old version's hits there, sent and still held back alike:
+         * first those whose nudge is unchanged, then the rest in nudge order
+         * (sooner with sooner). A new event matched with a sent hit is not
+         * sent again; one matched with a held-back hit, or with none, is the
+         * new version's to play. So layers may be reordered, added or removed,
+         * and of identical simultaneous hits a sent one never stands for an
+         * unsent sibling.
+         */
+        _handoff(oldHits, judged) {
             const already = new Set();
-            for (const g of groups.values()) {
-                if (!g.old.some((o) => o.sent) || !g.fresh.length) continue;
-                const old = g.old.slice();
-                const rest = [];
-                const pair = (f, k) => {
-                    if (old[k].sent) already.add(f.i);
-                    old.splice(k, 1);
-                };
-                for (const f of g.fresh) {
-                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9 && same(o, f));
-                    if (k < 0) rest.push(f);
-                    else pair(f, k);
-                }
-                old.sort((a, b) => a.nudge - b.nudge || (a.sent ? 0 : 1) - (b.sent ? 0 : 1));
-                rest.sort((a, b) => a.nudge - b.nudge || a.i - b.i);
-                for (const f of rest) {
-                    const k = old.findIndex((o) => same(o, f));
-                    if (k >= 0) pair(f, k);
-                }
+            if (!oldHits.some((o) => o.sent) || !judged.length) return already;
+            const same = (o, f) => {
+                const fp = f.identity.get(o.src);
+                return !fp.truncated && !o.fp.truncated && fp.key === o.fp.key && f.curves.get(o.src);
+            };
+            const old = oldHits.slice();
+            const rest = [];
+            const pair = (f, k) => {
+                if (old[k].sent) already.add(f.i);
+                old.splice(k, 1);
+            };
+            for (const f of judged) {
+                const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9 && same(o, f));
+                if (k < 0) rest.push(f);
+                else pair(f, k);
+            }
+            old.sort((a, b) => a.nudge - b.nudge || (a.sent ? 0 : 1) - (b.sent ? 0 : 1));
+            rest.sort((a, b) => a.nudge - b.nudge || a.i - b.i);
+            for (const f of rest) {
+                const k = old.findIndex((o) => same(o, f));
+                if (k >= 0) pair(f, k);
             }
             return already;
         }
