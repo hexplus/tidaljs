@@ -450,6 +450,22 @@ for (const newer of [false, true]) {
   });
 }
 
+test("custom event values with BigInt and circular metadata play, and survive a live nudge edit", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("/");
+  const odd = (nudge: number) =>
+    `d1(sound("bd*4").withValue((v) => { const o = { ...v, big: 10n, meta: { id: 1n } }; o.meta.self = o; return o }).nudge(${nudge}))\nd2(sound("hh*4"))`;
+  await setCode(page, odd(0.1));
+  await playAndWait(page);
+  await expect.poll(() => statusText(page)).toContain("Playing 2 patterns");
+  await setCode(page, odd(0.3));
+  await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Updated: playing 2 patterns");
+  await page.waitForTimeout(800);
+  expect((await engine(page))?.playing).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');

@@ -1077,5 +1077,68 @@ const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).ma
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 11
+{
+    // 1. Custom values from withValue(): BigInt and circular metadata never stop Play, another stream, or a
+    // live handoff (where hits are fingerprinted).
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    const odd = (nudge) => `d1(sound("a*4").withValue((v) => { const o = { ...v, big: 10n, meta: { id: 1n } }; o.meta.self = o; return o }).nudge(${nudge}))\nd2(sound("b*4"))`;
+    let r = t.eval(odd(0.1));
+    eq([r.success, t.isPlaying], [true, true], 'Play goes ahead');
+    let played = run(0, 600);
+    eq(shown(played, 0.6), ['b@0.05', 'a@0.15', 'b@0.3', 'a@0.4', 'b@0.55'], 'both streams dispatch');
+    r = t.eval(odd(0.3), live); // the handoff fingerprints the sent and held hits
+    eq(r.success, true);
+    played = played.concat(run(625, 1600));
+    eq(hitsOf(played, 'a', 1.6), [0.15, 0.4, 0.65, 1.1, 1.35, 1.6], 'every position once');
+    eq(hitsOf(played, 'b', 1.6), [0.05, 0.3, 0.55, 0.8, 1.05, 1.3, 1.55]);
+    t.stopAll();
+}
+{
+    // 2. Identical simultaneous kicks, one sent at once and one held back (nudge 0.5, sounding at 0.55 s); only
+    // the held kick's nudge changes (to 0.7). In either layer order the sent kick is not sent again and the held
+    // one plays at its new time; a kick's tempo change (2 cps on both) applies once.
+    const live = { keepUnchanged: true };
+    for (const [before, after] of [
+        ['stack(sound("kick").cps(2), sound("kick").cps(2).nudge(0.5))', 'stack(sound("kick").cps(2), sound("kick").cps(2).nudge(0.7))'],
+        ['stack(sound("kick").cps(2).nudge(0.5), sound("kick").cps(2))', 'stack(sound("kick").cps(2).nudge(0.7), sound("kick").cps(2))'],
+    ]) {
+        reset();
+        t.lookahead = 0.1;
+        t.eval(`d1(sound("a*8"))\nd2(${before}.playFor(0, 1))`);
+        let played = run(0, 300);
+        eq([hitsOf(played, 'kick', 1), t._nudged.filter((it) => it.v.s === 'kick').length], [[0.05], 1], before);
+        t.eval(`d1(sound("a*8"))\nd2(${after}.playFor(0, 1))`, live);
+        played = played.concat(run(325, 1500));
+        eq(hitsOf(played, 'kick', 2), [0.05, 0.75], after);
+        eq(t.cps, 2);
+        eq(hitsOf(played, 'a', 1.45), gridOf([[0, 2]], 0.125, 1.45));
+    }
+    t.stopAll();
+}
+{
+    // 3. followNote() curves are part of a hit: two notes start alike (lpf 200) but one rises to 2000, the other
+    // to 800. The 2000 one was sent, the 800 one held back (nudge 0.5). After an edit that moves the sent one
+    // later (0.8) and the held one sooner (0.6), the sent curve does not play again and the held curve plays at
+    // its new time (0.65 s).
+    const live = { keepUnchanged: true };
+    const curves = (wide, narrow) => `d1(stack(sound("a").followNote("lpf", saw.range(200, 800)).nudge(${narrow}), sound("a").followNote("lpf", saw.range(200, 2000)).nudge(${wide})).playFor(0, 1))`;
+    reset();
+    t.lookahead = 0.1;
+    const heard = [];
+    const saved = t.playEvent;
+    t.playEvent = (v, time) => { heard.push(v.follow.valueAt('lpf', 0.5, 0) + '@' + +time.toFixed(6)); };
+    t.eval(curves(0, 0.5));
+    for (let ms = 0; ms <= 300; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(heard, ['1100@0.05'], 'the wide curve sent, the narrow one held');
+    t.eval(curves(0.8, 0.6), live);
+    for (let ms = 325; ms <= 1500; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    eq(heard, ['1100@0.05', '500@0.65'], 'the sent curve once, the held curve at its new time');
+    t.playEvent = saved;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

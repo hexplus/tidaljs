@@ -1692,9 +1692,46 @@
         while (n < history.length && (n + 1 < history.length ? history[n + 1].cycle : anchorCycle) <= floor) n++;
         if (n) history.splice(0, n);
     };
-    // What a hit is, to tell whether a replacement's onset was already sent: its controls but its nudge (where
-    // it sounds) and its tempo change (which goes with the hit), in a fixed order.
-    const hitKey = (v) => JSON.stringify(Object.keys(v).filter((k) => k !== 'nudge' && k !== 'cps').sort().map((k) => [k, v[k]]));
+    /**
+     * What a hit plays, to tell whether a replacement's onset was already sent: its controls but its nudge
+     * (where it sounds) and its tempo change (which goes with the hit), in a fixed order, with the curves of
+     * .follow()/.followNote() sampled (two notes that start alike but move differently are different hits).
+     * Any value withValue() gives is read safely (BigInt, symbols, functions, shared or circular objects,
+     * throwing getters): it never throws.
+     */
+    function hitFingerprint(v, onset) {
+        const seen = new Set();
+        const field = (x, k, depth) => {
+            try { return walk(x[k], depth); } catch (e) { return '?'; }
+        };
+        const walk = (x, depth) => {
+            if (x === null) return 'null';
+            switch (typeof x) {
+                case 'string': return JSON.stringify(x);
+                case 'number': return Object.is(x, -0) ? '-0' : String(x);
+                case 'bigint': return x + 'n';
+                case 'boolean': case 'undefined': return String(x);
+                case 'symbol': return 'symbol(' + String(x.description) + ')';
+                case 'function': return 'function ' + (x.name || '');
+                default: break;
+            }
+            if (x instanceof Follows) return 'follow(' + x.key(onset) + ')';
+            if (seen.has(x)) return '[circular]';
+            if (depth > 8) return '[deep]';
+            seen.add(x);
+            const list = Array.isArray(x);
+            const keys = list ? x.map((_, i) => i) : Object.keys(x).sort();
+            const out = keys.map((k) => k + ':' + field(x, k, depth + 1)).join(',');
+            seen.delete(x);
+            return (list ? '[' : '{') + out + (list ? ']' : '}');
+        };
+        try {
+            return Object.keys(v).filter((k) => k !== 'nudge' && k !== 'cps').sort().map((k) => k + ':' + field(v, k, 1)).join(',');
+        } catch (e) {
+            return '?';
+        }
+    }
+    const nudgeOf = (v) => (isNum(v.nudge) ? v.nudge : 0);
     const ONE_SHOT_TAIL = 8;
 
     // .rhythm(): the onsets kept per pattern (far into the future is fine), and the shortest step.
@@ -5984,7 +6021,7 @@
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
             this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
-            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: Map(hitKey -> count) }): sent lately (see _tick)
+            this._sentOnsets = new Map();      // stream -> Map(onset cycle -> { cycle, hits: [{ v, nudge }] }): sent lately (see _handoff)
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
             this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
@@ -7258,24 +7295,12 @@
                     continue;
                 }
                 // A replacement does not send again a hit its stream already sent, whatever its nudge now (nor
-                // its tempo change). Hits are told apart by onset and what they play, not by their order there,
-                // so simultaneous layers may be reordered, added or removed: each sent hit matches one of the new
-                // version's hits at that onset that plays the same thing, and the others are new.
-                const sentBefore = fresh ? this._sentOnsets.get(id) : null;
-                const unmatched = new Map(); // onset -> hits sent there not matched yet in this query
+                // its tempo change); see _handoff.
+                const already = fresh ? this._handoff(id, pattern, events) : null;
                 for (let i = 0; i < events.length; i++) {
+                    if (already && already.has(i)) continue;
                     const at = events[i].begin.toFixed(9);
                     const v = asObject(events[i].value);
-                    if (sentBefore && sentBefore.has(at)) {
-                        let hits = unmatched.get(at);
-                        if (!hits) unmatched.set(at, (hits = new Map(sentBefore.get(at).hits)));
-                        const hit = hitKey(v);
-                        const n = hits.get(hit) || 0;
-                        if (n > 0) {
-                            hits.set(hit, n - 1);
-                            continue;
-                        }
-                    }
                     // Each event keeps its stream and the pattern it came from, so one held back can be dropped
                     // when that stream is muted, replaced or removed before it goes out.
                     const item = audible ? { ev: events[i], v, stream, i, id, pattern, at, after: fresh ? this._sentHorizon : -Infinity } : null;
@@ -7342,6 +7367,69 @@
         }
 
         /**
+         * Which of a replacement's events (indices into `events`) are hits its
+         * stream already sent. At each onset where the stream sent something,
+         * the hits that play the same thing (see hitFingerprint) are matched
+         * with the old version's hits there, sent and still held back alike:
+         * first those whose nudge is unchanged, then the rest in nudge order
+         * (sooner with sooner). A new event matched with a sent hit is not
+         * sent again; one matched with a held-back hit, or with none, is the
+         * new version's to play. So layers may be reordered, added or removed,
+         * and of identical simultaneous hits a sent one never stands for an
+         * unsent sibling.
+         */
+        _handoff(id, pattern, events) {
+            const sent = this._sentOnsets.get(id);
+            if (!sent) return null;
+            const groups = new Map(); // onset + fingerprint -> { old: [{ nudge, sent }], fresh: [{ i, nudge }] }
+            const group = (at, fp) => {
+                const key = at + '|' + fp;
+                let g = groups.get(key);
+                if (!g) groups.set(key, (g = { old: [], fresh: [] }));
+                return g;
+            };
+            const ats = new Set();
+            for (let i = 0; i < events.length; i++) {
+                const at = events[i].begin.toFixed(9);
+                if (!sent.has(at)) continue;
+                ats.add(at);
+                const v = asObject(events[i].value);
+                group(at, hitFingerprint(v, events[i].begin)).fresh.push({ i, nudge: nudgeOf(v) });
+            }
+            if (!ats.size) return null;
+            for (const at of ats) {
+                const record = sent.get(at);
+                for (const h of record.hits) {
+                    if (h.fp === undefined) h.fp = hitFingerprint(h.v, record.cycle);
+                    group(at, h.fp).old.push({ nudge: h.nudge, sent: true });
+                }
+            }
+            for (const it of this._nudged) {
+                if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
+                group(it.at, hitFingerprint(it.v, it.ev.begin)).old.push({ nudge: nudgeOf(it.v), sent: false });
+            }
+            const already = new Set();
+            for (const g of groups.values()) {
+                if (!g.old.some((o) => o.sent) || !g.fresh.length) continue;
+                const old = g.old.slice();
+                const rest = [];
+                for (const f of g.fresh) {
+                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9);
+                    if (k < 0) {
+                        rest.push(f);
+                        continue;
+                    }
+                    if (old[k].sent) already.add(f.i);
+                    old.splice(k, 1);
+                }
+                old.sort((a, b) => a.nudge - b.nudge || (a.sent ? 0 : 1) - (b.sent ? 0 : 1));
+                rest.sort((a, b) => a.nudge - b.nudge || a.i - b.i);
+                for (let k = 0; k < rest.length && k < old.length; k++) if (old[k].sent) already.add(rest[k].i);
+            }
+            return already;
+        }
+
+        /**
          * True when a replacement's event from before what was sent will still
          * sound, and in time: its onset is behind the boundary, but a positive
          * nudge moves it past what was sent. Its time comes from the clock as
@@ -7401,9 +7489,8 @@
                 let onsets = this._sentOnsets.get(it.id);
                 if (!onsets) this._sentOnsets.set(it.id, (onsets = new Map()));
                 let sentAt = onsets.get(it.at);
-                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, hits: new Map() }));
-                const hit = hitKey(it.v);
-                sentAt.hits.set(hit, (sentAt.hits.get(hit) || 0) + 1);
+                if (!sentAt) onsets.set(it.at, (sentAt = { cycle: it.ev.begin, hits: [] }));
+                sentAt.hits.push({ v: it.v, nudge: nudgeOf(it.v) });
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
                 } catch (error) {
