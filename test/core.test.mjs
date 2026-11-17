@@ -1903,5 +1903,69 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 23
+{
+    // 1. Each side of a curve comparison is read on its own clock: the old version's hit held back on the clock of
+    // the handoff, the replacement on its own (with its cps(2)), the sent hit at what its voice read. At 1 cps two
+    // saw notes span cycles 0.5-0.625: one with a constant gain 0.8 (nudge -0.15: sent at 0.4 s), one with an
+    // absolute envelope 0.8 then 0.2 after 0.54 s (nudge 0.5: held back). The edit keeps only the constant one,
+    // nudged 0.5, with cps(2). On its own clock the envelope would read 0.8 throughout (0.25-0.31 s) and look like
+    // the replacement; on the handoff's clock it falls to 0.2 at cycle 0.54, so the replacement is the hit sent:
+    // one hit, at 0.4 s, and the tempo stays at 1 cps.
+    const live = { keepUnchanged: true };
+    const savedCtx = t.audioContext;
+    reset();
+    t.audioContext = layoutAudio();
+    t.lookahead = 0.1;
+    const saw = 'note("~ ~ ~ ~ c4 ~ ~ ~").s("saw")';
+    eq(t.eval(`d1(stack(${saw}.follow("gain", 0.8).nudge(-0.15), ${saw}.follow("gain", envelope([0.8, 0.2], [0.54], "hold")).nudge(0.5)).playFor(0, 1))`).success, true);
+    let played = runLaidOut(0, 325, (v, time) => v.s + '@' + time);
+    eq(played, ['saw@0.4'], 'the constant one sent, the envelope one held back');
+    eq(t.eval(`d1(${saw}.follow("gain", 0.8).nudge(0.5).cps(2).playFor(0, 1))`, live).success, true);
+    played = played.concat(runLaidOut(350, 2000, (v, time) => v.s + '@' + time));
+    eq(played, ['saw@0.4'], 'exactly one hit');
+    eq(t.cps, 1, 'and its cps(2) went with it');
+    t.stopAll();
+    t.audioContext = savedCtx;
+}
+{
+    // 2. Curves are compared only where the identities agree: 32 layers whose pitches the edit changes entirely
+    // (0-31 to 40-71) compare no curve and read no signal for it; the same layers nudged only compare each with its
+    // own, 32 times.
+    const live = { keepUnchanged: true };
+    const layers = (offset, nudge) => 'd1(stack(' + Array.from({ length: 32 }, (_, i) => `sound("~ ~ saw ~").note(${i + offset}).followNote("lpf", sine.withValue((x) => (globalThis.round23++, x)).range(200, 2000)).nudge(${nudge})`).join(', ') + ').playFor(0, 1))';
+    const savedSame = t._sameCurves;
+    const savedPoints = t._curvePoints;
+    for (const [offset, expected] of [[40, 0], [0, 32]]) {
+        reset();
+        t.lookahead = 0.1;
+        globalThis.round23 = 0;
+        eq(t.eval(layers(0, -0.15)).success, true);
+        run(0, 325);
+        let comparisons = 0;
+        let points = 0;
+        let reads = 0;
+        t._sameCurves = function (...args) {
+            comparisons++;
+            const before = globalThis.round23;
+            try { return savedSame.apply(this, args); } finally { reads += globalThis.round23 - before; }
+        };
+        t._curvePoints = function (...args) {
+            points++;
+            const before = globalThis.round23;
+            try { return savedPoints.apply(this, args); } finally { reads += globalThis.round23 - before; }
+        };
+        eq(t.eval(layers(offset, -0.12), live).success, true);
+        run(350, 1000);
+        delete t._sameCurves;
+        delete t._curvePoints;
+        eq([comparisons, points], [expected, expected], offset ? 'disjoint pitches: no curve compared' : 'nudged only: each with its own');
+        if (offset) eq(reads, 0, 'and no signal read for curves');
+        else ok(reads > 0);
+    }
+    delete globalThis.round23;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

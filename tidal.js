@@ -1651,19 +1651,20 @@
         /**
          * The curves over a note's nominal span (cycles `begin` to `end`, at
          * `cps`), sampled as densely as a voice lays them out (see
-         * samplePoints): two curves that agree here sound the same.
+         * samplePoints), as [control, cycle, onset cycle, value] like the reads
+         * of a voice (FOLLOW_READS), on the clock as it is.
          */
-        trace(begin, end, cps) {
+        samples(begin, end, cps) {
             const span = Math.max(0, end - begin);
             const count = clamp(Math.ceil(span / Math.max(cps, 1e-6) / 0.015), 1, 400);
-            return this.names().sort().map((name) => {
-                const values = [];
+            const out = [];
+            for (const name of this.names().sort()) {
                 for (let i = 0; i <= count; i++) {
-                    const x = this.valueAt(name, begin + (span * i) / count, begin);
-                    values.push(x === undefined ? '' : +x.toFixed(6));
+                    const t = begin + (span * i) / count;
+                    out.push([name, t, begin, this.valueAt(name, t, begin)]);
                 }
-                return `${name}${this.entries[name].note ? '~' : ''}=${values.join(',')}`;
-            }).join(';');
+            }
+            return out;
         }
         toJSON() { return undefined; }
     }
@@ -7437,12 +7438,26 @@
                     this._reconcileTempo();
                 };
                 for (const g of groups) {
-                    counted(g.cycle, null); // (the old version's hits held back are read on this one)
+                    // The old version's hits are read on the clock of the handoff (no replacement's tempo change at
+                    // this cycle or later), each replacement on its own; curves only for pairs whose identities
+                    // agree, so a layer that plays something else costs no curve read.
+                    counted(g.cycle, null);
                     const old = this._oldHits(g.id, g.pattern, g.items[0].at);
                     const judged = g.items.map((it, k) => {
                         counted(g.cycle, it);
                         return this._judge(it, k, old);
                     });
+                    const pairs = judged.map((j) => old.filter((o) => this._sameIdentity(o, j) && (o.follow || j.follow)));
+                    const needed = new Set(pairs.flat());
+                    if (needed.size) {
+                        counted(g.cycle, null);
+                        for (const o of needed) this._curvePoints(o);
+                        judged.forEach((j, k) => {
+                            if (!pairs[k].length) return;
+                            counted(g.cycle, g.items[k]);
+                            for (const o of pairs[k]) j.curves.set(o.src, this._sameCurves(o, j));
+                        });
+                    }
                     const already = this._handoff(old, judged);
                     g.items.forEach((it, k) => { if (!already.has(k)) kept.add(it); });
                 }
@@ -7513,20 +7528,20 @@
         }
 
         /**
-         * Everything a replacement event's match reads, on the clock as it is
-         * now (the caller sets the clock it is judged on): when it would sound
-         * and its output there (see _hitIdentity), also at the take indices of
-         * each sent hit that read take lists (the counters have moved on since;
-         * simultaneous layers sharing a counter each used their own index),
-         * and whether its followed curves are each old hit's (see _sameCurves).
-         * Signals that read the tempo (envelope()) are read on that clock too.
+         * A replacement event's identity against each old hit, on the clock as
+         * it is now (the caller sets the clock it is judged on): when it would
+         * sound and its output there (see _hitIdentity), also at the take
+         * indices of each sent hit that read take lists (the counters have
+         * moved on since; simultaneous layers sharing a counter each used their
+         * own index). Signals that read the tempo (envelope()) are read on that
+         * clock too. Its curves are compared later, only where the identities
+         * agree (see _tick and _sameCurves).
          */
         _judge(it, i, old) {
             const view = this._clockView(it.ev, it.v);
             const fresh = { i, nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, view };
             const fp = this._hitIdentity(it.v, it.ev, view);
             const identity = new Map(); // old hit -> its identity as read against it
-            const curves = new Map();   // old hit -> whether the curves are the same
             const byTakes = new Map();
             for (const o of old) {
                 let mine = fp;
@@ -7536,9 +7551,35 @@
                     mine = byTakes.get(at);
                 }
                 identity.set(o.src, mine);
-                curves.set(o.src, this._sameCurves({ ...o }, fresh));
             }
-            return { ...fresh, identity, curves };
+            return { ...fresh, identity, curves: new Map() }; // (curves: old hit -> whether they are the same)
+        }
+
+        /** Whether a judged replacement event and an old hit play the same, curves aside (a truncated identity proves nothing). */
+        _sameIdentity(o, j) {
+            const fp = j.identity.get(o.src);
+            return !fp.truncated && !o.fp.truncated && fp.key === o.fp.key;
+        }
+
+        /**
+         * Where an old hit's followed curves are compared, on the clock as it
+         * is now (the clock of the handoff): what its voice read while laying
+         * it out (a sent hit), or else its curves over its nominal span at its
+         * tempo there (see Follows.samples). A signal that fails there leaves
+         * nothing to compare (inconclusive).
+         */
+        _curvePoints(o) {
+            if (o.points !== undefined || !o.follow) return;
+            if (o.reads && o.reads.length) {
+                o.points = o.reads;
+                return;
+            }
+            try {
+                o.points = o.follow.samples(o.ev.begin, o.ev.end, this._cpsAt(o.ev.begin));
+            } catch (error) {
+                console.error('TidalJS: could not compare followed curves:', error);
+                o.points = null;
+            }
         }
 
         /**
@@ -7557,10 +7598,7 @@
         _handoff(oldHits, judged) {
             const already = new Set();
             if (!oldHits.some((o) => o.sent) || !judged.length) return already;
-            const same = (o, f) => {
-                const fp = f.identity.get(o.src);
-                return !fp.truncated && !o.fp.truncated && fp.key === o.fp.key && f.curves.get(o.src);
-            };
+            const same = (o, f) => this._sameIdentity(o, f) && (!o.follow && !f.follow ? true : f.curves.get(o.src) === true);
             const old = oldHits.slice();
             const rest = [];
             const pair = (f, k) => {
@@ -7678,30 +7716,21 @@
 
         /**
          * Whether a new event's followed curves are those of an old hit (both
-         * follow the same controls: see hitFingerprint). A sent hit is
-         * compared where its voice read its signals (FOLLOW_READS), value for
-         * value: the curves it rendered, at no cost when nothing is replaced.
-         * A sent hit whose voice read nothing (MIDI, OSC, a sound not loaded)
-         * and one held back (not rendered yet) are compared over the note's
-         * nominal span instead (Follows.trace).
+         * follow the same controls and span the same: see hitFingerprint),
+         * value for value at the old hit's points (see _curvePoints: what its
+         * voice read, or its curves over its span on the clock of the handoff),
+         * the new event's read there on the clock as it is now (its own).
          */
         _sameCurves(old, fresh) {
             if (!old.follow && !fresh.follow) return true;
-            if (!old.follow || !fresh.follow) return false;
+            if (!old.follow || !fresh.follow || !old.points) return false;
             // A signal that fails where it is read proves nothing: the comparison is inconclusive (not the same),
             // so the new event plays; the tick goes on.
             try {
-                if (old.reads && old.reads.length) {
-                    return old.reads.every(([name, t, onset, x]) => {
-                        const y = fresh.follow.valueAt(name, t, onset);
-                        return x === y || (isNum(x) && isNum(y) && Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x)));
-                    });
-                }
-                // Each over its own nominal span (simultaneous notes may differ in length).
-                const cps = fresh.view ? fresh.view.cps : this._cpsAt(fresh.ev.begin);
-                if (old.trace === undefined) old.trace = old.follow.trace(old.ev.begin, old.ev.end, cps);
-                if (fresh.trace === undefined) fresh.trace = fresh.follow.trace(fresh.ev.begin, fresh.ev.end, cps);
-                return old.trace === fresh.trace;
+                return old.points.every(([name, t, onset, x]) => {
+                    const y = fresh.follow.valueAt(name, t, onset);
+                    return x === y || (isNum(x) && isNum(y) && Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x)));
+                });
             } catch (error) {
                 console.error('TidalJS: could not compare followed curves:', error);
                 return false;
