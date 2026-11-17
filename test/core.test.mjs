@@ -1023,5 +1023,59 @@ const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).ma
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 10
+{
+    // 1. Sent hits are matched by onset and what they play, not by their order among simultaneous layers. At the
+    // edit, cycle 0's kick (with its 2 cps) was sent and its hi-hat (nudge 0.5, sounding at 0.55 s) held back.
+    const live = { keepUnchanged: true };
+    const before = 'd1(sound("a*8"))\nd2(stack(sound("kick").cps(2), sound("hh").nudge(0.5)).playFor(0, 1))';
+    reset();
+    t.lookahead = 0.1;
+    t.eval(before);
+    let played = run(0, 300);
+    eq([shown(played.filter((e) => e.s !== 'a'), 1), t._nudged.filter((it) => it.v.s === 'hh').map((it) => it.ev.begin), t.cps], [['kick@0.05'], [0], 2]);
+    // Swapped (and the kick now nudged after what was sent, with another tempo): the hi-hat still plays, once;
+    // the kick is not sent again, and its new 3 cps never applies.
+    t.eval('d1(sound("a*8"))\nd2(stack(sound("hh").nudge(0.5), sound("kick").cps(3).nudge(0.4)).playFor(0, 1))', live);
+    played = played.concat(run(325, 1500));
+    eq(shown(played.filter((e) => e.s !== 'a'), 2), ['kick@0.05', 'hh@0.55'], 'swapped layers: each hit once');
+    eq(t.cps, 2);
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0, 2]], 0.125, 1.45));
+
+    // A new layer inserted ahead of both (nudged past what was sent, with 3 cps): it is new, so it plays and its
+    // tempo takes over from what was sent (cycle 0.7); the kick is not sent again, the hi-hat still plays.
+    reset();
+    t.eval(before);
+    played = run(0, 300);
+    eq(+t._dispatchCycle.toFixed(9), 0.7);
+    t.eval('d1(sound("a*8"))\nd2(stack(sound("sn").cps(3).nudge(0.45), sound("kick").cps(2), sound("hh").nudge(0.5)).playFor(0, 1))', live);
+    played = played.concat(run(325, 1500));
+    eq(shown(played.filter((e) => e.s !== 'a'), 2), ['kick@0.05', 'sn@0.5', 'hh@0.55'], 'inserted layer: each hit once');
+    eq(t.cps, 3);
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0, 2], [0.7, 3]], 0.125, 1.45));
+    t.stopAll();
+}
+{
+    // 2. Pruning survives tempo reconciliation: 120 s of 128 tempo changes per cycle, 25 ms ticks, and the history
+    // (and the copy requests are rebuilt from) stays bounded.
+    reset();
+    t.lookahead = 0.1;
+    eq(t.eval('d1(sound("t*2").cps("1 2").fast(64))\nd2(sound("g*16"))').success, true);
+    const saved = t.playEvent;
+    let hits = 0;
+    let largest = 0;
+    t.playEvent = (v) => { if (v.s === 'g') hits++; };
+    for (let ms = 0; ms <= 120000; ms += 25) {
+        t.audioContext.currentTime = ms / 1000;
+        t._tick();
+        largest = Math.max(largest, t._tempoHistory.length, t._tempoPast ? t._tempoPast.history.length : 0);
+    }
+    t.playEvent = saved;
+    ok(largest < 400, 'history bounded: ' + largest);
+    // At 1 cps then 2 cps every 1/128 cycle, a cycle lasts 0.75 s: 16 hits each.
+    eq(hits, Math.floor((120 + 0.1 - 0.05) / 0.75 * 16) + 1);
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
