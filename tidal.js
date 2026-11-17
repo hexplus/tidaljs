@@ -7405,11 +7405,11 @@
             // The handoff at onsets not yet passed, on the clock events go out on (a slowdown before an onset
             // moves it, and with it where an absolute curve is read and how long a note is): a hit already sent
             // is dropped, with the tempo change it carries. Which tempo changes a decision sees is fixed, so it
-            // never depends on another: onsets are decided in cycle order, each stream's events at an onset
-            // together, on the clock with every tempo change that is not a replacement's at an onset already
-            // sent, those of earlier onsets that were kept, and the stream's own at that onset (it is judged as
-            // it would sound if it played), but no other replacement's at that onset or later (not decided yet,
-            // or deciding at the same time: a slowdown that comes with a hit already sent changes nothing).
+            // never depends on another, nor on the order of layers or streams: onsets are decided in cycle order,
+            // and each replacement event is judged as it would sound if it played, on the clock with every tempo
+            // change that is not a replacement's at an onset already sent, those of replacements at earlier
+            // cycles that were kept, and its own; never another replacement's at its cycle or later, whatever
+            // its layer or stream (a slowdown that comes with a sibling already sent changes nothing).
             if (handoffs.length) {
                 const groups = [];
                 for (const h of handoffs) {
@@ -7421,25 +7421,24 @@
                     for (const list of byOnset.values()) groups.push({ id: h.id, pattern: h.pattern, cycle: list[0].ev.begin, items: list });
                 }
                 groups.sort((a, b) => a.cycle - b.cycle);
-                const decided = new Set();
-                let suppressed = 0;
-                for (const g of groups) {
-                    for (const other of groups) {
-                        if (other === g) continue;
-                        for (const it of other.items) if (!decided.has(it)) it.dropped = true; // (undecided: not counted yet)
-                    }
-                    for (const it of g.items) it.dropped = false;
+                const all = groups.flatMap((g) => g.items);
+                const kept = new Set();
+                const counted = (cycle, own) => {
+                    for (const x of all) x.dropped = !(x === own || (kept.has(x) && x.ev.begin < cycle));
                     this._reconcileTempo();
-                    const already = this._handoff(g.id, g.pattern, g.items.map((it) => it.ev), now, 'ahead');
-                    for (let k = 0; k < g.items.length; k++) {
-                        const it = g.items[k];
-                        it.dropped = !!(already && already.has(k));
-                        if (it.dropped) suppressed++;
-                        decided.add(it);
-                    }
+                };
+                for (const g of groups) {
+                    const views = g.items.map((it) => {
+                        counted(g.cycle, it);
+                        return this._clockView(it.ev, it.v);
+                    });
+                    counted(g.cycle, null); // (the old version's held hits are read on this one)
+                    const already = this._handoff(g.id, g.pattern, g.items.map((it) => it.ev), now, 'ahead', views);
+                    g.items.forEach((it, k) => { if (!(already && already.has(k))) kept.add(it); });
                 }
+                for (const x of all) x.dropped = !kept.has(x);
                 this._reconcileTempo(); // (the tempo changes of the hits dropped no longer count)
-                if (suppressed) items = items.filter((it) => !it.dropped);
+                if (kept.size < all.length) items = items.filter((it) => !it.dropped);
             }
 
             // Then in the order they sound (nudge included), so the last word on
@@ -7501,7 +7500,7 @@
          * simultaneous hits a sent one never stands for an unsent sibling. A
          * truncated fingerprint proves nothing: such a hit matches no other.
          */
-        _handoff(id, pattern, events, now, phase) {
+        _handoff(id, pattern, events, now, phase, views) {
             const sent = this._sentOnsets.get(id);
             if (!sent) return null;
             // Only onsets where some new event can still sound (after what was sent, not too late) need deciding:
@@ -7533,13 +7532,14 @@
                 const at = events[i].begin.toFixed(9);
                 if (!open.has(at)) continue;
                 const v = asObject(events[i].value);
-                const time = this._scheduledAt(events[i], v);
-                group(at).fresh.push({ i, v, time, nudge: nudgeOf(v), follow: followOf(v), ev: events[i], fp: this._hitIdentity(v, events[i], time), byTakes: new Map() });
+                // (views: the clock each event is judged on, when the caller fixes it; else the clock as it is)
+                const view = views ? views[i] : this._clockView(events[i], v);
+                group(at).fresh.push({ i, v, view, nudge: nudgeOf(v), follow: followOf(v), ev: events[i], fp: this._hitIdentity(v, events[i], view), byTakes: new Map() });
             }
             for (const at of open) for (const h of sent.get(at).hits) group(at).old.push({ ...h, sent: true });
             for (const it of this._nudged) {
                 if (it.id !== id || it.pattern === pattern || !open.has(it.at)) continue;
-                group(it.at).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false, fp: this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v)) });
+                group(it.at).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false, fp: this._hitIdentity(it.v, it.ev, this._clockView(it.ev, it.v)) });
             }
             // A new event plays the same as an old hit when their identities agree (a truncated one agrees with
             // none) and so do their followed curves. Against a sent hit that read take lists, the new event is
@@ -7548,7 +7548,7 @@
             const identityFor = (f, o) => {
                 if (!(o.sent && o.takes)) return f.fp;
                 const at = [...o.takes].map(([counter, index]) => counter + '=' + index).join('&');
-                if (!f.byTakes.has(at)) f.byTakes.set(at, this._hitIdentity(f.v, f.ev, f.time, null, o.takes));
+                if (!f.byTakes.has(at)) f.byTakes.set(at, this._hitIdentity(f.v, f.ev, f.view, null, o.takes));
                 return f.byTakes.get(at);
             };
             const same = (o, f) => {
@@ -7588,7 +7588,7 @@
          * event already resolved (no takes, its signals bound) comes back as
          * it is.
          */
-        _resolveOutput(v, time, advance, indices, used) {
+        _resolveOutput(v, time, advance, indices, used, at) {
             const next = (counter, list) => {
                 let index;
                 if (indices && indices.has(counter)) {
@@ -7612,8 +7612,8 @@
                 delete v.takes;
             }
             if (v.follow instanceof Follows && !v.follow.onset) {
-                // The followed controls start at their signals' values at the onset.
-                const cycle = this.cycleAt(time);
+                // The followed controls start at their signals' values at the onset (`at`: its cycle, when given).
+                const cycle = at === undefined ? this.cycleAt(time) : at;
                 const follow = v.follow.bind(cycle, time, this.cps);
                 v = { ...v, follow };
                 for (const key of follow.names()) {
@@ -7630,6 +7630,17 @@
         }
 
         /**
+         * What a hit's identity reads from the clock, taken from the clock as
+         * it is now: when it would sound, the cycle there, and the tempo at its
+         * onset (a MIDI note's length). Fixed once taken, so a hit can be
+         * judged on a clock of its own (see _tick).
+         */
+        _clockView(ev, v) {
+            const time = this._scheduledAt(ev, v);
+            return { time, cycle: this.cycleAt(time), cps: this._cpsAt(ev.begin) };
+        }
+
+        /**
          * What a hit plays, to match it at a handoff (see _handoff): for a
          * voice, its fingerprint (hitFingerprint); for MIDI and OSC, what that
          * output sends, with its followed controls at the onset it is
@@ -7639,13 +7650,13 @@
          * but the cycle and tempo (timing, like the nudge). A filter change
          * MIDI does not send is no change there.
          */
-        _hitIdentity(v, ev, time, resolved, indices) {
+        _hitIdentity(v, ev, view, resolved, indices) {
             if (v.midi === undefined && v.osc === undefined) return hitFingerprint(v, ev);
             try {
-                // What was really sent (a sent hit), or what would be at `time` (take counters left as they are,
-                // or the indices the hit sent at that onset used).
-                const out = resolved || this._resolveOutput(v, time, false, indices);
-                const duration = (ev.end - ev.begin) / this._cpsAt(ev.begin);
+                // What was really sent (a sent hit), or what would be on the clock `view` was taken from (take
+                // counters left as they are, or the indices the hit sent at that onset used).
+                const out = resolved || this._resolveOutput(v, view.time, false, indices, null, view.cycle);
+                const duration = (ev.end - ev.begin) / view.cps;
                 if (v.midi !== undefined) {
                     const m = midiEventOf(out, duration);
                     const note = m.note ? [m.note.key, m.note.velocity, +m.note.length.toFixed(6)] : null;
@@ -7685,7 +7696,7 @@
                     });
                 }
                 // Each over its own nominal span (simultaneous notes may differ in length).
-                const cps = this._cpsAt(fresh.ev.begin);
+                const cps = fresh.view ? fresh.view.cps : this._cpsAt(fresh.ev.begin);
                 if (old.trace === undefined) old.trace = old.follow.trace(old.ev.begin, old.ev.end, cps);
                 if (fresh.trace === undefined) fresh.trace = fresh.follow.trace(fresh.ev.begin, fresh.ev.end, cps);
                 return old.trace === fresh.trace;
@@ -7776,7 +7787,7 @@
                     PLAYED.on = false;
                 }
                 // Its identity from the values it went out with (resolved once, takes and followed onsets included).
-                hit.fp = this._hitIdentity(it.v, it.ev, at, PLAYED.v);
+                hit.fp = this._hitIdentity(it.v, it.ev, { time: at, cycle: this.cycleAt(at), cps: this._cpsAt(it.ev.begin) }, PLAYED.v);
                 hit.takes = PLAYED.takes && PLAYED.takes.size ? PLAYED.takes : null;
                 PLAYED.v = null;
                 PLAYED.takes = null;

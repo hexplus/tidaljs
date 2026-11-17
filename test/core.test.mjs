@@ -1796,5 +1796,60 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 21
+{
+    // The same-cycle rule holds across layers and streams: a replacement is judged on the clock with its own tempo
+    // change, never a sibling's at its cycle (same stack or another stream), so neither the order of layers nor of
+    // streams changes what is sent. MIDI through a stub port; every Note On and Note Off with its time.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const savedNow = performance.now;
+    performance.now = () => t.audioContext.currentTime * 1000;
+    const sent = [];
+    let ports = 0;
+    const start = (code) => {
+        reset();
+        t.lookahead = 0.1;
+        sent.length = 0;
+        const id = 'r21-' + ports++;
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round21', send(m, at) { if (m[0] < 0xb0) sent.push(m.join(' ') + '@' + +(at / 1000).toFixed(6)); } }]]) };
+        t.playEvent = TidalJS.prototype.playEvent;
+        eq(t.eval(code).success, true);
+        for (let ms = 0; ms <= 325; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+    };
+    const finish = (code) => {
+        eq(t.eval(code, live).success, true);
+        for (let ms = 350; ms <= 2500; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        return sent.slice();
+    };
+    const note = (nudge) => `note("~ ~ c4 ~").midi("round21").nudge(${nudge})`;
+    const once = ['144 60 100@0.4', '128 60 0@0.65']; // sent early at cycle 0.5 (nudge -0.15), a quarter-cycle note
+
+    // 1. One stack: a synth hit and a MIDI note at cycle 0.5, both sent early. The edit gives the synth hit (sent
+    // already: dropped) a slowdown and only nudges the note otherwise: the note is judged without its sibling's
+    // slowdown, so it is the note sent. One Note On, and the tempo stays at 1 cps.
+    start(`d1(stack(sound("~ ~ kick ~").nudge(-0.15), ${note(-0.15)}).playFor(0, 1))`);
+    eq(sent, once, 'both sent early');
+    eq(finish(`d1(stack(sound("~ ~ kick ~").cps(0.25).nudge(-0.15), ${note(-0.12)}).playFor(0, 1))`), once, 'one Note On (and its Note Off)');
+    eq(t.cps, 1, 'the slowdown went with the synth hit');
+
+    // 2. Two streams at cycle 0.5: a genuinely new hit with a slowdown (a snare where a kick was sent, nudged past
+    // what was sent: it plays, and so does its slowdown) and the MIDI note nudged otherwise. In either stream
+    // order the note is not sent again, and the tempo ends at 0.25.
+    const outcomes = [];
+    for (const [synthStream, midiStream] of [['d1', 'd2'], ['d2', 'd1']]) {
+        const code = (synth, midi) => [`${synthStream}(${synth}.playFor(0, 1))`, `${midiStream}(${midi}.playFor(0, 1))`].sort().join('\n');
+        start(code('sound("~ ~ kick ~").nudge(-0.15)', note(-0.15)));
+        const out = finish(code('sound("~ ~ snare ~").cps(0.25).nudge(0.1)', note(-0.12)));
+        outcomes.push([out, t.cps]);
+    }
+    eq(outcomes[0], [once, 0.25], 'synth in d1, MIDI in d2');
+    eq(outcomes[1], outcomes[0], 'swapped: the same MIDI bytes and times, the same tempo');
+
+    performance.now = savedNow;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);
