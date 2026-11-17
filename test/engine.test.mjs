@@ -109,6 +109,29 @@ eq(q(note('a4 g5@2 b4').slow(4).sound('superpiano'), 0, 4), 'superpiano/69@0 sup
 eq(note('a4 g5@2 b4').slow(4).sound('superpiano').query(1, 2)[0].end, 3, 'the held note keeps its length');
 eq(q(note('c4').slow(2).gain('0.5 0.8'), 0, 2), '/60@0 /60@0.5 /60@1 /60@1.5', 'a denser control still sets the rhythm');
 eq(q(note('c4').slow(2).sound('bd*4'), 1, 2), 'bd/60@1 bd/60@1.25 bd/60@1.5 bd/60@1.75', 'in the held cycle too');
+{
+    // A control with more onsets than the cycle's new notes still leads, held note or not:
+    // in cycle 1 the held C4 takes saw, then square (bug before: only the e4 onset played).
+    const held = stack(note('c4').slow(2), note('~ ~ ~ e4')).sound('saw square').query(1, 2)
+        .map((e) => `${e.value.s}/${e.value.note}@${e.begin}-${e.end}`).sort().join(' ');
+    eq(held, 'saw/60@1-1.5 square/60@1.5-2');
+}
+{
+    // A chain of text controls on a pattern that starts with a rest: the same events, and
+    // the base is only queried in the cycle asked for (plus the cycle-0 probe that picks the
+    // steps), never searched back for a held note at every level (bug before: hundreds of
+    // queries reaching cycles back, growing with each control).
+    const base = note('~ c4 e4');
+    const calls = [];
+    const query = base.query.bind(base);
+    base.query = (b, e) => { calls.push([b, e]); return query(b, e); };
+    const chain = base.sound('superpiano').gain('0.8').pan('0.5').lpf('2000');
+    const evs = chain.query(3, 4);
+    eq(q({ query: () => evs }), 'superpiano/60@3.3333 superpiano/64@3.6667');
+    eq(evs.map((e) => [e.end, e.value.gain, e.value.pan, e.value.lpf].join()).join(' '), '3.6666666666666665,0.8,0.5,2000 4,0.8,0.5,2000');
+    eq(calls.every(([b, e]) => b >= 0 && e - b <= 1 && (b === 0 || b >= 3)), true, 'no probes into earlier cycles: ' + JSON.stringify(calls));
+    eq(calls.length <= 8, true, 'two base queries per control at most, got ' + calls.length);
+}
 eq(sound('arpy').note('eb3 f#').query(0, 1).map((e) => e.value.note).join(), '51,66');
 eq(sound('arpy').note('0 7').query(0, 1).map((e) => e.value.note).join(), '60,67');
 eq(sound('arpy').note('c e g').up('0 12 7').query(0, 1).map((e) => e.value.note).join(), '60,72,67'); // up = note replaces it, as in Tidal
