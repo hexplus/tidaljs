@@ -91,3 +91,19 @@ def notes(items: Iterable[Tuple[int, int, int, int]], channel: int = 0) -> List[
     for start, length, pitch, velocity in items:
         out += note(start, length, pitch, velocity, channel)
     return out
+
+
+def port(tick: int, number: int) -> Event:
+    """The MIDI port meta event: the track's channel messages go to this port from here on."""
+    return tick, bytes([0xFF, 0x21, 0x01, number])
+
+
+def riff_chunk(kind: bytes, body: bytes) -> bytes:
+    """A RIFF chunk: little-endian length, padded to an even length."""
+    return kind + struct.pack("<I", len(body)) + body + (b"\x00" if len(body) % 2 else b"")
+
+
+def rmid(chunks: Sequence[bytes]) -> bytes:
+    """An RMID file: a RIFF form of type RMID holding the given chunks (one of them "data", with the MIDI file)."""
+    body = b"RMID" + b"".join(chunks)
+    return b"RIFF" + struct.pack("<I", len(body)) + body

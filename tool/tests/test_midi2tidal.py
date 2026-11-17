@@ -5,6 +5,9 @@ where it plays, evaluates the code in TidalJS (tool/tests/evaluate.mjs, which
 needs Node) to compare the notes: counts, pitches, onsets, lengths and levels.
 
     python tool/tests/test_midi2tidal.py
+
+Without Node the evaluating tests are skipped; with MIDI2TIDAL_REQUIRE_NODE=1
+(as in CI) they fail instead.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from fractions import Fraction
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -79,6 +83,8 @@ class ConverterTest(unittest.TestCase):
 
     def evaluate(self, code: str, cycles: float) -> dict:
         if not NODE:
+            if os.environ.get("MIDI2TIDAL_REQUIRE_NODE"):
+                self.fail("Node is needed to evaluate the code in TidalJS, and MIDI2TIDAL_REQUIRE_NODE is set")
             self.skipTest("Node is needed to evaluate the code in TidalJS")
         path = self.tmp / "code.js"
         path.write_text(code, encoding="utf-8")
@@ -210,7 +216,7 @@ class ConverterTest(unittest.TestCase):
         items = [(0, 250, 60, 100), (500, 250, 62, 100), (1000, 250, 64, 100), (1500, 250, 65, 100), (2250, 500, 67, 100)]
         events = [mf.tempo(0, 60), mf.tempo(1000, 240)] + mf.notes(items)
         code = self.convert(mf.midi(0, mf.smpte_division(25, 40), [mf.track(events)]))
-        self.assertIn("SMPTE timing (1000 ticks a second)", self.header(code))
+        self.assertIn("SMPTE timing (1000 ticks a second, 25 frames of 40 ticks)", self.header(code))
         self.assertPlays(self.played(code, 2.75 * 0.25 - 1e-9), [(s / 1000, n / 1000, p) for s, n, p, _ in items])
 
     def test_format_2_is_rejected(self) -> None:
@@ -248,6 +254,7 @@ class ConverterTest(unittest.TestCase):
             return mf.header(0, 1, division) + mf.chunk(b"MTrk", body)
 
         on = b"\x00\x90\x3c\x40"
+        eot = b"\x00\xff\x2f\x00"
         cases = [
             (b"hello world, not midi", "not a Standard MIDI File"),
             (b"MThd\x00\x00", "the header is cut off"),
@@ -270,10 +277,145 @@ class ConverterTest(unittest.TestCase):
             (one_track(b"\x81\x81\x81\x81\x00\x90\x3c\x40"), "longer than 4 bytes"),
             (one_track(b"\x00\xf8"), "system message 0xF8 cannot appear"),
             (mf.midi(0, PPQ, [mf.track([mf.tempo(0, 120)])]), "the file has no notes"),
+            # Running status: a meta or system exclusive event cancels it.
+            (one_track(on + b"\x00\xff\x01\x01a" + b"\x10\x3c\x00" + eot), "with no status byte before it"),
+            (one_track(on + b"\x00\xf0\x01\xf7" + b"\x10\x3c\x00" + eot), "with no status byte before it"),
+            # End of Track: there must be one, it has no data, and nothing follows it.
+            (one_track(on + b"\x10\x80\x3c\x00"), "the track has no End of Track event"),
+            (one_track(on + b"\x10\x80\x3c\x00" + b"\x00\xff\x2f\x01\x00"), "the End of Track event has 1 data byte"),
+            (one_track(on + b"\x10\x80\x3c\x00" + eot + b"\x00\x90"), "2 bytes after the End of Track event"),
+            # RMID: the RIFF "data" chunk, read by its declared size.
+            (b"RIFF" + b"\x04\x00\x00\x00" + b"WAVE", "a RIFF file of type 'WAVE', not RMID"),
+            (b"RIFF" + b"\xff\x00\x00\x00" + b"RMID", "the RIFF header declares 255 bytes but 4 follow"),
+            (mf.rmid([mf.riff_chunk(b"LIST", b"INFO")]), "the RMID file has no data chunk"),
+            (b"RIFF\x10\x00\x00\x00RMIDdata\xff\x00\x00\x00MThd", "the 'data' chunk declares 255 bytes but only 4 remain"),
         ]
         for data, expected in cases:
             with self.subTest(expected=expected):
                 self.fails(data, expected)
+
+    # -- The end of the song: bars come after the grid
+
+    def test_a_late_hit_rounded_past_the_last_bar_line_still_plays(self) -> None:
+        # One short note just before bar 2; on a sixteenth-note grid it starts on bar 2's first step.
+        code = self.convert(mf.midi(0, PPQ, [mf.track(mf.notes([(380, 4, 60, 100)]))]), "--grid", "4")
+        self.assertIn("2 bars", self.header(code))
+        self.assertPlays(self.played(code, 2 - 1e-9), [(2.0, 0.125, 60)], places=6)
+
+    def test_repeats_near_the_last_bar_line_both_play(self) -> None:
+        # Both round to bar 2's first step; the second moves one step later and still plays.
+        repeats = mf.notes([(378, 2, 62, 100), (382, 2, 62, 100)])
+        code = self.convert(mf.midi(0, PPQ, [mf.track(repeats)]), "--grid", "4")
+        self.assertIn("1 repeated note moved one step later", self.header(code))
+        self.assertPlays(self.played(code, 2 - 1e-9), [(2.0, 0.125, 62), (2.125, 0.125, 62)], places=6)
+
+    def test_a_preview_reports_every_hit_it_leaves_out(self) -> None:
+        repeats = mf.notes([(378, 2, 62, 100), (382, 2, 62, 100)])
+        with_start = mf.midi(0, PPQ, [mf.track(mf.notes([(0, PPQ, 60, 100)]) + repeats)])
+        code = self.convert(with_start, "--grid", "4", "--bars", "1")
+        self.assertIn("--bars 1: 2 notes after bar 1 are left out", self.header(code))
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60)], places=6)
+        # Nothing left to play is an error, not an empty program.
+        self.fails(mf.midi(0, PPQ, [mf.track(repeats)]), "no notes start in the first 1 bar (2 notes start later)",
+                   "--grid", "4", "--bars", "1")
+
+    def test_bars_caps_the_bars_it_builds(self) -> None:
+        far = (midi2tidal.MAX_BARS + 5) * BAR
+        data = mf.midi(0, PPQ, [mf.track(mf.notes([(0, PPQ, 60, 100), (far, PPQ, 64, 100)]))])
+        self.fails(data, f"the song is longer than {midi2tidal.MAX_BARS} bars")
+        code = self.convert(data, "--bars", "1")
+        self.assertIn("--bars 1: 1 note after bar 1 is left out", self.header(code))
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60)], places=6)
+
+    # -- RMID
+
+    def test_rmid_reads_only_its_data_chunk(self) -> None:
+        song = mf.midi(0, PPQ, [mf.track(mf.notes([(0, PPQ, 60, 100), (PPQ, PPQ, 64, 100)]))])
+        decoy = mf.midi(0, PPQ, [mf.track(mf.notes([(0, PPQ, 72, 100)]))])
+        # A LIST/INFO chunk of odd length (padded) whose text holds another MIDI file, then the data, then a sibling.
+        info = mf.riff_chunk(b"LIST", b"INFO" + mf.riff_chunk(b"ICMT", decoy + b"!") + b"x")
+        data = mf.rmid([info, mf.riff_chunk(b"data", song), mf.riff_chunk(b"DISP", b"\x01\x00\x00\x00MThd")])
+        code = self.convert(data, name="song.rmi")
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 0.5, 60), (0.5, 0.5, 64)], places=6)
+
+    # -- The TidalJS clock
+
+    def test_a_steady_song_keeps_its_times_at_the_engine_clock(self) -> None:
+        # 85 bpm in 6/8 for 25 bars. The file stores 705882 microseconds a quarter note, so one cycle is
+        # 3 * 0.705882 seconds: setCPS gets that exact fraction, not a rounded decimal.
+        eighth = PPQ // 2
+        items = [(b * 6 * eighth + i * eighth, eighth, 60 + i, 100) for b in range(25) for i in range(6)]
+        data = mf.midi(1, PPQ, [mf.track([mf.tempo(0, 85), mf.meter(0, 6, 8)]), mf.track(mf.notes(items))])
+        code = self.convert(data)
+        tempo = round(60e6 / 85)
+        cps = Fraction(8 * 10 ** 6, 6 * 4 * tempo)
+        self.assertIn(f"setCPS({cps.numerator} / {cps.denominator})", code)
+        result = self.evaluate(code, 25 - 1e-9)
+        self.assertAlmostEqual(result["cps"], float(cps), places=12)
+        spq = tempo / 1e6 / PPQ
+        played = [(e["begin"] / result["cps"], (e["end"] - e["begin"]) / result["cps"], e["note"]) for e in result["events"]]
+        self.assertPlays(played, [(s * spq, n * spq, p) for s, n, p, _ in items], places=6)
+
+    def test_smpte_drop_frame_keeps_elapsed_time(self) -> None:
+        # 29.97 drop-frame (30000/1001 frames a second) of 40 ticks; a quarter note at 120 bpm is 599.4 ticks.
+        rate = 30000 / 1001 * 40
+        items = [(k * 300, 150, 60 + k % 12, 100) for k in range(40)]
+        code = self.convert(mf.midi(0, mf.smpte_division(29, 40), [mf.track(mf.notes(items))]))
+        self.assertIn("29.97 (30 drop-frame) frames of 40 ticks", self.header(code))
+        self.assertIn("setCPS(500 / 1001)", code)  # a bar is 32 steps of 75 ticks: 2400 ticks, 2.002 seconds
+        cycles = (40 * 300) / 2400
+        result = self.evaluate(code, cycles - 1e-9)
+        self.assertAlmostEqual(result["cps"], 500 / 1001, places=12)
+        played = [(e["begin"] / result["cps"], (e["end"] - e["begin"]) / result["cps"], e["note"]) for e in result["events"]]
+        self.assertPlays(played, [(s / rate, n / rate, p) for s, n, p, _ in items], places=6)
+
+    def test_a_bar_too_long_for_a_cycle_is_reported(self) -> None:
+        data = mf.midi(0, PPQ, [mf.track([mf.tempo(0, 5)] + mf.notes([(0, PPQ, 60, 100)]))])
+        self.fails(data, "a TidalJS cycle lasts from 0.1 to 20 seconds")
+
+    # -- Ports, channel modes and drums
+
+    def test_channel_state_is_kept_per_port(self) -> None:
+        # The same channel on two ports: the pedal and program of port 0 do not reach port 1, and the notes pair apart.
+        a = [mf.port(0, 0), mf.program(0, 0, 0), mf.control(0, 0, 64, 127), mf.control(300, 0, 64, 0)] + mf.notes([(0, 192, 60, 100)])
+        b = [mf.port(0, 1), mf.program(0, 0, 48)] + mf.notes([(96, 48, 60, 100)])
+        code = self.convert(mf.midi(1, PPQ, [mf.track(a), mf.track(b)]))
+        self.assertIn("port 0, channel 1", code)
+        self.assertIn("port 1, channel 1", code)
+        self.assertIn('.sound("superpiano")', code)
+        self.assertIn('.sound("supersaw")', code)
+        s = 0.5 / PPQ
+        self.assertPlays(self.played(code, 1 - 1e-9), [(0, 300 * s, 60), (96 * s, 48 * s, 60)], places=6)
+
+    def test_channel_mode_messages(self) -> None:
+        events = [mf.control(0, 0, 122, 0)] + [mf.note(0, 1000, 60)[0]]  # local control; c4 never switched off
+        events += [mf.control(96, 0, 123, 0)]  # all notes off: c4 ends
+        events += [mf.control(96, 0, 64, 127), mf.note(96, 1000, 64)[0], mf.control(192, 0, 123, 0)]  # held by the pedal
+        events += [mf.control(240, 0, 121, 0)]  # reset all controllers: the pedal lifts, e4 ends
+        events += [mf.control(288, 0, 64, 127), mf.note(288, 1000, 67)[0], mf.control(336, 0, 120, 0)]  # all sound off
+        events += [mf.control(360, 0, 126, 1)] + mf.notes([(BAR, PPQ, 69, 100)])  # mono mode
+        code = self.convert(mf.midi(0, PPQ, [mf.track(events)]))
+        header = self.header(code)
+        self.assertIn("1 local control message", header)
+        self.assertIn("1 mono mode message", header)
+        self.assertIn("the sustain pedal lengthens 1 note", header)
+        s = 0.5 / PPQ
+        self.assertPlays(self.played(code, 2 - 1e-9), [(0, 96 * s, 60), (96 * s, 144 * s, 64), (288 * s, 48 * s, 67),
+                                                         (BAR * s, PPQ * s, 69)], places=6)
+
+    def test_drum_keys_that_sound_alike_keep_every_hit(self) -> None:
+        drums = mf.note(0, 10, 35, 127, channel=9) + mf.note(0, 10, 36, 64, channel=9) + mf.note(PPQ, 10, 36, 90, channel=9)
+        drums += mf.note(2 * PPQ, 10, 35, 127, channel=9) + mf.note(2 * PPQ, 10, 36, 64, channel=9)
+        data = mf.midi(0, PPQ, [mf.track(drums)])
+        code = self.convert(data, "--velocity")
+        self.assertIn("bd, key 35", code)
+        self.assertIn("bd, key 36", code)
+        result = self.evaluate(code, 1 - 1e-9)
+        hits = sorted((round(e["begin"] * 4), round(e["level"], 4)) for e in result["events"])
+        self.assertEqual(hits, sorted([(0, 1.0), (0, round((64 / 127) ** 2, 4)), (1, round((90 / 127) ** 2, 4)),
+                                       (2, 1.0), (2, round((64 / 127) ** 2, 4))]))
+        plain = self.evaluate(self.convert(data), 1 - 1e-9)
+        self.assertEqual(sorted(round(e["begin"] * 4) for e in plain["events"]), [0, 0, 1, 2, 2])
 
     def test_output_paths(self) -> None:
         data = mf.midi(0, PPQ, [mf.track(mf.notes([(0, PPQ, 60, 100)]))])
