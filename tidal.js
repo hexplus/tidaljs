@@ -1091,7 +1091,8 @@
         /**
          * Plays the notes of each chord one after another.
          * Modes: up, down, updown, downup, up&down, down&up, converge,
-         * diverge, disconverge, pinkyup, thumbup. The mode can be a pattern.
+         * diverge, disconverge, pinkyup, pinkyupdown, thumbup, thumbupdown.
+         * The mode can be a pattern.
          */
         arp(mode = 'up') {
             const modes = toRaw(this.tidal, mode, 'arp');

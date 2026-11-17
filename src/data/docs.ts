@@ -8,7 +8,7 @@
  * cycles, which cycles something happens in, or what each event sounds like.
  */
 
-import { CONTROL_NAMES } from './signatures.ts';
+import { TAKE_CONTROLS } from './signatures.ts';
 
 export interface Doc {
     /** What it does, in a few sentences. */
@@ -92,6 +92,7 @@ export const DOCS: Record<string, Doc> = {
     setTempo: D('Sets the tempo in beats per minute, counting four beats per cycle: setTempo(120) is setCPS(0.5).', 'setTempo(128)', undefined, ['setCPS']),
     stopAll: D('Stops every pattern, like the Stop button or the Esc key.', 'stopAll()', undefined, ['hush']),
     hush: D('Silences everything, as in TidalCycles. The same as stopAll().', 'hush()', undefined, ['stopAll']),
+    testAudio: D('Plays a short 440 Hz beep, to check that the sound reaches your speakers. It does not depend on any pattern or on the tempo.', undefined, 'If you hear the beep but not your patterns, check their gain and the sounds they use.', ['stopAll']),
     play: D('Starts playing the pattern. Usually not needed: every top-level pattern in the code plays when you press Play.', 'sound("bd sn").play()', undefined, ['stop']),
     stop: D('Stops this pattern only.', undefined, undefined, ['play', 'stopAll']),
     query: D('Returns the events of the pattern between two cycle times, as objects with begin, end and value. For inspecting a pattern; it plays nothing.', 'sound("bd sn").query(0, 1)', undefined, ['firstCycle']),
@@ -1024,8 +1025,7 @@ Object.assign(DOCS, {
 });
 
 // Tidal's *Take controls: one for every numeric control (nTake has its own entry).
-for (const name of CONTROL_NAMES) {
-    if (['s', 'sound', 'vowel', 'unit', 'nrpn', 'n', 'tie'].includes(name)) continue;
+for (const name of TAKE_CONTROLS) {
     DOCS[name + 'Take'] = D(
         `Tidal's ${name}Take: each played event takes the next value of the list as its ${name}, counted under the name across cycles and code changes.`,
         undefined,

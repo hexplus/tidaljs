@@ -53,6 +53,10 @@ Object.assign(DESCRIPTIONS, {
   slowcat: "Same as cat", setcps: "Same as setCPS", arp: "Play chord notes in turn",
   scaleList: "Names of all scales", chordList: "Names of all chords",
   const: "Declare a constant", let: "Declare a variable",
+  brand: "Random true or false", cosine2: "Cosine wave, -1 to 1", saw2: "Rising ramp, -1 to 1",
+  isaw2: "Falling ramp, 1 to -1", tri2: "Triangle wave, -1 to 1", square2: "Square wave, -1 then 1",
+  envLR: "Envelope falling over the first cycle", envEq: "Equal-power envelope falling over the first cycle",
+  envEqR: "Equal-power envelope rising over the first cycle",
 });
 
 export const SOUND_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
@@ -91,6 +95,9 @@ export const GLOBALS: CompletionItem[] = ([
   ["toScaleBy", "fn"], ["fitSlices", "fn"], ["resetCycles", "call"], ["setOutput", "fn"],
   ["first", "fn"], ["asap", "fn"], ["only", "fn"], ["panic", "call"], ["setbpm", "fn"], ["getcps", "call"], ["getnow", "call"], ["setCycle", "fn"],
   ["jumpInNext", "fn"], ["jumpModOffset", "fn"], ["histpan", "fn"], ["waitT", "fn"], ["weaveWith", "fn"],
+  // Live input and the Controls panel
+  ["slider", "fn"], ["toggle", "fn"], ["controlLayout", "fn"], ["midicc", "fn"], ["midibend", "call"], ["miditouch", "call"],
+  ["midikeys", "fn"], ["keytouch", "call"], ["oscIn", "fn"], ["oscplay", "fn"], ["envelope", "fn"], ["testAudio", "call"],
   // Controls on their own: n("0 2"), speed(2)
   ...CONTROL_NAMES.filter((name) => name !== "s" && name !== "sound").map((name) => [name, "fn"]),
   ["const", "kw"], ["let", "kw"],
@@ -276,6 +283,7 @@ export const ARP_HELP: Record<string, string> = {
   converge: "Outside notes first, moving inwards", diverge: "Inside notes first, moving outwards",
   disconverge: "Converge, then diverge", pinkyup: "Each note followed by the top note",
   thumbup: "The bottom note followed by each note",
+  pinkyupdown: "Pinkyup, then back down", thumbupdown: "Thumbup, then back down",
 };
 
 export const KEYWORD_HELP: Record<string, string> = {

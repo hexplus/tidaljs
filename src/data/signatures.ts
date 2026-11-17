@@ -69,6 +69,7 @@ export const GLOBAL_SIGNATURES: Record<string, Signature> = {
     chordList: ['Names of all chords'],
     stopAll: ['Stop everything'],
     hush: ['Same as stopAll'],
+    testAudio: ['Play a short beep to check the audio output'],
     midiOutputs: ['Names of the MIDI outputs'],
     record: ['Start recording the audio'],
     stopRecording: ['Stop recording and download the file'],
@@ -558,6 +559,16 @@ Object.assign(METHOD_SIGNATURES, {
 });
 for (const name of CONTROL_NAMES) {
     if (!GLOBAL_SIGNATURES[name]) GLOBAL_SIGNATURES[name] = METHOD_SIGNATURES[name];
+}
+/**
+ * Controls with a Tidal *Take method (gainTake...): the numeric ones and note,
+ * without the aliases (their help starts "Same as"). nTake has its own entry.
+ */
+export const TAKE_CONTROLS = CONTROL_NAMES.filter((name) => !['s', 'sound', 'vowel', 'unit', 'nrpn', 'n', 'tie'].includes(name)
+    && !CONTROL_HELP[name][0].startsWith('Same as '));
+for (const name of TAKE_CONTROLS) {
+    METHOD_SIGNATURES[name + 'Take'] = [`Give each played event the next value of a list as ${name}`,
+        P('name', 'a name, so the count continues across changes'), P('list', `values of ${name}, e.g. [0.2, 0.5, 0.8]`)];
 }
 
 /** The parameters of a signature, without its summary. */
