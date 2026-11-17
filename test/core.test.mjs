@@ -1701,5 +1701,69 @@ const runLaidOut = (fromMs, toMs, label) => {
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 19
+{
+    // MIDI through a stub port, with the performance clock tied to the fake audio clock.
+    const live = { keepUnchanged: true };
+    const savedAccess = t.midiAccess;
+    const savedNow = performance.now;
+    performance.now = () => t.audioContext.currentTime * 1000;
+    const sent = [];
+    let ports = 0;
+    const port = () => {
+        sent.length = 0;
+        const id = 'r19-' + ports++;
+        t.midiAccess = { outputs: new Map([[id, { id, name: 'round19', send(m, at) { if ((m[0] & 0xf0) === 0x90 && m[2] > 0) sent.push(m[1] + '/' + m[2] + '@' + +(at / 1000).toFixed(6)); } }]]) };
+    };
+    const tickTo = (fromMs, toMs, out) => {
+        const real = TidalJS.prototype.playEvent;
+        t.playEvent = function (v, time, duration) {
+            if (out && v.midi === undefined) out.push(v.s + '@' + +time.toFixed(6));
+            return real.call(this, v, time, duration);
+        };
+        for (let ms = fromMs; ms <= toMs; ms += 25) { t.audioContext.currentTime = ms / 1000; t._tick(); }
+        t.playEvent = real;
+    };
+
+    // 1. Decisions hold on the clock that is left once the tempo changes of dropped hits are gone. Two hits went
+    // out early (nudge -0.15, onset 0.5, at 0.4 s): a kick and a MIDI note. The edit adds a slowdown to the kick
+    // (sent already: dropped, and its slowdown with it) and only nudges the note differently. On the clock with
+    // that slowdown the note would last four times longer, a different note; on the clock left (1 cps) it is the
+    // note sent. The tempo stays 1 cps and the note goes out once.
+    reset();
+    t.lookahead = 0.1;
+    port();
+    const synth = [];
+    eq(t.eval('d1(note("~ ~ c4 ~").midi("round19").nudge(-0.15).playFor(0, 1))\nd2(sound("~ ~ kick ~").nudge(-0.15).playFor(0, 1))\nd3(sound("a*8"))').success, true);
+    tickTo(0, 325, synth);
+    eq([sent.slice(), synth.filter((x) => x.startsWith('kick'))], [['60/100@0.4'], ['kick@0.4']], 'both sent early');
+    eq(t.eval('d1(note("~ ~ c4 ~").midi("round19").nudge(-0.12).playFor(0, 1))\nd2(sound("~ ~ kick ~").cps(0.25).nudge(-0.15).playFor(0, 1))\nd3(sound("a*8"))', live).success, true);
+    tickTo(350, 1500, synth);
+    eq(t.cps, 1, 'the slowdown went with the kick');
+    eq(sent, ['60/100@0.4'], 'one Note On');
+    eq(synth.filter((x) => x.startsWith('kick')), ['kick@0.4']);
+    eq(synth.filter((x) => x.startsWith('a@')).map((x) => +x.slice(2)).filter((x) => x <= 1.45), gridOf([], 0.125, 1.45), 'the grid at 1 cps');
+
+    // 2. Simultaneous MIDI notes sharing a take counter are each compared with their own index: c4 took 0.2
+    // (index 0) and e4 0.5 (index 1); after a nudge-only edit neither is sent again, and cycle 1 takes 0.7 and
+    // 0.9. Four Note Ons, four counts.
+    reset();
+    t.lookahead = 0.1;
+    t._nTakeCounters.clear();
+    port();
+    const layers = (nudge) => `d1(stack(note("c4"), note("e4")).midi("round19").gainTake("meter", [0.2, 0.5, 0.7, 0.9]).nudge(${nudge}).playFor(0, 2))`;
+    eq(t.eval(layers(0)).success, true);
+    tickTo(0, 300);
+    eq(sent, ['60/20@0.05', '64/50@0.05']);
+    eq(t.eval(layers(0.6), live).success, true);
+    tickTo(325, 2200);
+    eq(sent, ['60/20@0.05', '64/50@0.05', '60/70@1.65', '64/90@1.65'], 'four Note Ons');
+    eq(t._nTakeCounters.get('gain:meter'), 4, 'four counts');
+
+    performance.now = savedNow;
+    t.midiAccess = savedAccess;
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

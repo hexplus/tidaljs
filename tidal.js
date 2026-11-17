@@ -7403,22 +7403,26 @@
             if (requests.length) this._reconcileTempo();
 
             // The handoff at onsets not yet passed, on the clock with this tick's tempo changes (a slowdown
-            // before an onset moves it, and with it where an absolute curve is read): a hit already sent is
-            // dropped, with the tempo change it carries.
+            // before an onset moves it, and with it where an absolute curve is read and how long a note is): a
+            // hit already sent is dropped, with the tempo change it carries. Dropping those changes the clock
+            // again, so the decisions are taken again on the clock that is left, until they hold on it (a
+            // slowdown that came only with a hit already sent changes nothing).
             if (handoffs.length) {
-                let dropped = false;
-                for (const h of handoffs) {
-                    const already = this._handoff(h.id, h.pattern, h.items.map((it) => it.ev), now, 'ahead');
-                    if (!already) continue;
-                    for (const k of already) {
-                        h.items[k].dropped = true;
-                        dropped = true;
+                const candidates = handoffs.flatMap((h) => h.items);
+                let suppressed = new Set();
+                for (let round = 0; round < 8; round++) {
+                    const next = new Set();
+                    for (const h of handoffs) {
+                        const already = this._handoff(h.id, h.pattern, h.items.map((it) => it.ev), now, 'ahead');
+                        if (already) for (const k of already) next.add(h.items[k]);
                     }
+                    const settled = next.size === suppressed.size && [...next].every((it) => suppressed.has(it));
+                    suppressed = next;
+                    for (const it of candidates) it.dropped = suppressed.has(it);
+                    this._reconcileTempo(); // (the requests of dropped events no longer count)
+                    if (settled) break;
                 }
-                if (dropped) {
-                    items = items.filter((it) => !it.dropped);
-                    this._reconcileTempo();
-                }
+                if (suppressed.size) items = items.filter((it) => !it.dropped);
             }
 
             // Then in the order they sound (nudge included), so the last word on
@@ -7502,41 +7506,38 @@
                 if (time >= this._sentHorizon && time >= now - 0.02) open.add(at);
             }
             if (!open.size) return null;
-            // The take indices the hits sent there used: a new event there is compared with the values its lists
-            // give at those indices (the counters have moved on since). Two different indices for one counter
-            // (simultaneous layers sharing a take) cannot tell which is which: undecided.
-            const indicesAt = new Map();
-            for (const at of open) {
-                const indices = new Map();
-                for (const h of sent.get(at).hits) {
-                    if (!h.takes) continue;
-                    for (const [counter, index] of h.takes) indices.set(counter, indices.has(counter) && indices.get(counter) !== index ? NaN : index);
-                }
-                indicesAt.set(at, indices);
-            }
-            const groups = new Map(); // onset + fingerprint -> { old: [hit], fresh: [hit] }
-            let unique = 0;
-            const group = (at, fp) => {
-                const key = fp.truncated ? '#' + unique++ : at + '|' + fp.key;
-                let g = groups.get(key);
-                if (!g) groups.set(key, (g = { old: [], fresh: [] }));
+            const groups = new Map(); // onset -> { old: [hit], fresh: [hit] }
+            const group = (at) => {
+                let g = groups.get(at);
+                if (!g) groups.set(at, (g = { old: [], fresh: [] }));
                 return g;
             };
-            const ats = open;
             for (let i = 0; i < events.length; i++) {
                 const at = events[i].begin.toFixed(9);
-                if (!ats.has(at)) continue;
+                if (!open.has(at)) continue;
                 const v = asObject(events[i].value);
-                group(at, this._hitIdentity(v, events[i], this._scheduledAt(events[i], v), null, indicesAt.get(at))).fresh.push({ i, nudge: nudgeOf(v), follow: followOf(v), ev: events[i] });
+                const time = this._scheduledAt(events[i], v);
+                group(at).fresh.push({ i, v, time, nudge: nudgeOf(v), follow: followOf(v), ev: events[i], fp: this._hitIdentity(v, events[i], time), byTakes: new Map() });
             }
-            for (const at of ats) {
-                const record = sent.get(at);
-                for (const h of record.hits) group(at, h.fp).old.push({ ...h, sent: true });
-            }
+            for (const at of open) for (const h of sent.get(at).hits) group(at).old.push({ ...h, sent: true });
             for (const it of this._nudged) {
-                if (it.id !== id || it.pattern === pattern || !ats.has(it.at)) continue;
-                group(it.at, this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v), null, indicesAt.get(it.at))).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false });
+                if (it.id !== id || it.pattern === pattern || !open.has(it.at)) continue;
+                group(it.at).old.push({ nudge: nudgeOf(it.v), follow: followOf(it.v), ev: it.ev, sent: false, fp: this._hitIdentity(it.v, it.ev, this._scheduledAt(it.ev, it.v)) });
             }
+            // A new event plays the same as an old hit when their identities agree (a truncated one agrees with
+            // none) and so do their followed curves. Against a sent hit that read take lists, the new event is
+            // read at that hit's own indices (the counters have moved on since; simultaneous layers sharing a
+            // counter each used their own index).
+            const identityFor = (f, o) => {
+                if (!(o.sent && o.takes)) return f.fp;
+                const at = [...o.takes].map(([counter, index]) => counter + '=' + index).join('&');
+                if (!f.byTakes.has(at)) f.byTakes.set(at, this._hitIdentity(f.v, f.ev, f.time, null, o.takes));
+                return f.byTakes.get(at);
+            };
+            const same = (o, f) => {
+                const fp = identityFor(f, o);
+                return !fp.truncated && !o.fp.truncated && fp.key === o.fp.key && this._sameCurves(o, f);
+            };
             const already = new Set();
             for (const g of groups.values()) {
                 if (!g.old.some((o) => o.sent) || !g.fresh.length) continue;
@@ -7547,14 +7548,14 @@
                     old.splice(k, 1);
                 };
                 for (const f of g.fresh) {
-                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9 && this._sameCurves(o, f));
+                    const k = old.findIndex((o) => Math.abs(o.nudge - f.nudge) < 1e-9 && same(o, f));
                     if (k < 0) rest.push(f);
                     else pair(f, k);
                 }
                 old.sort((a, b) => a.nudge - b.nudge || (a.sent ? 0 : 1) - (b.sent ? 0 : 1));
                 rest.sort((a, b) => a.nudge - b.nudge || a.i - b.i);
                 for (const f of rest) {
-                    const k = old.findIndex((o) => this._sameCurves(o, f));
+                    const k = old.findIndex((o) => same(o, f));
                     if (k >= 0) pair(f, k);
                 }
             }
@@ -7575,7 +7576,6 @@
                 let index;
                 if (indices && indices.has(counter)) {
                     index = indices.get(counter);
-                    if (Number.isNaN(index)) throw new Error('undecided take index'); // (see _handoff)
                 } else {
                     index = this._nTakeCounters.get(counter) || 0;
                     if (advance) this._nTakeCounters.set(counter, index + 1);
