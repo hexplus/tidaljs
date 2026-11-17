@@ -5975,6 +5975,7 @@
             this._tempoHistory = [];           // earlier { time, cycle, cps } anchors, valid until the next one
             this._nudged = [];                 // events asked for but not sent yet (beyond the horizon), waiting for their tick
             this._queried = new Map();         // stream -> { pattern, to }: the cycle up to which it was asked for
+            this._sentOnsets = new Map();      // stream -> Map(onset key -> cycle): onsets it sent lately (see _tick)
             this._dispatchCycle = 0;           // events up to this cycle have been sent (see _dispatch)
             this._sentHorizon = -Infinity;     // the audible time up to which events have been sent
             this._tempoRequests = [];          // tempo changes events asked for ahead (see _reconcileTempo)
@@ -6488,7 +6489,7 @@
             cycle = Math.max(cycle, this._anchorCycle); // never before the mapping in force
             const time = this.timeAt(cycle);
             this._tempoHistory.push({ time: this._anchorTime, cycle: this._anchorCycle, cps: this.cps });
-            if (this._tempoHistory.length > 32) this._tempoHistory.shift();
+            // (pruned only once nothing needs it: see _pruneTimeline)
             this._anchorTime = time;
             this._anchorCycle = cycle;
             this.cps = cps;
@@ -7004,6 +7005,7 @@
             this._timelineStart = cycle; // nothing before it is played in this numbering (see _tick)
             this._tempoHistory = [];
             this._queried.clear();
+            this._sentOnsets.clear();
             // (what was already sent, _sentHorizon, is a time: it stays)
             this._nudged = [];
         }
@@ -7022,6 +7024,7 @@
             this._nextCycle = 0;
             this._dispatchCycle = 0;
             this._queried.clear();
+            this._sentOnsets.clear();
             this._sentHorizon = -Infinity;
             this._tempoRequests = [];
             this._tempoPast = null;
@@ -7038,6 +7041,7 @@
             this._stopTimer();
             this._nudged = []; // events held back for a later tick never play
             this._queried.clear();
+            this._sentOnsets.clear();
             this._sentHorizon = -Infinity;
             this._dropTempoRequests(); // tempo changes whose control was not sent never happened: the committed tempo stays
             const session = this._session;
@@ -7200,6 +7204,7 @@
             const now = ctx.currentTime;
             // Tempo changes asked for ahead by streams that were removed, replaced or silenced since do not happen.
             this._reconcileTempo();
+            this._pruneTimeline(now);
             // Events are asked for NUDGE_EARLY seconds before the horizon at which they are sent, so
             // one that a negative nudge moves earlier (up to NUDGE_EARLY) is known in time to play.
             const to = this.cycleAt(now + this.lookahead + NUDGE_EARLY);
@@ -7243,11 +7248,21 @@
                     if (audible) this._streamFailed(id, error);
                     continue;
                 }
+                // A replacement does not send again an onset its stream already sent, whatever its nudge now
+                // (nor its tempo change). Onsets are told apart by cycle and, for simultaneous ones (layers),
+                // by their order there.
+                const sentBefore = fresh ? this._sentOnsets.get(id) : null;
+                const seen = new Map();
                 for (let i = 0; i < events.length; i++) {
+                    const at = events[i].begin.toFixed(9);
+                    const nth = seen.get(at) || 0;
+                    seen.set(at, nth + 1);
+                    const key = at + '#' + nth;
+                    if (sentBefore && sentBefore.has(key)) continue;
                     const v = asObject(events[i].value);
                     // Each event keeps its stream and the pattern it came from, so one held back can be dropped
                     // when that stream is muted, replaced or removed before it goes out.
-                    const item = audible ? { ev: events[i], v, stream, i, id, pattern, after: fresh ? this._sentHorizon : -Infinity } : null;
+                    const item = audible ? { ev: events[i], v, stream, i, id, pattern, key, after: fresh ? this._sentHorizon : -Infinity } : null;
                     if (item) items.push(item);
                     // Tidal's cps control, settled when its event is sent or dropped (see _commitTempo). Onsets
                     // before what was sent were the old pattern's to make, except those a replacement recovers:
@@ -7259,6 +7274,7 @@
                 }
             }
             for (const id of [...this._queried.keys()]) if (!this.channels.has(id)) this._queried.delete(id);
+            for (const id of [...this._sentOnsets.keys()]) if (!this.channels.has(id)) this._sentOnsets.delete(id);
             if (to > this._nextCycle) this._nextCycle = to;
             if (!this.isPlaying) return; // the last stream failed
             items.sort((a, b) => a.ev.begin - b.ev.begin || a.stream - b.stream || a.i - b.i);
@@ -7286,6 +7302,27 @@
             }
             this._dispatch(items, now);
             this._commitTempo();
+        }
+
+        /**
+         * Forgets what no one needs any more: the earliest cycle still needed
+         * is the earliest onset held back, or how far back a replacement looks
+         * (see _tick), or the playhead a second ago, whichever is earliest.
+         * Tempo segments that end before it go (notes held back keep the
+         * mapping of their onset, however many tempo changes came since), and
+         * so do the records of onsets sent before it.
+         */
+        _pruneTimeline(now) {
+            const edge = Number.isFinite(this._sentHorizon) ? Math.max(this._sentHorizon, now) : now;
+            let floor = Math.min(this.cycleAt(edge - NUDGE_LATE), this.cycleAt(now - 1));
+            for (const it of this._nudged) if (it.ev.begin < floor) floor = it.ev.begin;
+            const h = this._tempoHistory;
+            let n = 0;
+            while (n < h.length && (n + 1 < h.length ? h[n + 1].cycle : this._anchorCycle) <= floor) n++;
+            if (n) h.splice(0, n);
+            for (const onsets of this._sentOnsets.values()) {
+                for (const [key, cycle] of onsets) if (cycle < floor) onsets.delete(key);
+            }
         }
 
         /**
@@ -7345,6 +7382,9 @@
                     continue;
                 }
                 it.sent = true;
+                let onsets = this._sentOnsets.get(it.id);
+                if (!onsets) this._sentOnsets.set(it.id, (onsets = new Map()));
+                onsets.set(it.key, it.ev.begin);
                 try {
                     this.playEvent(it.v, Math.max(it.time, now), it.duration);
                 } catch (error) {

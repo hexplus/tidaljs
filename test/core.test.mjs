@@ -972,5 +972,56 @@ const shown = (played, until) => played.filter((e) => e.time <= until + 1e-9).ma
     t.stopAll();
 }
 
+// ---------------------------------------------------------------- Review round 9
+{
+    // 1. A live update that only changes the nudge sends no onset its stream already sent (cycle 0.5 went out at
+    // 0.65 s with nudge 0.1; with nudge 0.3 it would sound at 0.85 s, after what was sent), nor its tempo change.
+    const live = { keepUnchanged: true };
+    reset();
+    t.lookahead = 0.1;
+    t.eval('d1(sound("a*4").nudge(0.1))');
+    let played = run(0, 600);
+    t.eval('d1(sound("a*4").nudge(0.3))', live);
+    played = played.concat(run(625, 2000));
+    eq(shown(played, 2), ['a@0.15', 'a@0.4', 'a@0.65', 'a@1.1', 'a@1.35', 'a@1.6', 'a@1.85'], 'every position once');
+
+    reset();
+    t.eval('d1(sound("a*8"))\nd2(sound("~ ~ x ~").cps(2).nudge(0.1).playFor(0, 1))');
+    played = run(0, 600);
+    eq([hitsOf(played, 'x', 1), t.cps], [[0.65], 2], 'sent, and its 2 cps committed');
+    t.eval('d1(sound("a*8"))\nd2(sound("~ ~ x ~").cps(3).nudge(0.3).playFor(0, 1))', live);
+    played = played.concat(run(625, 1500));
+    eq([hitsOf(played, 'x', 2), t.cps], [[0.65], 2], 'not sent again, its 3 cps never applies');
+    eq(hitsOf(played, 'a', 1.45), gridOf([[0.5, 2]], 0.125, 1.45));
+
+    // Simultaneous layers are told apart: at cycle 0, "a" was sent and "b" (nudge 0.5) held back; the new version
+    // sends "b" (recovered) but not "a" again, though its nudge now puts it after what was sent.
+    reset();
+    t.eval('d1(stack(sound("a"), sound("b").nudge(0.5)).fast(2))');
+    played = run(0, 300);
+    eq(t._nudged.map((it) => it.v.s + '@' + it.ev.begin), ['b@0', 'a@0.5', 'b@0.5']);
+    t.eval('d1(stack(sound("a").nudge(0.4), sound("b").nudge(0.5)).fast(2))', live);
+    played = played.concat(run(325, 1600));
+    eq(shown(played, 1.6), ['a@0.05', 'b@0.55', 'a@0.95', 'b@1.05', 'a@1.45', 'b@1.55']);
+    t.stopAll();
+}
+{
+    // 2. A cycle-0 hit nudged 2 s keeps the mapping of its onset across far more than 32 tempo changes (40 per
+    // cycle); the history is pruned only behind what is still needed. A dense grid lands exactly on the clock.
+    reset();
+    t.lookahead = 0.1;
+    eq(t.eval('d1(sound("a").nudge(2).playFor(0, 1))\nd2(sound("t*40").cps("[1 2]*20"))\nd3(sound("g*16"))').success, true);
+    const played = run(0, 2500);
+    const changes = [];
+    for (let k = 0; k < 160; k++) changes.push([k / 40, k % 2 ? 2 : 1]);
+    eq(changes.filter(([c]) => timeOn(changes, c) < 2.05).length > 32, true, 'more than 32 changes before it sounds');
+    eq(hitsOf(played, 'a', 3), [2.05], 'at its onset (0.05 s) plus 2 s, once');
+    const grid = gridOf(changes, 1 / 16, 2.4);
+    eq(grid.length, 51);
+    eq(hitsOf(played, 'g', 2.4), grid, 'every grid hit, exactly');
+    ok(t._tempoHistory.length < 100, 'pruned behind what is needed: ' + t._tempoHistory.length);
+    t.stopAll();
+}
+
 globalThis.setTimeout = realSetTimeout;
 console.log(`core: all ${passed} checks passed`);

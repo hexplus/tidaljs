@@ -388,8 +388,9 @@ export function createSession() {
           runCode(engine, true, text, "recheck");
           return;
         }
-        if (statusSeq === shown && engine.isPlaying && !engine.isLoadingSamples()) {
-          // Its "waiting" message is still shown: the code changed meanwhile (not run with live update off).
+        if (statusSeq === shown && engine.isPlaying) {
+          // Its "waiting" message is still shown (no newer action posted one): the code changed meanwhile, with
+          // live update off. Its own manifests settled, so it says so now, whatever other loads still run.
           report("playing warn", "The samples it waited for settled, but the code changed since, so it was not checked again. "
             + "The previous patterns keep playing; press Play to run it.");
           runStatus = statusSeq;
@@ -551,8 +552,9 @@ export function createSession() {
         scheduleLiveUpdate();
       } else {
         clearTimeout(liveTimer);
-        // Nothing runs by itself with live update off, not even an edit waiting for its samples.
-        if (pendingRecheck) {
+        // Nothing runs by itself with live update off, not even an edit waiting for its samples; a Retry was
+        // asked for explicitly, so its check stays (an edit, Stop, Play or another document still drop it).
+        if (pendingRecheck && !pendingRecheck.retry) {
           canceledDraft = pendingRecheck;
           pendingRecheck = null;
           report("playing warn", "Live update is off, so the edit waiting for samples will not run by itself. "

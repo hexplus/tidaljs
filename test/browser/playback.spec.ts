@@ -368,6 +368,88 @@ for (const then of ["completes", "an edit", "Stop", "Play"] as const) {
   });
 }
 
+/** A page whose manifest at https://r9.test/kit fails first (404), then is held until release; other r9 manifests never arrive. */
+async function retryAfter404(page: Page, live: boolean) {
+  let requests = 0;
+  let served = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("https://r9.test/**", async (route) => {
+    const url = route.request().url();
+    if (!url.endsWith(".json")) return route.fulfill({ contentType: "audio/wav", body: silentWav() });
+    if (!url.includes("/kit/")) return; // an unrelated load that stays active
+    requests++;
+    if (requests === 1) return route.fulfill({ status: 404, body: "" });
+    await held;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ kick: ["kick.wav"] }) });
+    served++;
+  });
+  await page.goto("/");
+  if (!live) await page.locator("#liveToggle").uncheck();
+  await setCode(page, 'samples("https://r9.test/kit/strudel.json")\nd1(sound("kick*2"))');
+  await playAndWait(page);
+  await expect(page.locator("#statusAction")).toHaveText("Retry", { timeout: 5000 });
+  const evaluations = await countEvaluations(page);
+  await page.click("#statusAction");
+  await expect.poll(() => requests).toBe(2);
+  await expect.poll(() => statusText(page)).toContain("Waiting for samples (kick)");
+  expect(await evaluations()).toBe(1); // the Retry's run
+  return { release, evaluations, requests: () => requests, served: () => served };
+}
+
+const kickBank = (page: Page) => page.evaluate(() => (window as unknown as { tidal: { sampleBanks: Map<string, string[]> } }).tidal.sampleBanks.get("kick") ?? null);
+
+for (const then of ["completes", "another document drops it"] as const) {
+  test(`a Retry stays active when live update is turned off during its fetch: ${then}`, async ({ page }) => {
+    const retry = await retryAfter404(page, true);
+    await page.locator("#liveToggle").uncheck();
+    await page.waitForTimeout(300);
+    expect(await statusText(page)).toContain("Waiting for samples (kick)"); // not cancelled by the toggle
+    if (then === "completes") {
+      retry.release();
+      await expect.poll(() => statusText(page), { timeout: 5000 }).toContain("Updated: playing 1 pattern");
+      expect(await kickBank(page)).toEqual(["https://r9.test/kit/kick.wav"]);
+      await page.waitForTimeout(1000);
+      expect(await retry.evaluations()).toBe(2);
+      expect(retry.requests()).toBe(2);
+      return;
+    }
+    const hash = await encodeShareHash({ title: "Other", code: 'd1(sound("hh*2"))', cps: 0.8 });
+    await page.evaluate((h) => { location.hash = h; }, hash);
+    await page.getByRole("button", { name: "Open in editor" }).click();
+    await page.getByRole("button", { name: "Replace it" }).click();
+    await expect.poll(() => statusText(page)).toContain("for review");
+    const before = await statusText(page);
+    retry.release();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { tidal: { isLoadingSamples(): boolean } }).tidal.isLoadingSamples())).toBe(false);
+    await page.waitForTimeout(1000);
+    expect(await retry.evaluations()).toBe(1);
+    expect(await statusText(page)).toBe(before);
+  });
+}
+
+for (const newer of [false, true]) {
+  test(`a Retry dropped by an edit settles its status when its manifest does, with another load still active${newer ? ", unless a newer action posted one" : ""}`, async ({ page }) => {
+    const retry = await retryAfter404(page, false);
+    // An unrelated load that never finishes.
+    await page.evaluate(() => { void (window as unknown as { tidal: { loadSamples(s: string): Promise<number> } }).tidal.loadSamples("https://r9.test/other/strudel.json").catch(() => {}); });
+    await page.locator("#codeEditor").press("End");
+    await page.locator("#codeEditor").type(" ");
+    if (newer) {
+      await page.click("#recordBtn");
+      await expect.poll(() => statusText(page)).toContain("Recording");
+    }
+    retry.release();
+    await expect.poll(retry.served).toBe(1); // its manifest arrived
+    await page.waitForTimeout(1000);
+    expect(await page.evaluate(() => (window as unknown as { tidal: { isLoadingSamples(): boolean } }).tidal.isLoadingSamples())).toBe(true);
+    expect(await retry.evaluations()).toBe(1);
+    if (newer) expect(await statusText(page)).toContain("Recording");
+    else expect(await statusText(page)).toContain("the code changed since");
+    if (newer) await page.click("#recordBtn");
+  });
+}
+
 test("standalone one-shots play fully, stay independent of the loops, and Stop ends them", async ({ page }) => {
   await page.goto("/");
   await setCode(page, 'once(sound("bd sn hh cp").slow(4))');
